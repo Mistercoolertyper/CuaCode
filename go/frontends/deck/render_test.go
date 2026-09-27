@@ -478,6 +478,81 @@ func TestFormatting(t *testing.T) {
 	}
 }
 
+// TestTables checks the shapes a table has to hold: the pipes become columns,
+// the header keeps the rule that makes it a header, alignment comes off the rule
+// row, the cells keep their inline formatting, and one that cannot be drawn as a
+// grid falls back to its own lines rather than overflowing.
+func TestTables(t *testing.T) {
+	md := "| file | lines | note |\n" +
+		"| --- | ---: | --- |\n" +
+		"| `text.go` | 279 | tables land here |\n" +
+		"| `feed.go` | 1090 | and here |\n"
+
+	for _, w := range []int{16, 24, 40, 78} {
+		lines := formatProse(md, w)
+		var frame []string
+		for _, line := range lines {
+			if got := spanWidth(line); got > w {
+				t.Errorf("w=%d: line of %d cells: %q", w, got, plainSpans(line))
+			}
+			frame = append(frame, plainSpans(line))
+		}
+		joined := strings.Join(frame, "\n")
+		for _, marker := range []string{"|", "---"} {
+			if strings.Contains(joined, marker) {
+				t.Errorf("w=%d: %q survived into the table:\n%s", w, marker, joined)
+			}
+		}
+		if !strings.Contains(joined, "\u2500") {
+			t.Errorf("w=%d: no rule under the header:\n%s", w, joined)
+		}
+	}
+
+	// Alignment: the right-aligned column closes its row, so the header and the
+	// numbers under it end in the same cell.
+	lines := formatProse("| name | n |\n| --- | ---: |\n| deck | 4958 |", 40)
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines for a 3-line table", len(lines))
+	}
+	if head, row := plainSpans(lines[0]), plainSpans(lines[2]); len(head) != len(row) {
+		t.Errorf("right-aligned column jitters: %q vs %q", head, row)
+	}
+	if got := plainSpans(lines[0]); !strings.HasSuffix(got, "n") {
+		t.Errorf("header not right-aligned: %q", got)
+	}
+
+	// A pipe in a sentence is a pipe, and a table inside a fence is code.
+	if got := plainSpans(formatProse("run `a | b` first\n", 40)[0]); got != "run a | b first" {
+		t.Errorf("prose carrying a pipe was rewritten: %q", got)
+	}
+	fenced := formatProse("```\n| a | b |\n| --- | --- |\n```", 40)
+	if len(fenced) != 2 || !strings.Contains(plainSpans(fenced[0]), "|") {
+		t.Errorf("a table in a fence was drawn as a table: %q", fenced)
+	}
+
+	// Too narrow for columns: the model's own lines, still inside the width.
+	for _, line := range formatProse(md, 12) {
+		if got := spanWidth(line); got > 12 {
+			t.Errorf("narrow table of %d cells: %q", got, plainSpans(line))
+		}
+	}
+
+	// The frame path: it reaches the feed as a table and the frame still holds
+	// its right edge.
+	m := play(t, 80, 24)
+	m.push(&block{kind: kProse, text: md})
+	m.rebuild()
+	frame := m.render()
+	if !strings.Contains(plainOf(frame), "\u2500") {
+		t.Errorf("no table in the frame:\n%s", plainOf(frame))
+	}
+	for _, row := range strings.Split(frame, "\n") {
+		if got := vw(row); got > m.width {
+			t.Errorf("frame row of %d cells: %q", got, plainOf(row))
+		}
+	}
+}
+
 // TestShimmer checks the two things that make an animation look smooth rather
 // than laggy: it is driven by the clock, so it advances by the same amount for
 // the same elapsed time however often it is sampled, and it never has a phase
