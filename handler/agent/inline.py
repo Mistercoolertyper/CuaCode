@@ -30,6 +30,7 @@ COMMANDS = (
     ("compact",  "fold the conversation now, or set the limit it folds at", True),
     ("context",  "how much of the window the conversation fills", False),
     ("usage",    "what this and every other session has cost", False),
+    ("version",  "which build of cuacode this worker is running", False),
 )
 
 # The old spelling, kept working and kept out of the menu. A command someone has

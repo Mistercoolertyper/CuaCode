@@ -9,6 +9,8 @@
 //!   cuacode                     open it
 //!   cuacode --home <dir>        read a different state root
 //!   cuacode --fold <name>       open with a project folded
+//!   cuacode doctor              the build, the tree, and whether origin moved
+//!   cuacode doctor --upgrade    pull and rebuild to answer that
 //! ```
 //!
 //! What it reads, and the whole of what it reads: `~/.cuacode/projects.json` and
@@ -35,6 +37,7 @@ use gpui_kit::*;
 use gpui_kit::component::WindowExt as _;
 
 mod agent;
+mod doctor;
 mod md;
 mod motion;
 mod state;
@@ -73,6 +76,12 @@ fn main() {
 /// call must still be the entry point of the **bin** target.
 fn real_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `doctor` prints and leaves: no window, no worker, and nothing written to
+    // the state root. It is what both frontends point at when they have news
+    // about an update, so it has to work with the window being the problem.
+    if args.first().map(String::as_str) == Some("doctor") {
+        std::process::exit(doctor::run(&args[1..]));
+    }
     // The worker's own main.py, which is the parent of the tree this binary was
     // built from. `CUACODE_WORKER` wins when it is set, which is what `run.sh`
     // pins, so a dev launch and a bundle agree.
@@ -709,6 +718,13 @@ pub struct App {
     /// it. The alternative - a second input box in a popover - is a form for a
     /// one-word answer.
     renaming: Option<String>,
+    /// Whether origin has moved past this build, asked once and applied by the
+    /// tick. A fetch is a network round trip; the window paints thirty times a
+    /// second and never waits for one. Asked at boot only: an update does not
+    /// arrive twice an hour, and a window left open all day is the same code
+    /// either way.
+    news: Option<cuacode::version::News>,
+    news_in_flight: (Sender<cuacode::version::News>, Receiver<cuacode::version::News>),
 }
 
 impl App {
@@ -808,9 +824,12 @@ impl App {
             agent,
             unseen: std::collections::HashSet::new(),
             renaming: None,
+            news: None,
+            news_in_flight: std::sync::mpsc::channel(),
             _tick: Task::ready(()),
         };
         app.fetch_catalog(&app.provider.clone());
+        app.ask_updates();
         // The window's four settings are the worker's, and the worker starts with
         // the config's. Told once here so a turn sent before a chip is moved still
         // runs on what the chips are showing; a chip moved later tells it again.
@@ -863,6 +882,7 @@ impl App {
                         app.ask_git();
                         let git_moved = app.apply_git();
                         let catalog_moved = app.drain_catalogs();
+                        let news_moved = app.apply_news();
                         // The model menu's rows are the catalog, so when it lands
                         // the open list is rebuilt once.
                         if catalog_moved {
@@ -1020,6 +1040,7 @@ impl App {
                         if moved
                             || git_moved
                             || catalog_moved
+                            || news_moved
                             || worker_moved
                             || followed
                             || blending
@@ -2401,6 +2422,29 @@ impl App {
         moved
     }
 
+    /// Ask, once, whether origin has moved past this build.
+    ///
+    /// On its own thread for the same reason `git` is: a fetch is a network round
+    /// trip measured in hundreds of milliseconds, and this is the thread that draws.
+    fn ask_updates(&mut self) {
+        let tx = self.news_in_flight.0.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(cuacode::version::check());
+        });
+    }
+
+    /// Take the answer if it has landed. Returns whether the window changed, which
+    /// is what makes the tick repaint: the chip is a fact that arrives once, not a
+    /// state that is polled.
+    fn apply_news(&mut self) -> bool {
+        let Ok(news) = self.news_in_flight.1.try_recv() else {
+            return false;
+        };
+        let moved = self.news.as_ref() != Some(&news);
+        self.news = Some(news);
+        moved
+    }
+
     /// The directory the selected session stands in, which is what git is asked
     /// about: the project it belongs to, then the session's own `cwd`.
     fn selected_dir(&self) -> Option<PathBuf> {
@@ -3238,6 +3282,9 @@ impl Render for App {
                             }),
                         );
                         view::topbar(&state::short_path(&self.ws.home), toggle.into_any_element())
+                            .child(view::version_chip(
+                                self.news.as_ref().and_then(|n| n.behind()),
+                            ))
                     })
                     .child(
                         h_flex()

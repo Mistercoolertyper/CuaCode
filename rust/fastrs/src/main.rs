@@ -16,6 +16,11 @@
 //!                                instead (--continue and -r are the same flag)
 //!   fastrs --fixture f.jsonl     replay a recorded stream, no worker at all
 //!   fastrs --print --fixture f   fold a stream and print it, no terminal
+//!   fastrs --version             the build id alone: <commits>.<short sha>
+//!
+//! The header carries that id, and one line under it in yellow when the remote
+//! has commits this tree does not. `cuacode doctor` is where the whole answer
+//! lives, including the upgrade.
 //!
 //! The terminal's own background is set to the design's page, so the screen is
 //! the design's colour rather than whatever the profile happens to use.
@@ -26,6 +31,7 @@ mod view;
 use std::collections::HashMap;
 use std::io::{self, Read};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -47,6 +53,7 @@ use ratatui::{Frame, Terminal};
 use cuacode::attach;
 use cuacode::session::{self, Session, Snapshot};
 use cuacode::transcript::{Row, Transcript};
+use cuacode::version;
 use cuacode::wire::{self, Event, State};
 
 use menu::{Item, Kind, Menu};
@@ -99,6 +106,13 @@ enum Start {
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // The build stamp, and nothing else: a flag that answers instantly is worth
+    // more in a bug report than one that waits on a network to say the same
+    // thing the header would. `cuacode doctor` is where the update is asked for.
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("fastrs {}", version::ID);
+        return Ok(());
+    }
     let fixture = flag(&args, "--fixture");
     let home = flag(&args, "--home").map(PathBuf::from);
     let start = start_of(&args);
@@ -473,6 +487,15 @@ struct App {
     /// after it arrives, so the eye is caught by the row rather than by a bell.
     /// Nothing after the sweep, which is what keeps a still screen still.
     peer_at: Option<Instant>,
+    /// Whether origin has moved past this tree, once the check that runs beside
+    /// the screen has answered. Nothing is drawn from a question still in
+    /// flight, and a check that could not be made draws nothing at all: a screen
+    /// with one line for news says the news or says nothing.
+    news: Option<version::News>,
+    /// The answer's door. A fetch is a network round trip and the frame is
+    /// thirty a second, so `App::live` asks on a thread that outlives the frame
+    /// and the loop collects it here.
+    news_rx: Option<Receiver<version::News>>,
 }
 
 impl App {
@@ -482,6 +505,14 @@ impl App {
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         let mut app = App::new(Some(sess));
         app.opening = opening;
+        // Asked now, answered whenever origin gets round to it. A live screen is
+        // the only one that asks: a replay and a `--print` have no tree to keep
+        // current and no reader waiting on an update.
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(version::check());
+        });
+        app.news_rx = Some(rx);
         match start {
             Start::Fresh => {}
             // Asked now, answered on the worker's own time: the question is up as
@@ -546,12 +577,22 @@ impl App {
             born: Instant::now(),
             opening: None,
             peer_at: None,
+            news: None,
+            news_rx: None,
         }
     }
 
     /// Take whatever the worker has said since the last look, and keep the turn's
     /// stopwatch in step with it.
     fn pump(&mut self) {
+        // An answer that has landed, taken before anything else so a screen with
+        // no worker - never mind why - still hears it.
+        if let Some(rx) = &self.news_rx {
+            if let Ok(news) = rx.try_recv() {
+                self.news = Some(news);
+                self.news_rx = None;
+            }
+        }
         let events = match &mut self.sess {
             Some(sess) => sess.drain(),
             None => return,
@@ -781,7 +822,7 @@ impl App {
         let mut out = vec![Line::from(vec![
             Span::styled(" Cuacode-RS", Style::new().fg(ink::text()).add_modifier(Modifier::BOLD)),
             Span::raw("  "),
-            Span::styled(concat!("v", env!("CARGO_PKG_VERSION")), Style::new().fg(ink::dim())),
+            Span::styled(format!("v{}", version::ID), Style::new().fg(ink::dim())),
         ])];
         // A replay has no worker and so no model to name; saying that beats an
         // empty line where the model should be.
@@ -793,6 +834,22 @@ impl App {
             if !line.is_empty() {
                 out.push(Line::from(Span::styled(format!(" {line}"), Style::new().fg(ink::dim()))));
             }
+        }
+        // The one thing this screen says on its own account, and only when origin
+        // has a commit the tree does not. Yellow, since it is neither a failure
+        // nor a finished thing, with the two commands that answer it beside it in
+        // the quiet tone so the fact is what is read first.
+        if let Some(n) = self.news.as_ref().and_then(|n| n.behind()) {
+            out.push(Line::from(vec![
+                Span::styled(
+                    format!(" you are behind {n} {}", if n == 1 { "update" } else { "updates" }),
+                    Style::new().fg(ink::warn()),
+                ),
+                Span::styled(
+                    "  \u{b7}  cuacode doctor, or cuacode doctor --upgrade",
+                    Style::new().fg(ink::dim()),
+                ),
+            ]));
         }
         out
     }
@@ -2792,6 +2849,38 @@ mod tests {
         // The answer's own name has the question's in it, so the two must not be
         // the same string: a prefix match on the raise would fire on the lower.
         assert_ne!(needs_you(), answered());
+    }
+
+    /// The build id and the update notice have to reach the row a person reads,
+    /// not just the struct: the header is the only place this screen says which
+    /// code it is, and the only thing it says on its own account.
+    #[test]
+    fn the_header_names_the_build_and_the_update() {
+        fn header(app: &App) -> String {
+            app.header()
+                .iter()
+                .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+                .collect()
+        }
+        let mut app = App::new(None);
+        let quiet = header(&app);
+        assert!(quiet.contains(version::ID), "header was {quiet:?}");
+        assert!(!quiet.contains("behind"), "no news is no line: {quiet:?}");
+
+        // One update is a word, three are a number with an s on it: a screen that
+        // says "1 updates" is the tell that nobody read it.
+        app.news = Some(version::News::Behind(1));
+        let one = header(&app);
+        assert!(one.contains("behind 1 update"), "header was {one:?}");
+        assert!(!one.contains("1 updates"), "header was {one:?}");
+        app.news = Some(version::News::Behind(3));
+        let loud = header(&app);
+        assert!(loud.contains("you are behind 3 updates"), "header was {loud:?}");
+        assert!(loud.contains("cuacode doctor --upgrade"), "header was {loud:?}");
+
+        // A check that could not be made says nothing rather than guessing.
+        app.news = Some(version::News::Unknown("no network".into()));
+        assert!(!header(&app).contains("behind"));
     }
 
     /// The mark goes up where the question does and comes down on every way out

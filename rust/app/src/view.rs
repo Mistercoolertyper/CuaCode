@@ -800,6 +800,32 @@ pub fn topbar(subtitle: &str, toggle: AnyElement) -> Div {
         )
 }
 
+/// The build stamp at the right end of the top bar: which code this is, and when
+/// origin has moved past it, how far behind.
+///
+/// The only thing this window says about itself rather than about the work, so it
+/// sits at the far end in the faintest tone the palette has - except when there is
+/// an update, which is a thing to act on, and is drawn in the amber rung with the
+/// command that acts on it. Silent about a check that could not be made: a warning
+/// nobody can do anything about is the banner this window does not have.
+pub fn version_chip(behind: Option<usize>) -> Div {
+    let (words, tone) = match behind {
+        Some(n) => (
+            format!(
+                "behind {n} {} \u{b7} cuacode doctor --upgrade",
+                if n == 1 { "update" } else { "updates" }
+            ),
+            theme::warning(),
+        ),
+        None => (format!("v{}", cuacode::version::ID), theme::faint()),
+    };
+    div()
+        .flex_shrink_0()
+        .text_size(px(theme::SMALL))
+        .text_color(tone)
+        .child(words)
+}
+
 /// The bar's left button, which is the one control on it.
 ///
 /// A builder of its own because the strip around it is **not** a button: wrapping

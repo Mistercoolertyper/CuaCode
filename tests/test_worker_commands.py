@@ -138,6 +138,9 @@ try:
         # The alias has to keep working for anyone with it in their fingers.
         ("/compress", "compact"),
         ("/compress 400k", "compact"),
+        # Which build this worker is, off the same git the frontends stamp
+        # themselves from: it answers from the tree, not from a manifest.
+        ("/version", "version"),
     ]:
         w.chat(cmd)
         said, _ = w.notice(expect)

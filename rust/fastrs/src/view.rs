@@ -111,6 +111,12 @@ pub mod ink {
     pub fn link() -> Color {
         Color::Rgb(0x61, 0xaf, 0xef)
     }
+    /// Something to act on rather than something broken: a build origin has moved
+    /// past, which is neither a failure nor a state to ignore. ember `warning`
+    /// (#e5c07b), the same rung the window uses for its blocked state.
+    pub fn warn() -> Color {
+        Color::Rgb(0xe5, 0xc0, 0x7b)
+    }
     /// A call to another agent, or a message from one. Green is a tool that
     /// finished and red is one that failed; neither is true here, and a red mark
     /// beside a working peer would read as something broken. Nothing in the palette

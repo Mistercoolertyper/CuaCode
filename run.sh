@@ -2,7 +2,8 @@
 # Run one frontend straight from source.
 #   ./run.sh            list frontends
 #   ./run.sh fastrs     run the terminal frontend
-#   ./run.sh fastrs     run the rust crate's fastrs, building it if it is stale
+#   ./run.sh cuacode    run the GUI, building it if it is stale
+#   ./run.sh doctor     what this build is, and whether origin moved
 set -euo pipefail
 
 launch_dir="$PWD"      # where you ran this from, before either cd below
@@ -51,6 +52,7 @@ if [ $# -eq 0 ]; then
     echo "       ./run.sh --usage [--days N] [--json]"
     echo "frontends:"
     rust_frontends | awk -F: '{ printf "  %s  (%s)\n", $2, $1 }'
+    echo "  doctor  (rust/app)   the build, the tree, and how far behind origin it is"
 
     exit 1
 fi
@@ -84,6 +86,20 @@ export CUACODE_WORKER="${CUACODE_WORKER:-$PWD/main.py}"
 # A frontend exec'd from the tree would report the tree as the agent's cwd on
 # every dev launch. Report the directory you were actually standing in instead.
 export CUACODE_CWD="${CUACODE_CWD:-$launch_dir}"
+
+# Also not a frontend: `doctor` prints what this tree is and exits, so it never
+# starts a session to answer. It lives in the app crate's binary because that is
+# the one built from every part of the tree and shipped as one thing, so the
+# binary is built on demand the way a frontend is and then asked its question.
+# `cuacode doctor --upgrade` is the same command acting on the answer.
+if [ "$name" = "doctor" ]; then
+    crate="$(rust_bin_dir cuacode)"
+    bin="rust/target/release/cuacode"
+    if [ ! -x "$bin" ] || [ -n "$(find "$crate/src" "$crate/Cargo.toml" -newer "$bin" -print -quit)" ]; then
+        (cd "$crate" && cargo build --release --bin cuacode) >&2
+    fi
+    exec "$bin" doctor "$@"
+fi
 
 crate="$(rust_bin_dir "$name")"
 if [ -n "$crate" ]; then

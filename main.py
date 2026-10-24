@@ -7,7 +7,7 @@ from handler.agent import compact, inline, providers
 from handler.agent.background import JOBS
 from handler.session import store
 from handler.session.main import Session
-from handler import config, context, environment, peers, usage
+from handler import config, context, environment, peers, usage, version
 from integrations.memory import loader as memory, naming, recall
 from integrations.instructions import loader as instructions
 from integrations.skills import loader as skills
@@ -471,6 +471,11 @@ def _run_inline(name, arg) -> str:
         share = f" \u00b7 {round(cached * 100 / tot['in'])}% cached" if cached and tot.get("in") else ""
         return (f"usage: {t.get('sessions', 0)} sessions \u00b7 {tot.get('rounds', 0)} rounds \u00b7 "
                 f"{tot.get('in', 0)} in / {tot.get('out', 0)} out tokens{share}")
+    if name == "version":
+        # The build the worker is running out of, which is not always the one a
+        # frontend was built from: both read the same tree, and only one of them
+        # is rebuilt when the other's source moves.
+        return f"version {version.stamp()} \u00b7 `cuacode doctor` compares it with origin"
     return None
 
 

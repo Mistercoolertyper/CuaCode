@@ -142,6 +142,36 @@ Thinking effort is per conversation, not per account: `off`, `low`, `medium`,
 own dialect for it - `reasoning_effort`, thinking budgets - is
 translated from that one ladder.
 
+## Version and updates
+
+There is no version number to bump. A build's id is the tree it came from:
+`<commits>.<short sha>`, stamped by `rust/build.rs` and computed the same way by
+the worker (`handler/version.py`). `fastrs` puts it in its header, the GUI puts
+it at the right end of the top bar, and `fastrs --version` prints it alone.
+
+Both frontends ask the remote once at startup, on a thread, whether the tree has
+moved past them. When it has, fastrs adds a yellow line under its header - `you
+are behind 3 updates` - and the GUI's chip turns amber, both naming the command
+that does something about it:
+
+```bash
+cuacode doctor              # the build, the tree, the branch, and how far behind
+cuacode doctor --upgrade    # git pull --ff-only, then ./build.sh; restart after
+```
+
+`/version` typed in a conversation answers with the worker's own stamp, which is
+not always the frontend's: both read the tree, and only one of them is rebuilt
+when the other's source moves.
+
+This works in a checkout you made yourself, not only in the one it was written
+in. The comparison is against the remote's **default branch** and the first
+remote by any name (`origin` preferred), so a fork on a feature branch, a tag
+checked out, a detached head and a plain clone all get the same answer. The
+common case costs one `ls-remote`: no objects, no fetch, no refs written, and
+nothing at all on the frame path - a fetch is only paid for when there is a
+number to count. Build it from a tarball with no `.git` and it still builds: the
+id falls back to `unknown` and the update line stays silent instead of guessing.
+
 ## Layout
 
 The Python agent is the worker; the Rust side is one or more interchangeable
