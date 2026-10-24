@@ -1,0 +1,65 @@
+[package]
+name = "cuacode-app"
+version = "0.1.0"
+edition = "2024"
+
+# The app: one window, a rail of projects with the sessions standing in each,
+# the conversation, and a composer that starts the next one. It reads the
+# worker's own state files directly for the rail, so the rail draws even when no
+# worker is up; and it links the shared half for the one thing a file cannot do,
+# which is run a turn. A window that cannot draw its rail without a worker up is
+# a window that is blank when the worker is broken, so the two are separate on
+# purpose.
+[[bin]]
+name = "cuacode"
+path = "src/main.rs"
+
+# The same source as a library, so the headless render harness (`tests/shot.rs`) can
+# reach `App` and build the real window off-screen. The two targets share one path on
+# purpose: this crate is one file of app plus its modules, and splitting them would be
+# a second place to keep in step for no gain.
+[lib]
+name = "cuacode_app"
+path = "src/main.rs"
+
+[features]
+# Nothing yet. The headless render harness is a `harness = false` integration test,
+# because it has to run on the main thread and only a test build gets GPUI's headless
+# context; see `tests/shot.rs`.
+shot = []
+
+[[test]]
+# `harness = false` because GPUI's macOS platform asserts it is built on the main
+# thread, and libtest runs a `#[test]` on a thread it spawned. This test brings its own
+# `main` instead.
+name = "shot"
+path = "tests/shot.rs"
+harness = false
+
+[dependencies]
+# One dependency for GPUI and the component library, which pins the matching
+# gpui-pre release and re-exports all of it.
+gpui-kit = "0.7.0"
+# The shared half: the wire, the worker process, one conversation's state, and
+# the events folded into rows.
+cuacode = { path = "..", package = "cuacode-rs" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Only to correct the window's blur material from the app rather than forking gpui-pre
+# for one line: see src/glass.rs. Both are already in the build tree underneath gpui, so
+# this adds no build time.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSWindow",
+    "NSView",
+    "NSVisualEffectView",
+] }
+
+[dev-dependencies]
+# The headless render harness reads GPUI's `RgbaImage` back and writes it as a PNG.
+# Both are dev-only: the shipped binary does not link either.
+gpui-kit = { version = "0.7.0", features = ["test-support"] }
+png = "0.17"
