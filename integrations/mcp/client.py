@@ -1,28 +1,8 @@
 """A Model Context Protocol client: JSON-RPC 2.0, both eras of the protocol.
 
-Small on purpose. MCP's stdio transport is newline-delimited JSON in both
-directions, and neither era's opening is more than a request or two. That is
-little enough to own outright rather than take a dependency for, and owning it
-keeps CuaCode installable with the requirements.txt it already has.
-
-Two eras, because the protocol split at revision 2026-07-28. The **legacy**
-era (2025-11-25 and earlier) opens with an `initialize` handshake and then
-treats the connection as a session -- on HTTP, one the server names with an
-`Mcp-Session-Id` header. The **modern** era is stateless: no handshake, no
-session header, and every request carries its own protocol version, client
-identity and capabilities in `_meta`. State that has to outlive a call is a
-handle the server mints and the caller passes back as an ordinary argument.
-
-A connection picks its era once, at startup, by probing with `server/discover`
-and falling back to `initialize` on anything that is not a recognised modern
-answer -- the procedure the spec prescribes. So a server written years apart
-from its neighbour still works with no note in its config. `"protocol"` in a
-server's config forces the choice when the probe is unwelcome or too slow.
-
-Connections are kept, not made per call. Starting a server costs an interpreter
-launch, and a model that reads the current track twice in a conversation should
-pay for that once. `pool()` hands back a live connection or starts one, and
-everything is torn down at exit.
+Stdio is newline-delimited JSON both ways. Legacy servers (2025-11-25 and earlier) open with an `initialize` handshake and then a session, named on HTTP by a server `Mcp-Session-Id` header; modern servers are stateless, every request carrying its own protocol version, client identity and capabilities in `_meta`.
+The era is picked once at startup, probing `server/discover` and falling back to `initialize` on anything not a recognised modern answer, with `"protocol"` in the config forcing the choice.
+Connections are kept rather than made per call, since starting a server costs an interpreter launch: `pool()` returns a live one or starts it, and exit tears everything down.
 """
 from __future__ import annotations
 
@@ -47,9 +27,8 @@ LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 CLIENT_INFO = {"name": "cuacode", "version": "1.0.0"}
 
 META = "io.modelcontextprotocol/"   # the reserved `_meta` key prefix
-# HeaderMismatch, MissingRequiredClientCapability, UnsupportedProtocolVersion.
-# Getting one of these back means the server is modern, whatever else went
-# wrong -- a legacy server has no way to produce them.
+# HeaderMismatch, MissingRequiredClientCapability, UnsupportedProtocolVersion,
+# which a legacy server cannot produce: one means the server is modern.
 MODERN_ERRORS = {-32020, -32021, -32022}
 
 START_TIMEOUT = 20          # interpreter launch + handshake
@@ -61,11 +40,8 @@ STDERR_KEEP = 40            # lines, kept only to explain a server that died
 class MCPError(RuntimeError):
     """Anything that stops a call: server missing, dead, slow, or protocol-level.
 
-    `code` and `data` are the JSON-RPC error's own when the server sent one,
-    and how the startup probe tells a modern server from a legacy one.
-    `status` is the HTTP status when there was one -- its presence is how the
-    probe tells "the server answered and said no" from "nothing answered yet".
-    """
+    `code` and `data` are the JSON-RPC error's own when the server sent one. `status` is the HTTP status: its presence is
+    how the probe tells "the server answered and said no" from "nothing answered yet"."""
 
     def __init__(self, message: str, code: int | None = None,
                  data: dict | None = None, status: int | None = None):
@@ -79,9 +55,8 @@ class _Legacy(Exception):
     """Internal: the probe decided this server predates the stateless era."""
 
 
-# HTTP request metadata (modern era): streamable HTTP mirrors selected body
-# fields into headers so a router need not parse the body; a mismatch is
-# rejected, so everything below keeps the mirror exact.
+# HTTP request metadata (modern era): a router need not parse the body, and a
+# mismatch is rejected, so everything below keeps the mirror exact.
 
 _TCHAR = re.compile(r"^[-!#$%&'*+.^_`|~0-9A-Za-z]+$")   # RFC 9110 field-name token
 _SENTINEL = re.compile(r"^=\?base64\?.*\?=$", re.S)
@@ -118,8 +93,8 @@ def _mcp_name(method: str, params: dict) -> str | None:
 
 
 def _annotated(schema: dict, path: tuple, out: list):
-    """Every `x-mcp-header` reachable from the schema root through `properties`
-    alone -- the only place the spec allows one."""
+    """Every `x-mcp-header` reachable from the schema root through `properties`,
+    the only place the spec allows one."""
     props = schema.get("properties")
     if not isinstance(props, dict):
         return
@@ -132,9 +107,8 @@ def _annotated(schema: dict, path: tuple, out: list):
 
 
 def _anywhere(node, out: list, is_schema: bool = True):
-    """Every `x-mcp-header` in the schema at all, reachable or not. An
-    annotation the client cannot reach statically invalidates the tool, so the
-    two walks have to be compared rather than just the first one trusted."""
+    """Every `x-mcp-header` in the schema at all, reachable or not: an unreachable
+    one invalidates the tool, so the two walks are compared, not the first trusted."""
     if isinstance(node, dict):
         if is_schema and "x-mcp-header" in node:
             out.append(id(node))
@@ -220,9 +194,8 @@ class Connection:
         command = self.config.get("command")
         if not command:
             raise MCPError(f"{self.name}: no command in its config")
-        # `python3` in a config file is whatever the shell would find, which on
-        # a Mac with several installs is a coin toss. The interpreter already
-        # running CuaCode is one we know exists.
+        # `python3` in a config is whatever the shell would find, a coin toss with
+        # several installs; the running interpreter is one we know exists.
         if command in ("python", "python3"):
             command = sys.executable
         args = [os.path.expanduser(str(a)) for a in (self.config.get("args") or [])]
@@ -256,11 +229,8 @@ class Connection:
     def _handshake(self):
         """Which era this server speaks, decided once and kept for its lifetime.
 
-        `protocol` in the config forces the answer, either by era or by naming
-        a revision: `legacy` to skip a probe a server will never answer, and
-        `modern` to refuse the fallback rather than quietly speak an old
-        protocol to a server that was meant to have stopped offering one.
-        """
+        `protocol` in the config forces it, by era or by revision: `legacy` skips a probe the server will
+        never answer, and `modern` refuses the fallback rather than quietly speaking an old protocol to it."""
         want = str(self.config.get("protocol") or "auto").lower()
         version = MODERN
         if want in MODERN_VERSIONS:
@@ -280,11 +250,8 @@ class Connection:
             self._legacy_handshake()
 
     def _discover(self, version: str, tried: set):
-        """The modern opening: ask what the server speaks, and speak it.
-
-        Anything that is not a DiscoverResult or a recognised modern error means
-        this is a server from before the stateless era, which is `_Legacy`.
-        """
+        """The modern opening: ask what the server speaks, and speak it. Anything
+        but a DiscoverResult or a recognised modern error makes it `_Legacy`."""
         tried.add(version)
         deadline = time.time() + START_TIMEOUT
         while True:
@@ -297,9 +264,8 @@ class Connection:
             except MCPError as exc:
                 if exc.code in MODERN_ERRORS:
                     return self._unsupported(exc, version, tried)
-                # No answer at all from an HTTP endpoint is a server still
-                # coming up, not a verdict. Anything the server actually said
-                # is a verdict, and it says legacy.
+                # No answer at all from an HTTP endpoint is a server still coming
+                # up, not a verdict; anything the server said says legacy.
                 if (self.transport == "http" and exc.status is None
                         and exc.code is None and time.time() < deadline):
                     time.sleep(0.2)
@@ -336,9 +302,8 @@ class Connection:
                        f"{', '.join(supported) or 'nothing this client speaks'}")
 
     def _legacy_handshake(self):
-        """The opening every revision through 2025-11-25 used: one `initialize`,
-        one `notifications/initialized`, and a session for the rest of the
-        connection's life."""
+        """The legacy opening: one `initialize`, one `notifications/initialized`,
+        then a session for the rest of the connection's life."""
         if self.transport == "http":
             deadline = time.time() + START_TIMEOUT
             while True:
@@ -407,10 +372,8 @@ class Connection:
                     continue
                 mid = message.get("id")
                 if message.get("method") and mid is not None:
-                    # A server asking us for something -- sampling, roots. We
-                    # advertised no capabilities, so the honest reply is a
-                    # refusal rather than a silence it waits on. A modern server
-                    # never does this: it asks inside a result instead.
+                    # The server asking us for something (sampling, roots), which
+                    # modern servers do inside a result. Refuse: no capabilities.
                     self._send({"jsonrpc": "2.0", "id": mid,
                                 "error": {"code": -32601, "message": "client has no such capability"}})
                     continue
@@ -468,8 +431,7 @@ class Connection:
 
     def _with_meta(self, params: dict, version: str) -> dict:
         """The per-request protocol fields a stateless server has instead of a
-        handshake. Required on every request; a server that does not get them
-        rejects the request as malformed."""
+        handshake. Required on every request: one without them is malformed."""
         meta = dict(params.get("_meta") or {})
         meta.setdefault(f"{META}protocolVersion", version)
         meta.setdefault(f"{META}clientInfo", CLIENT_INFO)
@@ -493,10 +455,8 @@ class Connection:
     def _read_sse(self, resp, want_id: int, method: str) -> dict:
         """An SSE response stream, read down to the response for this request.
 
-        A modern server may answer any request this way, sending progress and
-        log notifications first. Everything that is not the answer is dropped:
-        nothing here subscribes to anything.
-        """
+        A modern server may answer any request this way, sending progress and log notifications first;
+        everything that is not the answer is dropped."""
         answer = None
         data: list[str] = []
 
@@ -589,11 +549,8 @@ class Connection:
     def _http_error(self, exc: urllib.error.HTTPError) -> MCPError:
         """An HTTP failure, with the JSON-RPC error inside it when there is one.
 
-        Reading the body matters: a modern server answers an unsupported
-        version, a missing capability or a header mismatch with 400 and a
-        JSON-RPC error, and telling that apart from a legacy server's 400 is
-        the whole of the HTTP era probe.
-        """
+        A modern server answers an unsupported version, a missing capability or a header mismatch with 400
+        and a JSON-RPC error; telling that from a legacy 400 is the probe."""
         try:
             raw = exc.read()
         except Exception:                                       # noqa: BLE001
@@ -664,14 +621,13 @@ class Connection:
         self._tools = self._mirrors(tools)
         self._tools_at = time.time()
         # ttlMs is the server's own freshness hint. Without one the list is kept
-        # for the life of the connection, which is what this client always did.
+        # for the life of the connection.
         self._tools_ttl = ttl / 1000.0 if isinstance(ttl, (int, float)) and ttl > 0 else None
         return self._tools
 
     def _mirrors(self, tools: list) -> list:
-        """Work out each tool's `x-mcp-header` mirrors, and drop the tools whose
-        annotations break the rules -- a malformed one must not take the rest of
-        the server's tools down with it, and must not be called either."""
+        """Each tool's `x-mcp-header` mirrors, dropping any whose annotations break
+        the rules: one bad schema must not take the others down or be called wrongly."""
         self._headers = {}
         if self.era != "modern" or self.transport != "http":
             return tools
@@ -726,10 +682,8 @@ class Connection:
 def _flatten(result: dict) -> dict:
     """MCP's content blocks, turned into something a tool result can hold.
 
-    A server returns a list of typed blocks; almost always one block of text,
-    and for these servers that text is JSON. Parsing it here means the model
-    gets an object instead of a string containing an object.
-    """
+    The text block holds JSON, and parsing it here gives the model an object instead of a string holding
+    one."""
     blocks = result.get("content") or []
     texts = [b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"]
     other = [b.get("type") for b in blocks if isinstance(b, dict) and b.get("type") != "text"]
@@ -750,20 +704,16 @@ def _flatten(result: dict) -> dict:
     return out
 
 
-# --------------------------------------------------------------------------
-# Pool
-# --------------------------------------------------------------------------
+# ----------------------------------- Pool ---------------------------------
 
 _pool: dict[str, Connection] = {}
 _pool_lock = threading.Lock()
 
 
 def pool(name: str, config: dict) -> Connection:
-    """The live connection for this server, started if it is not up yet.
-
-    A server whose config changed since it was started is replaced rather than
-    reused -- the old process is running the old command.
-    """
+    """The live connection for this server, started if it is not up yet. One whose
+    config changed is replaced rather than reused, being a process running the
+    old command."""
     with _pool_lock:
         conn = _pool.get(name)
         if conn and (not conn.alive() or conn.config != config):
@@ -801,11 +751,8 @@ def close_all():
             pass
 
 
-# Session scope. A ContextVar, not a connection field: parallel subagents each
-# get their own browser session (the runner sets a fresh scope per run), and the
-# top-level conversation leaves it None for the server's default. Legacy servers
-# route by the Mcp-Session-Id header; the stateless era mints a handle that the
-# same scope dict carries as an ordinary tool argument.
+# Session scope. A ContextVar, not a connection field: parallel subagents each get a browser session of their own,
+# the top-level conversation leaves None for the default, and the modern era mints a handle as an ordinary tool argument.
 
 _mcp_sessions: ContextVar[dict | None] = ContextVar("mcp_sessions", default=None)
 

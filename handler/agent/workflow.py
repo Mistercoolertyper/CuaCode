@@ -1,17 +1,15 @@
 """Workflows: orchestration that is code, not a model's discretion.
 
-An agent deciding to spawn four agents is a judgement call it makes again,
-differently, every time. A workflow is the same fan-out written down -- which
-agents run, in what order, what is done with their results -- so it runs the
-same way twice. That is the whole point of the layer.
+An agent deciding to spawn four agents makes that call again, differently, every
+time. A workflow writes the fan-out down -- which agents run, in what order,
+what is done with their results -- so it runs the same way twice.
 
-The scripts are plain Python modules, because the host is Python. There is no
-DSL to learn or sandbox to maintain: a workflow is a file with a run(args)
-function, and the orchestration verbs -- agent, parallel, pipeline, log -- are
-injected into its namespace before it executes. Anything you can do in Python
-you can do in a workflow, which also means a workflow you did not write runs
-with your privileges. They come from your own ~/.cuacode/workflows, and they
-should stay that way.
+The scripts are plain Python modules with a run(args) function, and the
+orchestration verbs -- agent, parallel, pipeline, log -- are injected into the
+namespace before it executes. Anything you can do in Python you can do in a
+workflow, which also means a workflow you did not write runs with your
+privileges. They come from your own ~/.cuacode/workflows, and they should stay
+that way.
 """
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -25,8 +23,8 @@ from handler.session import store
 _BUNDLED = Path(__file__).resolve().parents[2] / "integrations" / "workflows"
 
 # A runaway loop in a workflow spends real money, and the loop that does it is
-# usually a while() whose exit condition never became true. This is the
-# backstop, set far above any workflow anyone means to write.
+# usually a while() whose exit condition never became true. This is the backstop,
+# set far above any workflow anyone means to write.
 MAX_AGENTS = 60
 
 @dataclass
@@ -49,8 +47,8 @@ def _load(path: Path, env: dict) -> Workflow:
     """Execute the file with the orchestration verbs already in scope.
 
     Injected into globals rather than imported by the script, so a workflow is
-    the twelve lines that are actually about the work -- no import block, and
-    no way to import a differently-configured copy of the runner.
+    the twelve lines that are about the work: no import block, and no way to
+    import a differently-configured copy of the runner.
     """
     ns = {"__name__": f"workflow.{path.stem}", "__file__": str(path), **env}
     code = compile(path.read_text(), str(path), "exec")
@@ -78,10 +76,8 @@ def _env(ctx, log_to: list, counter: dict):
         """Run an agent by name (or an AgentSpec) and return its output alone.
 
         The output, not the wrapper: a workflow composing agents wants the dict
-        the agent produced, and a caller that has to unwrap {output, rounds,
-        stopped} at every step reads like plumbing. A failure returns None and
-        says so in the log, which keeps one dead agent from taking down a
-        fan-out that was mostly fine.
+        the agent produced. A failure returns None and says so in the log, which
+        keeps one dead agent from taking down a fan-out that was mostly fine.
         """
         with lock:
             counter["n"] += 1
@@ -101,10 +97,9 @@ def _env(ctx, log_to: list, counter: dict):
 def _meta(path: Path) -> tuple:
     """(name, description) read without running the file.
 
-    Listing what is installed happens on every turn, and executing a dozen
-    scripts to find out what they are called would run their module-level code
-    a dozen times an hour for nothing. The parse tree has both fields and no
-    side effects.
+    Listing happens on every turn, and executing a dozen scripts to find out what
+    they are called would run their module-level code a dozen times an hour for
+    nothing. The parse tree has both fields and no side effects.
     """
     import ast
     try: tree = ast.parse(path.read_text(), str(path))
@@ -143,9 +138,9 @@ def listing() -> list:
 def run(name: str, args=None, ctx=None) -> dict:
     """Run one workflow to completion. Returns {output, log, agents}.
 
-    Only the workflow being run is executed. The verbs it closes over carry
-    this run's ctx and agent counter, which is also why nothing here is cached
-    -- a reused function would still be logging into the previous run's list.
+    Only the workflow being run is executed. The verbs it closes over carry this
+    run's ctx and agent counter, which is also why nothing here is cached: a
+    reused function would still be logging into the previous run's list.
     """
     sink, counter = [], {"n": 0}
     env = _env(ctx, sink, counter)

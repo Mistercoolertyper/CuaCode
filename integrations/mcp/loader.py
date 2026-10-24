@@ -1,26 +1,7 @@
 """Which MCP servers exist on this machine.
 
-Same two places as subagents, workflows and skills: the ones here ship with the
-app, the ones in ~/.cuacode are yours, and a name collision goes to yours. Read
-every time rather than cached, so a server registered mid-conversation is
-usable in the next turn.
-
-The bundled file is deliberately empty. An MCP server is a local process with
-the user's privileges, and often -- as with Spotify -- one that only makes
-sense on one operating system or one person's machine. Nothing should be
-running by default because it happened to be in the repo.
-
-The config key is `mcpServers`, spelled the way Claude Desktop and Claude Code
-spell it, so a block can be pasted between them without translation:
-
-    {"mcpServers": {
-        "spotify": {
-            "command": "python3",
-            "args": ["/path/to/server.py"],
-            "description": "one line, shown to the model",
-            "platform": "darwin"
-        }
-    }}
+The bundled file here, the user's in ~/.cuacode, and a name collision goes to the user's. Read every time rather than cached, so a server registered mid-conversation is usable next turn. The bundled file is deliberately empty: an MCP server is a local process with the user's privileges, so nothing should be running by default just because it sat in the repo.
+The config key is `mcpServers`, spelled as Claude Desktop and Claude Code spell it, so a block pastes between them without translation.
 """
 from __future__ import annotations
 
@@ -55,8 +36,8 @@ def _read(path: Path) -> dict:
         return {}
     if not isinstance(data, dict):
         return {}
-    # Bare {name: {...}} is accepted too, so a hand-written file that skipped
-    # the wrapper still loads.
+    # Bare {name: {...}} is accepted too, so a hand-written file that skipped the
+    # wrapper still loads.
     servers = data.get("mcpServers", data)
     return {k: v for k, v in servers.items() if isinstance(v, dict)}
 

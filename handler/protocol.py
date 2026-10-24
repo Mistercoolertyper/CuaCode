@@ -23,27 +23,21 @@ class IPC:
         self._pending: dict[str, Callable[[Envelope], None]] = {}
         self.terminal_info: dict = {}
         self._cancel = threading.Event()
-        # Not a flag the main loop owns: it is handed straight to generate(),
-        # which clears it as it consumes it, so one press moves one call.
+        # Handed straight to generate(), which clears it as it consumes it:
+        # one press moves one call.
         self.background = threading.Event()
-        # Set when stdin hits EOF -- the frontend that owned the pipe is gone.
-        # The main loop checks it so a dead frontend cannot leave an orphan
-        # worker polling an empty inbox forever.
+        # Set when stdin hits EOF, meaning the frontend that owned the pipe is gone:
+        # the main loop checks it, so a dead frontend leaves no orphan worker.
         self._eof = threading.Event()
-        # True for exactly as long as a turn is running. It is what tells a
-        # chat envelope whether it is the next message or a mid-turn one, and
-        # nothing else reads it.
+        # True while a turn is running, which is what tells a chat envelope
+        # whether it is the next message or a mid-turn one.
         self._running = threading.Event()
-        # Messages typed while a turn was in flight, oldest first. Envelopes
-        # rather than strings: one that is never spoken into the round has to
-        # go back to the inbox intact and become an ordinary turn.
+        # Messages typed while a turn was in flight, oldest first. Envelopes,
+        # not strings: an unspoken one goes back to the inbox as a normal turn.
         self._steer: list[Envelope] = []
         self._steer_lock = threading.Lock()
-        # Commands answered on the reader thread instead of the main loop, by
-        # action. The loop is inside generate() for a whole turn, so anything
-        # queued for it is answered only once the turn ends -- fine for "switch
-        # provider", useless for "what did that call just return". A handler
-        # here must be read-only and quick: it runs while a run is in flight.
+        # Commands answered on the reader thread, by action, since the loop sits inside
+        # generate() for a whole turn: handlers must be read-only and quick.
         self.direct: dict[str, Callable[[Envelope], None]] = {}
         threading.Thread(target=self._read_loop, daemon=True).start()
 
@@ -54,76 +48,65 @@ class IPC:
             try:
                 env = Envelope.from_dict(json.loads(line))
                 
-                # important, sets terminal info directly from go instead of doing some really weird loops through python to get it, works much better.
-                if env.type == "terminal": self.terminal_info = env.data #; continue # only put if you dont want to recieve any terminal data into the main loop handler.
+                # Set on the reader thread, not through the main loop, so it is readable mid-run.
+                if env.type == "terminal": self.terminal_info = env.data
 
-                # Cancel is flagged here, on the reader thread, because the main
-                # loop is blocked inside generate() for the whole run and will
-                # not call poll() again until it finishes. The envelope is still
-                # queued below so the main loop can acknowledge it afterwards.
+                # Flagged on the reader thread: the main loop is blocked inside generate()
+                # for the whole run, and the envelope is still queued below for it.
                 action = (env.data or {}).get("action") if env.type == "cmd" else None
                 if action == "cancel": self._cancel.set()
-                # Same reasoning, same thread: the main loop is inside
-                # generate() for the whole run, so anything meant to reach a
-                # call already in flight has to be flagged from out here.
+                # Same reason: anything meant to reach a call already in flight
+                # has to be flagged from the reader thread.
                 elif action == "background": self.background.set()
-                # A message typed mid-turn. Deliberately not queued for the main
-                # loop (it would answer it as a second turn): the loop drains it
-                # between calls and speaks it into the live round, and end_run
-                # requeues whatever is still unspoken -- delayed at worst, never
-                # dropped.
+                # A message typed mid-turn, not queued for the main loop, which would
+                # answer it as a second turn; the loop drains it between calls.
                 elif action == "chat" and self._running.is_set():
                     with self._steer_lock: self._steer.append(env)
-                    # Shaped like chat_received and for the same purpose -- an
-                    # acknowledgement, not a state. A `state` field here would
-                    # be folded into the snapshot and move a frontend off
-                    # whatever the run is actually doing.
+                    # Shaped like chat_received: an acknowledgement, not a state, since a
+                    # `state` field would be folded into the snapshot and move a frontend.
                     self.send("status", {"type": "chat_queued"}, id_=env.id)
                     continue
 
-                # Answered here and not queued: the point of these is that they
-                # work mid-run. A handler that raises must not take the reader
-                # thread down with it -- that would strand every later envelope,
-                # cancel included.
+                # Answered here, not queued, since the point of these is to work mid-run.
+                # A raising handler must not strand every later envelope, cancel included.
                 if action and (fn := self.direct.get(action)):
                     try: fn(env)
                     except Exception as e: self.send("status", {"state": "error", "error": str(e)}, id_=env.id)
                     continue
 
-                # If someone is waiting for this id via call(), hand it to them.
-                # Otherwise queue it for normal polling.
                 cb = self._pending.pop(env.id, None)
                 if cb: cb(env)
                 else: self.inbox.put(env)
             except json.JSONDecodeError: pass
-        # stdin closed: the frontend that spawned us is gone (crashed, was
-        # killed, or force-quit without sending stop). Signal the main loop so
-        # it can shut down instead of running on as an orphan.
+        # stdin closed: the frontend that spawned us is gone. Signal the main
+        # loop so it shuts down instead of running on as an orphan.
         self._eof.set()
 
     def eof(self) -> bool:
-        """True once stdin has closed -- the frontend that spawned us is gone."""
+        """True once stdin has closed, meaning the frontend that spawned us is gone."""
         return self._eof.is_set()
 
+    @property
+    def running(self) -> bool:
+        """Whether a turn is in flight. Read by the main loop, which must not hand an
+        idle agent peer mail the round seam is already going to deliver."""
+        return self._running.is_set()
+
     def begin_run(self):
-        """Drop anything that arrived while idle, so it can't act on the next
+        """Drop anything that arrived while idle so it cannot act on the next
         run. A background press with nothing running was aimed at nothing."""
         self._cancel.clear()
         self.background.clear()
-        # Last, and only after the two clears: the flag is what makes the
-        # reader hold chat envelopes back, and holding one back before the run
-        # it belongs to has started would strand it for a whole turn.
+        self._eof.clear()
+        # Last, after the two clears: setting it earlier would hold back a chat
+        # envelope belonging to the run that has not started, stranding it a turn.
         self._running.set()
 
     def end_run(self):
         """Close the turn and hand back whatever was typed during it.
 
-        Anything the loop never got to -- a message that arrived after the last
-        tool call, or during a round that had none -- goes on the inbox now and
-        is answered as an ordinary next turn. This is the only path off the
-        steer list other than take_steer, which is what makes "queued" a delay
-        rather than a place messages go to die. Safe to call twice.
-        """
+        Anything the loop never got to goes on the inbox now, answered as an ordinary next turn: queued is a
+        delay, not a place messages die. Safe to call twice."""
         self._running.clear()
         with self._steer_lock: left, self._steer = self._steer, []
         for env in left: self.inbox.put(env)
@@ -131,15 +114,8 @@ class IPC:
     def take_steer(self) -> list[dict]:
         """Everything typed since the last drain, oldest first, and clear.
 
-        Handed to generate() as a callable so the loop can ask at the one place
-        a user message is legal for every provider -- straight after a round's
-        tool results -- rather than the loop being interrupted from outside.
-
-        Messages rather than strings, because a message typed mid-run can have
-        a picture attached to it like any other. A message with nothing but an
-        attachment on it is still a message: the emptiness test is on both
-        halves, not on the text.
-        """
+        Handed to generate() as a callable so the loop asks at the one place a user message is legal for every provider,
+        straight after a round's tool results. Messages, not strings: one with nothing but an attachment is still a message."""
         with self._steer_lock: got, self._steer = self._steer, []
         out = []
         for e in got:
@@ -150,16 +126,28 @@ class IPC:
         return out
 
     def cancelled(self) -> bool:
-        """True once a cancel has arrived for the run in flight."""
-        return self._cancel.is_set()
+        """True once a cancel has arrived for the run in flight, or the frontend is gone.
+
+        EOF reads as a cancel on purpose: the reader thread sees a dead pipe at once, but the
+        main loop is inside generate() and cannot look at it until the run ends. A laptop
+        closing is exactly that, and without this the turn it was in the middle of keeps going
+        with nobody to show it to.
+        """
+        return self._cancel.is_set() or self._eof.is_set()
 
     def send(self, type_: str, data: Optional[dict] = None, id_: Optional[str] = None) -> str:
         """Send an envelope. Returns the id (generated if not provided)."""
         id_ = id_ or str(uuid.uuid4())
         env = Envelope(type=type_, id=id_, data=data or {})
         with self._lock:
-            sys.stdout.write(json.dumps(env.to_dict()) + "\n")
-            sys.stdout.flush()
+            try:
+                sys.stdout.write(json.dumps(env.to_dict()) + "\n")
+                sys.stdout.flush()
+            except BrokenPipeError:
+                # The frontend is gone and nobody is left to read this. Flagged like stdin
+                # closing, so the run in flight stops and the main loop shuts the process
+                # down instead of streaming a whole turn into a pipe with no reader.
+                self._eof.set()
         return id_
 
     def reply(self, to: Envelope, type_: str, data: Optional[dict] = None) -> str:
@@ -170,13 +158,8 @@ class IPC:
              stop: Optional[Callable[[], bool]] = None) -> Optional[Envelope]:
         """Send and block until a response with the same id arrives.
 
-        stop makes the wait abandonable. A permission prompt is asked with no
-        timeout on purpose -- a question the user only gets to tomorrow is still
-        answered tomorrow -- but "no timeout" and "cannot be called off" are
-        different things, and without this a cancel arriving while a prompt is
-        up would hang the run it was meant to end. Giving up returns None, which
-        every caller already reads as "no answer".
-        """
+        stop makes the wait abandonable: a permission prompt is asked with no timeout on purpose, but a cancel arriving while
+        one is up must still end it. Giving up returns None, which callers already read as "no answer"."""
         event = threading.Event()
         result: list[Optional[Envelope]] = [None]
 
@@ -205,7 +188,7 @@ class IPC:
         try: return self.inbox.get(timeout=timeout)
         except queue.Empty: return None
 
-# example of protocol, have otherside send stuff and get these responses below
+# Example protocol: commands in from the other side, responses out.
 if __name__ == "__main__":
     ipc = IPC()
     ipc.send("status", {"state": "startup"})

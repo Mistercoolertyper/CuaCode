@@ -1,16 +1,12 @@
 """One reasoning-effort knob, translated per (provider, dialect, model).
 
-Providers disagree on three axes at once, which is why a single passthrough
-parameter was never going to cover it: the field's name and shape
-(reasoning_effort vs thinking vs think vs reasoning vs enable_thinking), how
+Providers disagree on three axes at once: the field's name and shape
+(reasoning_effort vs thinking vs reasoning vs enable_thinking), how
 many rungs it has (grok has two, most of openai three, anthropic five), and
 whether "off" is even reachable (fable-5 cannot stop thinking, opus-5 only
-stops at effort high or below). A table settles all three per model, so
-nothing downstream ever asks which provider it is talking to.
-
-What the table does not settle is calibration. Where a rung sits on one
-provider is an informed placement, not a measurement, and one provider's
-"high" is not another's -- see _snap for which properties actually hold, and
+stops at effort high or below). A table settles all three per model, so nothing
+downstream asks which provider it is talking to. Where a rung sits is an
+informed placement, not a measurement: see _snap for what actually holds, and
 resolve's `override` for the way out when a placement is wrong for you.
 """
 
@@ -22,7 +18,7 @@ LADDER = ("off", "low", "medium", "high", "max")
 # Keys this module owns, and the only ones it will strip after a rejection. A
 # 400 on max_tokens is the caller's problem; a 400 on reasoning_effort is ours.
 OWNED = ("reasoning_effort", "reasoning", "thinking", "output_config",
-         "think", "enable_thinking", "thinking_budget")
+         "enable_thinking", "thinking_budget")
 
 @dataclass(frozen=True)
 class Spec:
@@ -34,22 +30,13 @@ class Spec:
 def _snap(level: str, rungs: tuple) -> str:
     """Canonical rung -> the rung this model actually has.
 
-    Name first: low/medium/high are near-universal, and "high" quietly landing
-    on medium because the arithmetic said so is the kind of surprise that makes
-    the whole control untrustworthy. Only a level the model has no word for --
-    "max" on a three-rung ladder, "medium" on grok's two -- falls through to
-    proportional placement, and that is a genuine guess, which is why
-    Spec.rungs is data and config can override the result outright.
-
-    Two properties hold either way, and they are the ones worth relying on:
-    the mapping is monotonic (a higher canonical rung never yields a lower
-    native one) and total (every level resolves, nothing raises). Parity across
-    providers is not among them -- anthropic's "high" and openai's "high" are
-    not the same amount of thinking, and no table can make them one.
-
-    rungs holds thinking levels only. An off-ish native value like openai's
-    "none" belongs in Spec.off; leaving it in the ladder shifts every rung down
-    by one and quietly turns "low" into no thinking at all.
+    Name first: only a level the model has no word for -- "max" on a three-rung
+    ladder, "medium" on grok's two -- falls through to proportional placement,
+    and that is a genuine guess. The mapping is monotonic and total, never
+    parity: no table makes anthropic's "high" and openai's "high" the same
+    amount of thinking. rungs holds thinking levels only, so an off-ish value
+    like openai's "none" belongs in Spec.off; in the ladder it turns "low" into
+    no thinking at all.
     """
     if level in rungs: return level
     i = LADDER.index(level)
@@ -63,9 +50,9 @@ def _openai(level, spec, ctx):
     return {"reasoning_effort": _snap(level, spec.rungs)}
 
 def _openrouter(level, spec, ctx):
-    # extra_body, not a top-level kwarg: openai-python validates its signature
-    # and raises TypeError on anything it does not declare, and `reasoning` is
-    # openrouter's own extension. Same reason _qwen nests below.
+    # extra_body, not a top-level kwarg: openai-python raises TypeError on
+    # anything it does not declare, and `reasoning` is openrouter's own
+    # extension. Same reason _qwen nests below.
     return {"extra_body": {"reasoning": {"effort": _snap(level, spec.rungs)}}}
 
 def _anthropic(level, spec, ctx):
@@ -75,19 +62,12 @@ def _anthropic(level, spec, ctx):
             "output_config": {"effort": _snap(level, spec.rungs)}}
 
 def _anthropic_budget(level, spec, ctx):
-    # 4.5 and older: no effort parameter, only a token budget, and it has to be
-    # strictly under max_tokens. The 64000 mirrors the provider's own default,
-    # so the two stay in step when neither is set explicitly.
+    # 4.5 and older: no effort parameter, only a token budget, strictly under
+    # max_tokens. The 64000 mirrors the provider's own default, so the two stay
+    # in step when neither is set explicitly.
     cap = ctx.get("max_tokens", 64000)
     return {"thinking": {"type": "enabled",
                          "budget_tokens": max(1024, int(cap * _FRAC[_snap(level, spec.rungs)]))}}
-
-def _ollama(level, spec, ctx):
-    return {"think": _snap(level, spec.rungs)}
-
-def _ollama_bool(level, spec, ctx):
-    # Most ollama models take a bare bool; only the gpt-oss family reads levels.
-    return {"think": True}
 
 def _qwen(level, spec, ctx):
     cap = ctx.get("max_tokens", 32000)
@@ -98,8 +78,7 @@ def _none(level, spec, ctx):
     return {}                                   # thinking is not configurable here
 
 SHAPES = {"openai": _openai, "openrouter": _openrouter, "anthropic": _anthropic,
-          "anthropic_budget": _anthropic_budget, "ollama": _ollama,
-          "ollama_bool": _ollama_bool, "qwen": _qwen, "none": _none}
+          "anthropic_budget": _anthropic_budget, "qwen": _qwen, "none": _none}
 
 # (provider_key, dialect, model_regex, Spec). First match wins, so the narrow
 # rules sit above the broad ones. A None field means "any".
@@ -127,12 +106,16 @@ RULES = [
      Spec("anthropic_budget", ("low", "medium", "high", "max"),
           off={"thinking": {"type": "disabled"}})),
 
-    # ollama: gpt-oss reads named levels, everything else a bare bool.
-    (None, "ollama", r"gpt-oss", Spec("ollama", off={"think": False})),
-    (None, "ollama", None,       Spec("ollama_bool", off={"think": False})),
+    # ollama.com, where the knob is spelled reasoning_effort and takes the levels the host
+    # publishes per model. Measured on deepseek-v4.1-flash: low, medium and high are
+    # byte-identical to sending nothing at all, all three landing on the model's default of
+    # high; max roughly doubles the thinking; none is the only value that stops it. So the
+    # rungs are the model's own, not openai's three.
+    ("ollama", "openai", None,
+     Spec("openai", ("low", "high", "max"), off={"reasoning_effort": "none"})),
 
-    # The openai dialect, whichever host happens to be serving it.
-    # "none" and "minimal" are off-values, not rungs -- see _snap.
+    # The openai dialect, whichever host serves it. "none" and "minimal" are
+    # off-values, not rungs -- see _snap.
     (None, "openai", r"^gpt-5\.1",
      Spec("openai", ("low", "medium", "high"), off={"reasoning_effort": "none"})),
     (None, "openai", r"^gpt-5",
@@ -144,25 +127,24 @@ RULES = [
 ]
 
 # Deliberately absent from the table: "this model has no knob at all" rows.
-# Such a row costs a future version of the model its effort control; an
-# optimistic attempt costs one request, which learn() records for the model.
-# When an endpoint states a model cannot think, spec_for learns it as a fact.
+# Such a row costs a future version of the model its effort control, while an
+# optimistic attempt costs one request, which learn() records. When an endpoint
+# states a model cannot think, spec_for learns it as a fact.
 
 # Everything unmatched. Optimistic on purpose: the dialect's usual spelling is
 # tried once, and learn() demotes the model for good if the server says no.
-FALLBACK = {"openai": Spec("openai"), "anthropic": Spec("anthropic"),
-            "ollama": Spec("ollama_bool", off={"think": False})}
+FALLBACK = {"openai": Spec("openai"), "anthropic": Spec("anthropic")}
 
 def spec_for(provider: str, dialect: str, model: str, thinks: bool | None = None) -> Spec:
     """The table's answer, unless the endpoint has already given a better one.
 
-    thinks is what the provider said about this model -- ollama answers
-    /api/show, openrouter publishes supported_parameters -- and it is three
-    valued, because "nobody asked" is not "no". It outranks every rule below in
-    one direction only: a definite False means no knob, since a rung that sends
-    a thinking parameter to a model without one is a 400 waiting to happen. A
-    True says nothing about how many rungs that model has or how they are
-    spelled, which is what the table is for, and None leaves the table alone.
+    thinks is what the provider said about this model (ollama answers /api/show,
+    openrouter publishes supported_parameters), and it is three valued, because
+    "nobody asked" is not "no". It outranks the table in one direction only: a
+    definite False means no knob, since a rung that sends a thinking parameter to
+    a model without one is a 400 waiting to happen. A True says nothing about how
+    many rungs that model has or how they are spelled, which is what the table is
+    for, and None leaves the table alone.
     """
     if thinks is False: return Spec("none")
     for p, d, pat, s in RULES:
@@ -176,11 +158,10 @@ def reachable(provider: str, dialect: str, model: str, level: str,
               thinks: bool | None = None, override: dict | None = None) -> bool:
     """Whether this rung means on this model what it says on the tin.
 
-    Only "off" can fail to: every other level degrades to a nearby rung, which
-    is coarse but honest, while "off" degrading means the box marked "no
-    thinking at all" quietly buys the cheapest thinking there is. A caller that
-    asks first can refuse the setting instead of misrepresenting it; resolve()
-    still degrades for anyone who does not ask.
+    Only "off" can fail to: every other level degrades to a nearby rung, coarse
+    but honest, while "off" degrading means the box marked "no thinking at all"
+    quietly buys the cheapest thinking there is. A caller that asks first can
+    refuse the setting; resolve() still degrades for anyone who does not ask.
     """
     if level != "off": return True
     if override and "off" in override: return True
@@ -193,7 +174,7 @@ def _without(native: dict, drop) -> dict:
     """Native params minus keys already known to be rejected, at either level.
 
     extra_body is a bag rather than a value, so a key inside it has to be
-    reachable by name too -- that is where the openrouter and qwen knobs live.
+    reachable by name too; that is where the openrouter and qwen knobs live.
     """
     drop = set(drop or ())
     if not drop: return native
@@ -210,16 +191,15 @@ def resolve(provider: str, dialect: str, model: str, level: str,
     """Canonical level -> native request params, merged under the caller's own.
 
     Hand-written params always win: the table is a default, not a cage. An
-    unreachable level degrades instead of raising -- "off" on a model that
-    cannot stop thinking becomes its lowest rung, which is the honest answer.
+    unreachable level degrades instead of raising, so "off" on a model that
+    cannot stop thinking becomes its lowest rung.
 
     override is the per-provider remap out of config, keyed by canonical level:
-    {"high": {"reasoning_effort": "medium"}} replaces what the table would have
-    produced for "high" on this provider, outright. It exists because the
-    table's placements are informed choices, not measurements -- if a
-    provider's "high" burns more than you want, that is a fact about that
-    provider that belongs in your config rather than in an argument with this
-    file. A level absent from override falls through to the table as usual.
+    {"high": {"reasoning_effort": "medium"}} replaces outright what the table
+    would have produced for "high" here. It exists because the table's placements
+    are informed choices, not measurements: if a provider's "high" burns more
+    than you want, that belongs in your config. A level absent from override
+    falls through to the table as usual.
     """
     params = dict(params or {})
     if not level or level not in LADDER: return params
@@ -233,8 +213,8 @@ def resolve(provider: str, dialect: str, model: str, level: str,
             native = SHAPES[s.shape](level, s, params)
     native = _without(native, drop)
     merged = {**native, **params}
-    # extra_body is a bag: a caller who sets one of their own should not
-    # silently delete the resolver's.
+    # extra_body is a bag: a caller setting one of their own should not silently
+    # delete the resolver's.
     if "extra_body" in native and "extra_body" in params:
         merged["extra_body"] = {**native["extra_body"], **params["extra_body"]}
     return merged
@@ -242,10 +222,10 @@ def resolve(provider: str, dialect: str, model: str, level: str,
 def learn(err: str, params: dict) -> tuple[dict, list[str]] | None:
     """(params minus the key the server just rejected, the keys dropped).
 
-    None when the rejection was not about anything this module put there, so
-    the caller re-raises rather than papering over an unrelated 400. The test
-    is a substring match against the error text -- providers name the offending
-    field, and a false positive costs one silently dropped knob, not a failure.
+    None when the rejection was not about anything this module put there, so the
+    caller re-raises instead of papering over an unrelated 400. The test is a
+    substring match against the error text, since providers name the offending
+    field and a false positive costs one silently dropped knob.
     """
     named = [k for k in OWNED if k in (err or "")]
     if not named: return None
@@ -253,8 +233,8 @@ def learn(err: str, params: dict) -> tuple[dict, list[str]] | None:
     body = dict(out.get("extra_body") or {})
     dropped = []
     for k in named:
-        # Both levels, not the first hit: `or` would short-circuit and leave a
-        # copy behind in extra_body.
+        # Both levels, not the first hit: `or` would short-circuit and leave a copy
+        # behind in extra_body.
         hit = k in out or k in body
         out.pop(k, None)
         body.pop(k, None)

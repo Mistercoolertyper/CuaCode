@@ -41,25 +41,22 @@ READ_ONLY = {"read", "ls", "glob", "grep"}
 def safe(args: dict, ctx) -> bool:
     """Whether this call can skip the permission prompt.
 
-    Sensitivity is the floor: a path whose contents are themselves the thing
-    being protected is asked about whatever is being done to it, because
-    reading is harmless right up until the file is ~/.ssh/id_rsa and a check
-    that only looked at the verb would hand that over without a word. Above
-    that floor, either the action only reads, or it happens somewhere that is
-    not the user's -- see below.
+    Sensitivity is the floor: a path whose contents are themselves the thing being
+    protected is asked about whatever is being done to it, because reading is
+    harmless right up until the file is ~/.ssh/id_rsa. Above that floor, either the
+    action only reads, or it happens somewhere that is not the user's.
 
-    The path is resolved first, so ../ and ~ are judged as where they land
-    rather than as what they were typed as.
+    The path is resolved first, so ../ and ~ are judged as where they land rather
+    than as what they were typed as.
     """
     try: path = resolve(args, ctx)
     except ValueError: return False
     if paths.is_sensitive(path): return False
     if args.get("action") in READ_ONLY: return True
-    # Third condition, and only for one place: the session's own scratch
-    # directory. A write there is not the user's file being changed, so the
-    # verb stops being the thing that matters. A move is asked about unless
-    # both ends are inside -- otherwise it is a write to wherever `to` points,
-    # wearing a scratch path as its source.
+    # Third condition, and only for one place: the session's own scratch directory.
+    # A write there is not the user's file being changed, so the verb stops mattering.
+    # A move is asked about unless both ends are inside, otherwise it is a write to
+    # wherever `to` points wearing a scratch path as its source.
     if not paths.is_scratch(path, ctx): return False
     if args.get("action") == "move":
         return bool(args.get("to")) and paths.is_scratch(resolve({"path": args["to"]}, ctx), ctx)

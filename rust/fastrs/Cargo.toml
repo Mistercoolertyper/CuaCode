@@ -1,0 +1,18 @@
+[package]
+name = "cuacode-fastrs"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "fastrs"
+path = "src/main.rs"
+
+[dependencies]
+# The shared half below: the wire, the worker, the session, the transcript.
+cuacode = { path = "..", package = "cuacode-rs" }
+crossterm = "0.29.0"
+ratatui = "0.30.2"
+serde_json = "1"
+# A terminal column is not a char. This is the table ratatui itself lays a line
+# out by, so what the wrap counts is what the screen paints.
+unicode-width = "0.2"

@@ -1,18 +1,17 @@
 """Instructions the agent did not write for itself.
 
-Two kinds, and they are deliberately not the same mechanism.
+Two kinds, and they are not the same mechanism.
 
 The user's own AGENTS.md is theirs, applies everywhere, and is short by
-construction, so it goes into the system prompt verbatim -- standing orders, in
-front of the model on every turn without it having to go and look.
+construction, so it goes into the system prompt verbatim, in front of the model
+on every turn.
 
-A project's documentation is none of those things. It belongs to the repository
-rather than to the user, there can be five of it, and a README is routinely
-longer than everything else in the window put together. So that one is a
-pointer: the names and the sizes, once, and the agent spends a `file` read on
-whichever of them turns out to matter. Same bargain as memory and skills, for
-the same reason -- a wrong pointer costs a line, a wrong injected body costs the
-context and then gets acted on.
+A project's documentation is none of those things. It belongs to the repository,
+there can be five of it, and a README is routinely longer than everything else in
+the window put together. So that one is a pointer: the names and the sizes, once,
+and the agent spends a `file` read on whichever of them turns out to matter. A
+wrong pointer costs a line; a wrong injected body costs the context and then gets
+acted on.
 """
 import os, re, sys
 
@@ -24,9 +23,7 @@ from handler.session import store
 USER_FILES = ("AGENTS.md", "agents.md", "AGENT.md", "CLAUDE.md")
 
 # Enough for a page of house style and then some. Past this it is a document
-# rather than an instruction, and a document does not belong in every request:
-# the tail is dropped and said to be dropped, so a user wondering why the agent
-# ignored the bottom of their file has an answer in front of the model.
+# rather than an instruction: the tail is dropped and said to be dropped.
 MAX_USER = 8000
 
 # What counts as documentation sitting in the working directory. A fixed list
@@ -36,9 +33,8 @@ DOC_FILES = ("AGENTS.md", "AGENT.md", "CLAUDE.md", "GEMINI.md", "README.md",
              "CONTRIBUTING.md", "ARCHITECTURE.md", "DEVELOPMENT.md",
              ".cursorrules", ".windsurfrules")
 
-# A doc bigger than this is a manual. It is still listed -- knowing it is there
-# is the useful part -- and the size in the listing is what tells the agent to
-# grep it rather than read it whole.
+# A doc bigger than this is a manual. It is still listed, and the size in the
+# listing is what tells the agent to grep it rather than read it whole.
 HUGE = 200_000
 
 # How many turns must pass before the second pointer may fire. The first message
@@ -63,11 +59,10 @@ def user_path():
 def user_block() -> str:
     """~/.cuacode/AGENTS.md as a system segment, or "" when there is none.
 
-    Cached on the file's identity and mtime, and that is not an optimisation:
-    this string is part of the system prompt, providers cache the system prompt
-    on its bytes, and a block rebuilt slightly differently each turn would throw
-    that cache away every turn. Re-stat'd rather than read, so an edit still
-    lands on the next turn without a restart.
+    Cached on the file's identity and mtime: providers cache the system prompt on
+    its bytes, and a block rebuilt slightly differently each turn would throw that
+    cache away every turn. Re-stat'd rather than read, so an edit still lands on
+    the next turn without a restart.
     """
     p = user_path()
     if p is None: return ""
@@ -101,9 +96,9 @@ def user_block() -> str:
 def _read_files() -> set:
     """Absolute paths the file tool has read this session.
 
-    Read off the same edit gate `file` maintains and the session restores on
-    reload (handler/session/main.py), so a doc the agent has already opened --
-    this turn or before the reload -- is never pointed at again.
+    The same edit gate `file` maintains and the session restores on reload
+    (handler/session/main.py), so a doc the agent has already opened, this turn or
+    before the reload, is never pointed at again.
     """
     m = sys.modules.get("_common")
     return {os.path.abspath(p) for p in getattr(m, "read_files", ())} if m else set()
@@ -114,10 +109,10 @@ def _size(n: int) -> str:
 
 
 def docs_in(path: str) -> list:
-    """Documentation in this directory, newest name first in DOC_FILES order.
+    """Documentation in this directory, in DOC_FILES order.
 
-    Non-recursive on purpose. The directory the conversation is happening in is
-    the one whose conventions apply; walking the tree finds a dozen READMEs
+    Non-recursive on purpose: the directory the conversation is happening in is
+    the one whose conventions apply, and walking the tree finds a dozen READMEs
     belonging to code nobody has mentioned.
     """
     if not path: return []
@@ -135,9 +130,8 @@ def docs_in(path: str) -> list:
 
 
 # Per session: how many pointers have gone out, and at which turn the last one
-# did. In memory for the same reason recall's is -- the judgement "already
-# suggested, do not repeat" is about this conversation and means nothing after a
-# restart.
+# did. In memory, like recall's: "already suggested, do not repeat" is about this
+# conversation and means nothing after a restart.
 _sent: dict[str, dict] = {}
 
 
@@ -150,9 +144,7 @@ def _related(text: str, path: str, docs: list) -> bool:
     its directory.
 
     The second pointer is spent here, so the bar is one solid word: the name of
-    the directory, a word from inside it, or the name of a doc. A conversation
-    that opened in a repo and then went off to talk about the weather does not
-    get reminded about the README.
+    the directory, a word from inside it, or the name of a doc.
     """
     from integrations.memory import recall
     q = set(recall.tokens(text))
@@ -166,11 +158,10 @@ def _related(text: str, path: str, docs: list) -> bool:
 def docs_block(text: str, sid: str = "", path: str = "", first: bool = False) -> str:
     """The project-docs pointer for one user message, or "".
 
-    Fires twice at most in a conversation: once on the opening message, because
-    that is when the agent is deciding how to approach the whole thing, and once
-    more later only if the conversation turns out to be about this project and
-    the docs are still unread. There is no third -- a pointer that keeps coming
-    back is furniture, and then the one that mattered is furniture too.
+    Fires twice at most in a conversation: once on the opening message, when the
+    agent is deciding how to approach the whole thing, and once more later only if
+    the conversation turns out to be about this project and the docs are still
+    unread. There is no third: a pointer that keeps coming back is furniture.
     """
     state = _sent.setdefault(sid or "-", {"count": 0, "turn": -99})
     state["turn_no"] = turn = state.get("turn_no", -1) + 1

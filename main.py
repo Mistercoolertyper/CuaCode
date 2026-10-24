@@ -1,83 +1,90 @@
 import sys, os, time
 sys.path.insert(0, os.path.dirname(__file__))
 
-# Before anything starts talking. --usage is a question about the app rather
-# than a conversation with it: it prints what every session has cost and exits,
-# without opening a session of its own to ask.
-if "--usage" in sys.argv:
-    from handler import usage as _usage
-    sys.exit(_usage.cli(sys.argv[1:]))
-
 from handler.protocol import IPC
-from handler.agent.main import generate
-from handler.agent import inline, providers
+from handler.agent.main import generate, _compact_now
+from handler.agent import compact, inline, providers
 from handler.agent.background import JOBS
 from handler.session import store
 from handler.session.main import Session
-from handler import config, context, environment, usage
+from handler import config, context, environment, peers, usage
 from integrations.memory import loader as memory, naming, recall
 from integrations.instructions import loader as instructions
 from integrations.skills import loader as skills
 from integrations.permissions import decider
+from tools._safety import shell as shell_safety
 
 SETTINGS = config.settings()
 
 ipc = IPC()
-Ctx = type('Ctx', (dict,), {'self_identity': property(lambda s: s.get("frontmost_app")), 'session_dir': property(lambda s: s.get("session_dir")),
-                            'cwd': property(lambda s: s.get("cwd"))})
+
+
+class Ctx(dict):
+    """Envelope fields, plus the attribute spellings some tools read off it."""
+
+    self_identity = property(lambda s: s.get("frontmost_app"))
+    session_dir = property(lambda s: s.get("session_dir"))
+    cwd = property(lambda s: s.get("cwd"))
+
+
 ctx = Ctx(ipc.terminal_info)
 
-# A session exists from boot and its folder is born when the terminal envelope
-# lands (Session.persist, below); a clean exit with nothing recorded deletes the
-# folder again, so a launch-and-close still leaves nothing. Effort starts at the
-# account default: without it, every restart fell back to the provider's idea of
-# enough thinking.
+# A session exists from boot: its folder is born with the first record and an
+# unused one is dropped on exit. Effort starts at the account default.
 sess = Session.create(provider=SETTINGS["provider"], model=SETTINGS.get("model", ""),
                       effort_level=config.default_effort())
 messages = sess.messages()
-# The ready line carries the session's store id, so a frontend can tie its live
-# row to the record this worker will one day commit -- without it the same
-# conversation shows twice the moment the frontend reads session.list. The mode
-# rides beside it, so a frontend adopts where config left this instead of
-# asserting its own default over it.
-ipc.send("status", {"state": "ready", "session_id": sess.id, "mode": config.permission_mode()})
-# Tools run in this process, so the memory tool retitles the object the loop is
-# holding rather than the file underneath it -- a write to meta.json would be
-# undone by the next commit, which persists the whole dict from memory.
+# Set once, at boot, and not per turn: /compact runs at the prompt with no turn in
+# flight, and a fold that could only find the session mid-turn would answer "nothing
+# to fold" to the one command that exists to fold on demand. `sess` is rebound on a
+# resume, so this is refreshed there too.
+ctx["session"] = sess
+# The pid a peer checks to tell a slow agent from a dead one. meta.json's `updated`
+# only moves when a round commits, so without this an agent ten minutes into a build
+# is indistinguishable from one that was killed.
+peers.become(sess.id)
+
+
+def settings_fields(sess) -> dict:
+    """Who is answering, how hard it thinks, how much window it has. Read off the
+    session, not the config: a conversation reopened from disk answers with its own
+    provider and model.
+    """
+    out = {"provider": sess.provider, "model": sess.meta.get("model", ""),
+           "effort": sess.effort}
+    # No window beats a window somebody invented.
+    if window := config.context_window(sess.provider, sess.meta.get("model", "")):
+        out["context_max"] = window
+    return out
+
+
+# The ready line carries the session id, so a frontend can tie its live row to
+# the record committed later, plus the mode and settings for the header.
+ipc.send("status", {"state": "ready", "session_id": sess.id,
+                    "mode": config.permission_mode(), **settings_fields(sess)})
+# Tools run in this process, so the memory tool retitles the object the loop
+# holds, not the file underneath it.
 naming.set_live(sess)
 
-# Which tools need asking is declared per tool (require_permissions); this
-# records how the frontend on the other end wants calls gated -- ask (the
-# user decides), auto (a small model screens them), or off (never ask). The
-# boot mode is config's to choose; a frontend re-declares whatever it wants
-# the moment it is up, and /permissions moves it live from there. ask and
-# auto have to be recorded because ask blocks forever by design -- a question
-# the user only gets to tomorrow is still answered tomorrow -- and a frontend
-# that never answers would otherwise hang the run instead of waiting.
+# ask | auto | bypass | off, for calls a tool declares need asking; a frontend
+# re-declares it once it is up.
 PERM_MODE = config.permission_mode()
 
-# What the last round actually cost, kept so /context can report it long after
-# the event that carried it went past. One round, not a running total: the
-# question it answers is "how is this model behaving right now", and a session
-# average would smooth away exactly the turn worth asking about.
+# The last round's cost, read by /context: one round, not a running total.
 LAST_TURN = {}
 
+
 def turn_fields(chunk: dict) -> dict:
-    """What the round that just generated cost, and remember it for /context."""
+    """What the round that just generated cost, remembered for /context."""
     fields = context.turn_fields(chunk)
     LAST_TURN.clear()
     LAST_TURN.update({"input": (chunk.get("usage") or {}).get("input", 0), **fields})
     return fields
 
-def context_fields(usage: dict) -> dict:
-    """The context readout, as far as this turn can tell it.
 
-    Always what was spent, because that is measured. The window and what is
-    left of it only when the model's size is actually known -- an unknown
-    window is reported as no window at all rather than as a default, so a
-    frontend draws a token count instead of a meter reading against a number
-    somebody made up.
-    """
+def context_fields(usage: dict) -> dict:
+    """The context readout. Spent tokens only, and the window only when the
+    model's size is actually known."""
     used = (usage or {}).get("input", 0) + (usage or {}).get("output", 0)
     if not used: return {}
     out = {"context_used": used}
@@ -86,41 +93,78 @@ def context_fields(usage: dict) -> dict:
         out["context_left"] = max(window - used, 0)
     return out
 
+
+def ask_user(question: str, options: list, detail: str = "", n: int = 1, of: int = 1) -> dict:
+    """Put a question to the user and wait, without ending the turn.
+
+    The same envelope a permission uses, with `question`, `options` and `detail`
+    added. A frontend that only knows the binary prompt ignores the extras and
+    answers allow/deny, which reads as yes to the first option -- so an old build
+    asks a worse question instead of drawing nothing and hanging.
+    """
+    options = [str(o) for o in (options or [])]
+    # `kind` says what this is, rather than letting a frontend infer it from the
+    # name: a permission can be raised for a tool called anything, and inferring
+    # "this is a question" from a tool name is the kind of guess that draws the
+    # wrong screen for one of the two cases. The absence of `kind` means permission.
+    payload = {"name": "ask_user", "kind": "question", "question": question,
+               "options": options, "n": n, "of": of,
+               "args": {"question": question, "options": options}}
+    if detail: payload["detail"] = detail
+    # No timeout, deliberately, and the same as a permission asks. A question the
+    # person walked away from is still a question when they come back: expiring it
+    # would either fail the call under them or, worse, let the model decide what
+    # they would have said. `stop` is what ends the wait, and the only thing that
+    # should -- a cancel, or the frontend going away.
+    reply = ipc.call("permission", payload, timeout=None, stop=ipc.cancelled)
+    data = (reply.data or {}) if reply else {}
+    # Three answer shapes, newest first: a pick, a typed answer, and the plain
+    # allow/deny an unmigrated frontend sends back.
+    if data.get("choice"): return {"choice": str(data["choice"])}
+    if (data.get("answer") or "").strip(): return {"answer": str(data["answer"]).strip()}
+    if reply is None: return {"error": "no answer: cancelled, or the frontend never showed it"}
+    if not data.get("allow") and (data.get("allow") is False): return {"error": "declined"}
+    return {"choice": options[0]} if options else {"answer": "yes"}
+
+
 def ask_permission(name: str, args: dict, preview: dict = None, note: str = None) -> bool:
-    # timeout=None keeps the question open as long as the user needs; a cancel
-    # still ends the run it belonged to (abandoned reads as refused), and the
-    # loop's own cancel check is what actually stops the turn.
-    # preview is what the call would do -- a diff, a line of prose -- sent as its
-    # own field, so a frontend that never heard of it draws what it always drew.
-    # note is why the question is being asked when it came from the auto gate
-    # rather than the tool: the reason a small model flagged this call.
-    payload = {"name": name, "args": args}
+    """Put one call to the user. timeout=None keeps the question open as long as
+    they need; a cancel ends the run it belonged to. preview is what the call
+    would do; note is why the auto gate flagged it."""
+    payload = {"name": name, "kind": "permission", "args": args}
     if preview: payload["preview"] = preview
     if note: payload["note"] = note
     reply = ipc.call("permission", payload, timeout=None, stop=ipc.cancelled)
     return bool(reply and (reply.data or {}).get("allow"))
 
-def auto_decide(tool, name: str, args: dict, preview: dict, tail: str, ctx) -> tuple:
-    """The auto gate: a configured small model decides the call.
 
-    Mirrors ask_permission's place in the loop; the seam in generate() calls
-    it with everything the gate needs (the tool, the exact arguments, what the
-    call says it would do, the recent turns). Returns (allow, reason).
-    """
+def auto_decide(tool, name: str, args: dict, preview: dict, tail: str, ctx) -> tuple:
+    """The auto gate: a configured small model decides. Returns (allow, reason)."""
     return decider.decide(ctx, tool, name, args, preview, tail)
 
+
+def bypass_gate(name: str, args: dict, preview: dict = None, note: str = None) -> bool:
+    """Bypass mode's gate: ordinary calls answer themselves, the irreversible
+    ones still go to the user. Only shell can do the irreversible thing in one
+    word; everything else that writes is bounded by what it writes to, and the
+    file tool already puts what it deletes in the Trash."""
+    why = shell_safety.destructive(str(args.get("command") or "")) if name == "shell" else ""
+    if not why: return True
+    return ask_permission(name, args, preview, note or f"bypass keeps these: {why}")
+
+
 def tool_ordinal(session) -> int:
-    """How many tool results the conversation already holds -- the index the
-    next one is filed under. Sent with every tool_output so a frontend can ask
-    for the whole call later instead of counting rows and hoping it agrees."""
+    """How many tool results the conversation already holds: the index the next
+    one is filed under."""
     return sum(1 for r in session.records() if r.get("t") == "tool")
+
 
 DETAIL_CHARS = 20000
 
+
 def _shrink(value, limit: int = DETAIL_CHARS):
     """Cap the strings in a stored payload. The detail view exists because the
-    wire strips output, but a 5MB build log is still not something to put
-    through line-delimited JSON as one line."""
+    wire strips output, but a 5MB build log still should not cross as one line."""
     if isinstance(value, str):
         if len(value) <= limit: return value
         return value[:limit] + f"\n... [{len(value) - limit} more characters]"
@@ -128,96 +172,107 @@ def _shrink(value, limit: int = DETAIL_CHARS):
     if isinstance(value, list): return [_shrink(v, limit) for v in value]
     return value
 
+
 def tool_detail(session, index: int) -> dict:
-    """One call in full: the arguments the model sent and the result that came
-    back. Read from the records rather than remembered by the frontend -- the
-    wire carries a summary of the result and nothing else, on purpose, and this
-    is the other half of that bargain. Images stay as blob refs: the point is
-    to read what happened, not to move a megabyte of base64.
-    """
+    """One call in full, arguments and result, read from the records. Images stay
+    as blob refs: the point is to read what happened, not to move a megabyte."""
     calls, results = [], []
     for r in session.records():
         if r.get("t") == "assistant": calls.extend(r.get("calls") or [])
         elif r.get("t") == "tool": results.append(r)
     if not 0 <= index < len(results):
-        # Not "error": that key means a failed envelope everywhere else on this
-        # wire, and a frontend asking for a call that has since been rewound
-        # away has not hit an error, it has asked for nothing.
+        # Not "error": that key means a failed envelope everywhere else, and a
+        # call that was rewound away is absent, not broken.
         return {"index": index, "total": len(results), "unavailable": "no such call"}
     rec = results[index]
-    # Positional, because every call yields exactly one tool record in order --
-    # checked by name all the same, so a history that ever drifts shows no
-    # arguments rather than another call's.
+    # Positional, since every call yields one tool record in order, but checked
+    # by name so a drifted history shows no arguments rather than another call's.
     call = calls[index] if index < len(calls) and calls[index].get("name") == rec.get("name") else {}
     return {"index": index, "total": len(results), "name": rec.get("name", ""), "ts": rec.get("ts", ""),
             "args": _shrink(call.get("args") or {}), "result": _shrink(rec.get("result") or {})}
 
-def _detail_now(env):
-    """Answer tool.detail off the reader thread, so a call can be read while the
-    run that made it is still going.
 
-    The main loop is inside generate() for a whole turn: an envelope queued for
-    it is answered when the turn ends, which for "what did that call return" is
-    an hour after it was useful. This only reads -- records(), and a copy of a
-    payload -- so it is safe to run beside the run appending to them.
-    """
+def _detail_now(env):
+    """tool.detail answered on the reader thread: the main loop is inside
+    generate() for a whole turn, which for "what did that call return" is an
+    hour too late. Reads only, so it is safe beside a run."""
     try: want = int((env.data or {}).get("index", -1))
     except (TypeError, ValueError): want = -1
     ipc.reply(env, "detail", tool_detail(sess, want))
 
+
 ipc.direct["tool.detail"] = _detail_now
 
-def replay(session, env):
-    """Re-send a reopened conversation as the same events the live run sent.
 
-    A frontend then redraws it with the code it already has, and there is no
-    second rendering path to drift from the first. Records are canonical, so
-    this reads the same whichever provider wrote them; the calls are put back
-    into the current provider's dialect on the way out, exactly as the history
-    itself is."""
+def _list_now(env):
+    """The `/`, `$` and `@` menus, on the reader thread because queued for the main loop
+    they came up empty for the whole length of a run. Everything here reads what is already
+    loaded and never writes. model.list asks the provider over the network, so it stays out.
+    """
+    data = env.data or {}
+    action = data.get("action")
+    try:
+        if action == "command.list":
+            ipc.reply(env, "commands", {"commands": inline.listing()})
+        elif action == "skill.list":
+            ipc.reply(env, "skills", {"skills": skills.listing("user")})
+        elif action == "fs.list":
+            root = sess.meta.get("cwd") or ctx.get("cwd") or os.getcwd()
+            ipc.reply(env, "files", fs_listing(root, data.get("dir", "")))
+        elif action == "provider.list":
+            ipc.reply(env, "providers", {"providers": config.listing(),
+                                         "vision": config.vision_helper()[0], "vision_model": config.vision_helper()[1],
+                                         "sighted": config.sighted()})
+        elif action == "session.list":
+            ipc.reply(env, "sessions", {"sessions": store.list_sessions(), "active": sess.id})
+    except Exception as e:
+        ipc.reply(env, "status", {"state": "error", "error": str(e)})
+
+
+for _action in ("command.list", "skill.list", "fs.list", "provider.list", "session.list"):
+    ipc.direct[_action] = _list_now
+
+
+def replay(session, env):
+    """Re-send a reopened conversation as the same events the live run sent, so a
+    frontend redraws it with the code it already has. Nothing here carries a
+    `status`: a replay is not a run, and a clock for it would time the redraw.
+    """
     p = providers.get(session.provider)
     tools_seen = 0
     for r in session.records():
         t = r.get("t")
         if t == "user":
-            # Names, never payloads. A frontend redrawing a conversation wants
-            # to show that a picture was attached and what it was called;
-            # shipping the base64 back would put megabytes on the wire for
-            # every reopened session, to draw a thumbnail nobody asked for.
-            data = {"state": "user", "token": r.get("text", ""), "status": "running"}
+            # Names, never payloads: shipping the base64 back puts megabytes on the wire.
+            data = {"state": "user", "token": r.get("text", "")}
             if r.get("images"):
                 data["images"] = [{"name": i.get("name") or "image"} for i in r["images"]]
             ipc.reply(env, "token", data)
         elif t == "recall":
-            # Drawn, not hidden. Something the runtime put in front of the model
-            # on the user's behalf is exactly the kind of thing they are
-            # entitled to see, and a notice is the row that already means that.
-            ipc.reply(env, "token", {"state": "notice", "token": r.get("text", ""), "status": "running"})
+            # Shown, not hidden: runtime text put in front of the model is the user's to see.
+            ipc.reply(env, "token", {"state": "notice", "token": r.get("text", "")})
         elif t == "assistant":
             if r.get("thinking"):
-                ipc.reply(env, "token", {"state": "thinking", "token": r["thinking"], "status": "running"})
+                ipc.reply(env, "token", {"state": "thinking", "token": r["thinking"]})
             if r.get("content"):
-                ipc.reply(env, "token", {"state": "content", "token": r["content"], "status": "running"})
+                ipc.reply(env, "token", {"state": "content", "token": r["content"]})
             if r.get("calls"):
-                ipc.reply(env, "token", {"state": "tool_calls", "token": p.native_calls(r["calls"]), "status": "tooling"})
+                ipc.reply(env, "token", {"state": "tool_calls", "token": p.native_calls(r["calls"])})
         elif t == "tool":
             ipc.reply(env, "token", {"state": "tool_output", "token": r.get("name", ""),
-                                     "result": r.get("result", {}), "index": tools_seen, "status": "tooling"})
+                                     "result": r.get("result", {}), "index": tools_seen})
             tools_seen += 1
 
-# The last name sent to the frontend, so the same one is not sent twice. None
-# rather than "" because "no name yet" is itself worth saying once: a frontend
-# that just replaced its conversation has a stale title to clear.
+
+# The last name sent, so the same one is not sent twice. None rather than "",
+# because "no name yet" is worth saying once: after a swap the title is stale.
 _last_title = None
 
 
 def announce_title(env=None):
     """Tell the frontend what this conversation is called, if that changed.
-
-    One event from one place, whichever of the four writers set it. Replied to
-    when there is an envelope to reply to -- a load or a new session -- and sent
-    unprompted when the namer finishes on its own thread, which answers nobody.
-    """
+    Replied to when there is an envelope to answer, sent unprompted when the
+    namer finishes on its own thread."""
     global _last_title
     title = sess.meta.get("title", "")
     if title == _last_title: return
@@ -228,44 +283,94 @@ def announce_title(env=None):
     else: ipc.send("status", data)
 
 
-# Set when a turn is cancelled, spent on the next one. The note says the run was
-# stopped and what survived of it, and it has to travel between turns because
-# there is nowhere legal to put it at the moment it is written: it is a user
-# message, and the user is about to send one of their own.
+# Set when a turn is cancelled, spent on the next one. It has to travel between
+# turns: it is a user message, and the user is about to send one of their own.
 pending_note = ""
 
 
-def projects_data(**extra):
-    """The tree's project payload, identical on every projects reply: the
-    promoted dirs, the pin order, the custom names and icons. One shape, so
-    the frontend never re-asks and no reply can forget a field."""
+def projects_data(**extra) -> dict:
+    """The tree's project payload, one shape on every projects reply: the
+    promoted dirs, the pin order, the custom names and icons."""
     names, icons = store.list_project_details()
     return {"projects": store.list_projects(), "pinned": store.list_pinned(),
             "names": names, "icons": icons, **extra}
 
 
 def drop_empty(s):
-    """A session that never recorded anything leaves nothing behind. Its
-    folder was born at the terminal envelope (Session.persist); on a close,
-    a stop, or a conversation being swapped out, an empty one dies with it.
-    Anything with a record -- even just the user's message from a run that
-    never answered -- is kept."""
+    """A session that recorded nothing leaves nothing behind. Anything with a
+    record, even just the user's message from a run that never answered, stays."""
     if not s._records:
         store.delete(s.id)
 
 
+def _size(text: str) -> float:
+    """`400k`, `250000`, `40%` -> a number. 0 when it is none of those.
+
+    A share comes back under 1 and a count comes back over it, which is the one
+    distinction the caller needs: one field means both, and which it means comes
+    off its size rather than from a second spelling of it.
+    """
+    s = (text or "").strip().lower().replace("_", "").replace(",", "")
+    try:
+        if s.endswith("%"):
+            v = float(s[:-1]) / 100
+            return v if 0 < v < 1 else 0
+        mult = 1
+        if s.endswith("k"): mult, s = 1_000, s[:-1]
+        elif s.endswith("m"): mult, s = 1_000_000, s[:-1]
+        v = float(s) * mult
+        return v if v >= 1 else 0
+    except ValueError:
+        return 0
+
+
+def fold_progress(ev: dict):
+    """A fold's own events, for a fold that is not running inside a round.
+
+    `/compact` runs on the main loop with no generate() around it, so there is no
+    outbox to drain and nothing would reach the screen while a model call runs.
+    Sent straight out instead, and the state is set to "running" first: a status
+    line is only drawn while the frontend thinks a turn is in flight, so without
+    that the fold would be happening invisibly.
+    """
+    stage = ev.get("stage", "")
+    ipc.send("status", {"state": "compacting", "stage": stage,
+                        "folded": ev.get("folded", 0), "freed": ev.get("freed", 0),
+                        # A frontend that only reads `status` still knows a turn is
+                        # in flight, so it keeps its status line up.
+                        "status": "running" if stage == "start" else ""})
+
+
+def fold_now() -> str:
+    """Fold the conversation down this instant and say what it bought.
+
+    A forced fold ignores the trigger: the point of typing `/compact` is to stop
+    waiting on a limit, possibly the one just moved. It goes through the same
+    `_compact_now` the round loop uses, so there is one implementation of a fold
+    and not a second one here that drifts from it -- which is what happened first
+    time, with this function quietly keeping its own copy of the arithmetic.
+    """
+    global messages
+    # Treating the conversation as over the line: the target is half of what is in
+    # hand, so the fold aims below it and leaves room rather than landing on it.
+    here = compact.tokens(messages)
+    if not here:
+        return "compact: nothing here worth folding yet"
+    # The one place the emit goes in for a fold with no round around it.
+    ctx["emit"] = fold_progress
+    try:
+        said = _compact_now(messages, used=here, limit=max(here // 2, 1), ctx=ctx)
+    finally:
+        ctx.pop("emit", None)
+        # The line has to come down again whether or not the fold worked.
+        ipc.send("status", {"state": "compacting", "stage": "done"})
+    return said or "compact: nothing here worth folding yet"
+
+
 def inline_command(env, text: str):
-    """Act on the inline /commands in a chat message.
-
-    Returns True when a blocking command ran (provider, model, vision, effort):
-    the result is the message and the turn stops there, so generate() is not
-    called on a request the command just made wrong. Otherwise returns the text
-    to send -- the unchanged message when no command was present, or the residue
-    after a read-only command (context, usage) was stripped and shown.
-
-    This writes through the global SETTINGS/messages so the *next* turn is
-    built against the new provider/model, exactly as /provider from the palette
-    does -- the inline command and the palette choice are the same switch.
+    """Act on the inline /commands in a chat message. True when a blocking command
+    (provider, model, vision, effort) ran: its result is the whole answer and the turn stops.
+    Otherwise the text still to send, read-only commands stripped. Writes through the globals.
     """
     global SETTINGS, messages
     res = inline.parse(text)
@@ -276,7 +381,9 @@ def inline_command(env, text: str):
             except ValueError as e:
                 notice = f"{name}: {e}"
             if notice:
-                ipc.reply(env, "token", {"state": "notice", "token": notice, "status": "running"})
+                # No run state claimed: nothing is generating, so a frontend
+                # timing this would be timing a loop that does not exist.
+                ipc.reply(env, "token", {"state": "notice", "token": notice})
         return True
     for name, arg in res.parallel:
         try:
@@ -284,7 +391,7 @@ def inline_command(env, text: str):
         except ValueError as e:
             notice = f"{name}: {e}"
         if notice:
-            ipc.reply(env, "token", {"state": "notice", "token": notice, "status": "running"})
+            ipc.reply(env, "token", {"state": "notice", "token": notice})
     return res.text
 
 
@@ -321,27 +428,56 @@ def _run_inline(name, arg) -> str:
         sess.set_effort(arg)
         config.set_default_effort(sess.effort)
         return f"effort -> {sess.effort}"
+    if name == "compact":
+        # Three jobs, one word. With no argument it folds now; with a size it sets
+        # the limit the conversation folds at; with a share it sets that instead,
+        # because a limit in tokens means something different on a 256k model than
+        # on a 1M one and both spellings are honest about what they are.
+        if not arg:
+            return fold_now()
+        want = arg.strip().lower()
+        if want in ("off", "never", "none"):
+            config.set_compact(0)
+            return "compact: off - the conversation will not fold on its own"
+        if want in ("auto", "default", "ratio"):
+            config.set_compact(None)
+            window = config.context_window(SETTINGS["provider"], SETTINGS.get("model", ""))
+            limit = compact.trigger({**SETTINGS, "effort": sess.effort})
+            if not limit:
+                return "compact: automatic, but this model's window is unknown"
+            # Say the actual rule rather than "automatic": on this window it is a
+            # number, and a number is what someone can check against /context.
+            share = round(compact.ratio(window) * 100) if window else 0
+            return f"compact -> automatic: {share}% of the window ({limit:,} tokens here)"
+        n = _size(want)
+        if not n: return f"compact: {arg!r} is not a size (400k, 250000, 40%)"
+        config.set_compact(n)
+        limit = compact.trigger({**SETTINGS, "effort": sess.effort})
+        # A count is a count; a share is a share. Formatted from what was typed, so
+        # "400k" is not echoed back as "400,000.0".
+        said = f"over {int(n):,} tokens" if n > 1 else f"at {round(n * 100)}% of the window"
+        return f"compact -> {said} ({limit:,} tokens here)" if limit else f"compact -> {said}"
     if name == "context":
         r = context.report(sess, SETTINGS, ctx, messages=messages, last=LAST_TURN)
         left = f" ({r['free']} left of {r['window']})" if r.get("window") else ""
         kind = "measured" if r.get("measured") else "estimated"
-        return f"context: {r['used']} tokens filling the window{left} · {kind}"
+        return f"context: {r['used']} tokens filling the window{left} \u00b7 {kind}"
     if name == "usage":
         t = usage.rollup(0)
         tot = t.get("total") or {}
-        return (f"usage: {t.get('sessions', 0)} sessions · {tot.get('rounds', 0)} rounds · "
-                f"{tot.get('in', 0)} in / {tot.get('out', 0)} out tokens")
+        # The cache share, when any round reported one: without it the input figure reads as
+        # every prompt at full price, which is what made this command worth distrusting.
+        cached = tot.get("cache") or 0
+        share = f" \u00b7 {round(cached * 100 / tot['in'])}% cached" if cached and tot.get("in") else ""
+        return (f"usage: {t.get('sessions', 0)} sessions \u00b7 {tot.get('rounds', 0)} rounds \u00b7 "
+                f"{tot.get('in', 0)} in / {tot.get('out', 0)} out tokens{share}")
     return None
 
 
 def fs_listing(root: str, sub: str = "") -> dict:
-    """One directory, listed, for a frontend's `@` menu.
-
-    Relative to the session's own directory and never above it: the menu is
-    completing a path the agent will be asked to read, so `..` and an absolute
-    path come back empty rather than as a window onto the disk. Hidden entries
-    stay out for the same reason they stay out of any other file picker, and
-    directories sort first because typing `@` is usually the start of a walk.
+    """One directory for a frontend's `@` menu: relative to the session's own
+    directory and never above it, so `..` and an absolute path come back empty.
+    Hidden entries stay out, and directories sort first.
     """
     base = os.path.realpath(root or os.getcwd())
     rel = (sub or "").strip().rstrip("/")
@@ -365,47 +501,41 @@ def fs_listing(root: str, sub: str = "") -> dict:
 
 
 while True:
-    # The frontend is gone: pipe EOF or reparented to launchd, so exit rather
-    # than poll an empty inbox forever. Mirrors `stop`: background work asked
-    # to stop first, then the session is committed -- and an empty one is
-    # dropped, so an opened-but-never-used session leaves no folder.
+    # The frontend is gone: pipe EOF or reparented to launchd. Mirrors `stop`:
+    # background work killed first, then the session committed, empty dropped.
     if ipc.eof() or os.getppid() == 1:
         JOBS.kill_all()
         sess.commit()
         drop_empty(sess)
         sys.exit(0)
-    # Names that finished while the loop was busy. Applied here rather than on
-    # the thread that produced them, so meta.json has one writer and stdout has
-    # one writer -- a naming call that lands mid-stream must not interleave
-    # with it.
+    # Names that finished while the loop was busy, applied here rather than on
+    # the thread that produced them, so meta.json and stdout have one writer.
     for finished in naming.drain():
         naming.apply(finished, sess)
-    # Said here, once, whoever set it. A name arrives from four places -- a stub
-    # off the first message, the auto-namer a turn or two later, the agent
-    # renaming it, and opening an older conversation -- and a frontend putting
-    # it in its window title needs all four. Comparing against the last one sent
-    # is what makes polling it every pass free.
     announce_title()
+
+    # Peer mail for an idle agent: nobody is at the prompt, so a message would sit in
+    # the mailbox until the person pressed enter. Shaped like the cmd a frontend sends,
+    # so it goes through the same door and becomes an ordinary turn. Skipped while a run
+    # is in flight, where the round seam owns delivery instead.
+    if not ipc.cancelled() and not ipc.running:
+        for mail in peers.as_cmds(sess.id): ipc.inbox.put(mail)
 
     for env in ipc.poll():
         if env.type == "terminal":
             ipc.reply(env, "status", {"terminal": ipc.terminal_info})
             ipc.terminal_info = env.data
             ctx = Ctx(ipc.terminal_info)
-            # The boot session was created before this envelope landed, so its
-            # frontend is stamped here rather than at create() -- and this is
-            # where the session becomes real: its folder is born with the cwd
-            # and the frontend on it, before the first round commits.
+            # The boot session predates this envelope, so its frontend and cwd
+            # are stamped here; neither writes, so no folder is born yet.
             sess.set_frontend(ctx.get("term_program") or "")
-            sess.persist(ctx.get("cwd") or "")
+            sess.set_cwd(ctx.get("cwd") or "")
             continue
         if env.type != "cmd": continue
         action = env.data.get("action")
         if action == "stop":
-            # Background work is asked to stop first. It cannot outlive the
-            # process either way -- the threads are daemons -- but a shell job
-            # holds a real process group, and that one does outlive us unless
-            # something kills it on the way out.
+            # Background work first: the threads are daemons, but a shell job
+            # holds a real process group that outlives us unless it is killed.
             JOBS.kill_all()
             sess.commit()
             drop_empty(sess)
@@ -416,14 +546,10 @@ while True:
             # reader thread; this is only the acknowledgement.
             ipc.reply(env, "status", {"state": "cancel_ack"})
         elif action == "background":
-            # Same shape as cancel, and for the same reason: the flag was set on
-            # the reader thread while this loop was still inside generate(), so
-            # by the time the envelope is read here the call has already moved.
-            # Nothing to do but say so.
+            # Same shape as cancel: the flag was set on the reader thread while
+            # this loop was still inside generate(), so the call has already moved.
             ipc.reply(env, "status", {"state": "background_ack"})
         elif action == "background.list":
-            # For a frontend drawing a jobs panel. The model reads the same
-            # registry through the background tool; this is the other audience.
             ipc.reply(env, "jobs", {"jobs": [j.brief() for j in JOBS.list(env.data.get("state") or "all")]})
         elif action == "background.kill":
             jid = env.data.get("job", "")
@@ -431,22 +557,16 @@ while True:
                                     "jobs": [j.brief() for j in JOBS.list()]})
         elif action == "permission.mode":
             mode = (env.data.get("mode") or "ask").lower()
-            if mode not in ("ask", "auto", "off"): mode = "ask"
+            if mode not in ("ask", "auto", "bypass", "off"): mode = "ask"
             PERM_MODE = mode
             ipc.reply(env, "status", {"state": "permission", "mode": mode})
         elif action == "tool.detail":
-            # The result itself, one call at a time and never streamed by
-            # default -- the wire carried only its size. Normally answered on
-            # the reader thread; this catches one that arrived before that.
-            try: want = int(env.data.get("index", -1))
-            except (TypeError, ValueError): want = -1
-            ipc.reply(env, "detail", tool_detail(sess, want))
+            # Normally answered on the reader thread; this catches one that
+            # arrived before that.
+            _detail_now(env)
         elif action == "context.report":
-            # What the window is full of, read off what is already loaded. It
-            # asks the provider nothing -- a readout that spent tokens to say how
-            # many tokens you had spent would be a poor joke -- so it is answered
-            # from the prompt, the tool schemas and the history in memory, and
-            # says plainly which of its numbers were measured and which estimated.
+            # Read off the prompt, the tool schemas and the history in memory: the
+            # readout itself costs no tokens.
             try:
                 ipc.reply(env, "context", context.report(sess, SETTINGS, ctx,
                                                          messages=messages, last=LAST_TURN))
@@ -454,47 +574,20 @@ while True:
                 ipc.reply(env, "status", {"state": "error", "error": str(e)})
 
         elif action == "usage.report":
-            # The same rollup `--usage` prints, for a frontend that would rather
-            # draw it. Read from the meta files, so a hundred conversations cost
-            # a hundred small json reads and not one transcript.
+            # The same rollup --usage prints. Read from the meta files, so a
+            # hundred conversations cost a hundred small json reads.
             try: days = int(env.data.get("days") or 0)
             except (TypeError, ValueError): days = 0
             rep = usage.rollup(days)
-            # This conversation's own, including the rounds not yet committed --
-            # the session you are in is the one you are asking about.
+            # This conversation's own, including the rounds not yet committed.
             rep["session"] = {"id": sess.id, **(usage.of_records(sess.records()) or {})}
             ipc.reply(env, "usage", rep)
 
-        elif action == "skill.list":
-            # The palette's half of skills. Only the ones a user may invoke:
-            # a skill marked `disable-user-invocation` is the model's to reach
-            # for, and never appears as a /command.
-            try:
-                ipc.reply(env, "skills", {"skills": skills.listing("user")})
-            except Exception as e:
-                ipc.reply(env, "status", {"state": "error", "error": str(e)})
+        elif action in ("skill.list", "command.list", "fs.list", "session.list", "provider.list"):
+            _list_now(env)
 
-        elif action == "command.list":
-            # The `/` menu: the inline commands, read off the parser's own
-            # table. Nothing to keep in sync -- the worker already knows which
-            # commands it routes, so this is a read of what it would act on.
-            ipc.reply(env, "commands", {"commands": inline.listing()})
-
-        elif action == "fs.list":
-            # The `@` menu: one directory of this conversation's own tree. The
-            # root is the session's cwd and not wherever this process happens
-            # to sit, because the path lands in a message the agent will read
-            # from the session's directory.
-            root = sess.meta.get("cwd") or ctx.get("cwd") or os.getcwd()
-            ipc.reply(env, "files", fs_listing(root, env.data.get("dir", "")))
-
-        elif action == "session.list":
-            ipc.reply(env, "sessions", {"sessions": store.list_sessions(), "active": sess.id})
-
-        # The tree's project list: directories the user promoted, persisted in
-        # projects.json. Every reply carries the whole payload - the fresh
-        # list, the pin order, the custom names and icons (projects_data) - so
-        # the frontend never re-asks; the envelope type is "projects" either way.
+        # Project list and edits: directories the user promoted, persisted in
+        # projects.json. Every reply carries the whole payload.
         elif action == "project.list":
             ipc.reply(env, "projects", projects_data())
         elif action == "project.add":
@@ -504,8 +597,7 @@ while True:
             except ValueError as e:
                 ipc.reply(env, "status", {"state": "error", "error": str(e)})
         elif action == "project.rename":
-            # Custom display name and/or icon (one emoji) for a promoted
-            # project. Cosmetics only: the group key stays the basename.
+            # Cosmetics only: the group key stays the basename.
             try:
                 store.rename_project(env.data.get("dir", ""),
                                      env.data.get("name", ""), env.data.get("icon", ""))
@@ -519,8 +611,6 @@ while True:
             except ValueError as e:
                 ipc.reply(env, "status", {"state": "error", "error": str(e)})
         elif action == "project.pin":
-            # Pin order is the tree's ordering, persisted with the projects so
-            # a new window opens the way the last one was left.
             try:
                 on = bool(env.data.get("on", True))
                 store.pin_project(env.data.get("name", ""), on)
@@ -528,9 +618,8 @@ while True:
             except ValueError as e:
                 ipc.reply(env, "status", {"state": "error", "error": str(e)})
         elif action == "project.move":
-            # One slot up/down within the section the group sits in (pin order
-            # for pinned groups, promotion order for the rest). Not a drag:
-            # the tree's order is explicit state, moved by explicit commands.
+            # One slot up or down inside the section the group sits in: pin
+            # order for pinned groups, promotion order for the rest.
             try:
                 try: delta = int(env.data.get("delta") or 0)
                 except (TypeError, ValueError): delta = 0
@@ -539,22 +628,16 @@ while True:
             except ValueError as e:
                 ipc.reply(env, "status", {"state": "error", "error": str(e)})
 
-        elif action == "provider.list":
-            # listing() never carries a key, only has_key -- this crosses the
-            # wire and lands in frontend logs.
-            ipc.reply(env, "providers", {"providers": config.listing(),
-                                         "vision": config.vision_helper()[0], "vision_model": config.vision_helper()[1],
-                                         "sighted": config.sighted()})
-
         elif action == "provider.use":
             try:
                 SETTINGS = config.settings(config.use(env.data.get("name", "")))
                 # Records are canonical, so the history rebuilds in the new
-                # dialect rather than the conversation starting over.
+                # dialect and the model comes with the provider.
                 sess.set_provider(SETTINGS["provider"])
+                sess.set_model(SETTINGS.get("model", ""))
                 messages = sess.messages()
-                ipc.reply(env, "status", {"state": "provider", "provider": SETTINGS["provider"],
-                                          "model": SETTINGS.get("model", ""), "msg_count": len(messages)})
+                ipc.reply(env, "status", {"state": "provider", **settings_fields(sess),
+                                          "msg_count": len(messages)})
             except ValueError as e:
                 ipc.reply(env, "status", {"state": "error", "error": str(e)})
 
@@ -568,25 +651,20 @@ while True:
                 if name == SETTINGS.get("provider"):
                     SETTINGS = config.settings()
                     if env.data.get("model"): sess.set_model(env.data["model"])
-                    # A model swap within one provider can turn vision off, and
-                    # a history holding screenshots would then fail every
-                    # request from here on. Rebuilding drops them to notes --
-                    # the records keep the blobs, so switching back restores
-                    # the images themselves.
+                    # A model swap can turn vision off, and a history holding
+                    # screenshots fails every request after. Records keep the blobs.
                     messages = sess.messages()
-                # Reply from listing(), never from the request: echoing back
-                # env.data would put the key straight into the frontend log.
+                    ipc.reply(env, "status", settings_fields(sess))
+                # Reply from listing(), never the request: echoing env.data puts the key in the log.
                 ipc.reply(env, "providers", {"providers": config.listing(),
-                                         "vision": config.vision_helper()[0], "vision_model": config.vision_helper()[1],
-                                         "sighted": config.sighted()})
+                                             "vision": config.vision_helper()[0], "vision_model": config.vision_helper()[1],
+                                             "sighted": config.sighted()})
             except ValueError as e:
                 ipc.reply(env, "status", {"state": "error", "error": str(e)})
 
         elif action == "model.list":
-            # Asked of the provider rather than kept in a table here: the
-            # catalogs rotate, and a hardcoded list is wrong the week after it
-            # is written. A provider that will not answer says so, and the
-            # frontend keeps showing what is configured.
+            # Asked of the provider, not kept in a table here: the catalogs rotate. A
+            # provider that will not answer says so.
             try:
                 name = env.data.get("name") or SETTINGS["provider"]
                 p = providers.new(name)
@@ -597,41 +675,35 @@ while True:
                     "provider": name, "models": found or [],
                     "listed": found is not None,
                     "active": config.model_for(name),
-                    # What is already known about each, so the picker can mark a
-                    # model that cannot see without asking the provider once per row.
+                    # What is already known, so the picker can mark a blind model
+                    # without asking the provider once per row.
                     "blind": sorted({m for m, caps in (known.get("model_caps") or {}).items()
                                      if "vision" not in caps} | set(known.get("blind_models") or []))})
             except Exception as e:
                 ipc.reply(env, "status", {"state": "error", "error": str(e)})
 
         elif action == "vision.use":
-            # Which provider looks at images for a model that cannot. A role,
-            # not a provider setting, so it is set here rather than through
-            # provider.set -- and validated there, because a helper that cannot
-            # see would otherwise fail much later, inside a tool call.
+            # A role, not a provider setting: set here rather than through
+            # provider.set. Validated on the spot, or it fails later in a tool call.
             try:
                 config.set_vision_helper(env.data.get("name", ""), env.data.get("model"))
                 ipc.reply(env, "providers", {"providers": config.listing(),
                                              "vision": config.vision_helper()[0], "vision_model": config.vision_helper()[1],
-                                         "sighted": config.sighted()})
+                                             "sighted": config.sighted()})
             except ValueError as e:
                 ipc.reply(env, "status", {"state": "error", "error": str(e)})
 
         elif action == "session.effort":
-            # Session state, not provider state: the depth you picked belongs
-            # to this conversation and travels with it on reload.
+            # Session state, not provider state: the depth belongs to this
+            # conversation and travels with it on reload.
             try:
-                # Refused rather than approximated. Every other rung lands on
-                # the nearest thing this model has, which is coarse but true to
-                # what it says; "off" landing on the lowest rung there is would
-                # be the box marked "no thinking at all" buying thinking.
+                # Refused rather than approximated: every other rung lands on the
+                # nearest thing the model has, but "off" has to mean off.
                 if reason := config.effort_block(env.data.get("effort", "")):
                     ipc.reply(env, "status", {"state": "error", "error": reason})
                 else:
                     sess.set_effort(env.data.get("effort", ""))
-                    # ...and remembered as the level the next one starts on.
-                    # The session still owns what it is running at; this only
-                    # stops the choice dying with the process.
+                    # ...and remembered as the level the next conversation opens on.
                     config.set_default_effort(sess.effort)
                     ipc.reply(env, "status", {"state": "effort", "effort": sess.effort,
                                               "session_id": sess.id})
@@ -639,36 +711,46 @@ while True:
                 ipc.reply(env, "status", {"state": "error", "error": str(e)})
 
         elif action == "session.new":
-            # Carried over rather than reset: starting a fresh chat is not a
-            # request to go back to whatever the provider does by default.
+            # The effort carries over: a fresh chat is not a request to go back
+            # to whatever the provider does by default.
             recall.forget(sess.id)
             instructions.forget(sess.id)
-            # Last round's cost belonged to the conversation that just went.
             LAST_TURN.clear()
+            # Committed before it goes: a backgrounded subagent holds this session's bound
+            # add_spend, and whatever it has billed so far has nowhere else to land.
+            sess.commit()
             drop_empty(sess)
             sess = Session.create(provider=SETTINGS["provider"], model=SETTINGS.get("model", ""),
                                   effort_level=sess.effort, frontend=ctx.get("term_program") or "")
             messages = sess.messages()
+            # The boot-time assignment again: this is a different session object, and
+            # a /compact after a resume must fold the one that is now live.
+            ctx["session"] = sess
             naming.set_live(sess)
+            peers.become(sess.id)
             ipc.reply(env, "status", {"state": "session", "session_id": sess.id,
-                                      "effort": sess.effort, "msg_count": len(messages)})
-            # A new conversation has no name yet, and saying so is the point:
-            # the frontend is showing the one that just went.
+                                      **settings_fields(sess), "msg_count": len(messages)})
+            # Saying the empty name is the point: the frontend is showing the one
+            # that just went.
             announce_title(env)
         elif action == "session.load":
             try:
                 loaded = Session.open(env.data.get("id", ""))
                 loaded.restore_tool_state()
                 LAST_TURN.clear()
+                # Same reason as session.new: spend still arriving from a backgrounded
+                # subagent is this session's, and this is its last door out.
+                sess.commit()
                 drop_empty(sess)
                 sess, messages = loaded, loaded.messages()
                 naming.set_live(sess)
-                # The status goes first so a frontend can clear whatever it was
-                # showing before the replayed conversation starts arriving.
+                # The pid follows the session: a peer has to stop believing a worker
+                # is holding the conversation it just navigated away from.
+                peers.become(sess.id)
+                # Status first, so a frontend can clear what it was showing
+                # before the replayed conversation starts arriving.
                 ipc.reply(env, "status", {"state": "session", "session_id": sess.id,
-                                          "effort": sess.effort, "msg_count": len(messages)})
-                # Before the replay rather than after it: the conversation is
-                # already this one by the time its first message is redrawn.
+                                          **settings_fields(sess), "msg_count": len(messages)})
                 announce_title(env)
                 replay(sess, env)
                 ipc.reply(env, "token", {"state": "done", "token": "done", "status": "done",
@@ -682,17 +764,15 @@ while True:
             except ValueError as e:
                 ipc.reply(env, "status", {"state": "error", "error": str(e)})
         elif action == "session.archive":
-            # The tree's trash can: out of every listing, back by moving the
-            # folder in. Not a delete - nothing is lost.
+            # The trash can, not the delete: out of every listing, back by
+            # moving the folder in.
             try:
                 sid = env.data.get("id", "")
                 ipc.reply(env, "status", {"state": "archived" if store.archive(sid) else "error", "session_id": sid})
             except ValueError as e:
                 ipc.reply(env, "status", {"state": "error", "error": str(e)})
         elif action == "session.pin":
-            # The tree's pin, persisted on the meta like the projects are. The
-            # reply is a fresh sessions list, so the frontend re-stamps its
-            # pins from it instead of re-asking.
+            # The reply is a fresh sessions list, so the frontend re-stamps its pins.
             try:
                 sid = env.data.get("id", "")
                 on = bool(env.data.get("on", True))
@@ -701,45 +781,54 @@ while True:
                 ipc.reply(env, "sessions", {"sessions": store.list_sessions(), "active": sess.id})
             except (ValueError, FileNotFoundError) as e:
                 ipc.reply(env, "status", {"state": "error", "error": str(e)})
+        elif action == "session.rename":
+            # A name set by hand is stamped `user`, which is what stops the namer
+            # renaming it back later: the auto title never overwrites a chosen one.
+            try:
+                sid = env.data.get("id", "")
+                title = (env.data.get("title") or "").strip()
+                if not title: raise ValueError("a name needs something in it")
+                if sid == sess.id:
+                    sess.set_title(title, "user")
+                    announce_title(env)
+                else:
+                    title = store.rename_session(sid, title)
+                    ipc.reply(env, "status", {"state": "session_title", "title": title,
+                                              "source": "user", "session_id": sid})
+            except (ValueError, FileNotFoundError) as e:
+                ipc.reply(env, "status", {"state": "error", "error": str(e)})
         elif action == "chat":
-            # Config is re-read every turn: the user edits it, and a model
-            # changed by hand must not survive until restart.
+            # Config is re-read every turn: the user edits it by hand, and a
+            # model changed behind our back must not survive until restart.
             before = (SETTINGS.get("vision", True), SETTINGS.get("model", ""))
             SETTINGS = config.settings()
             now = (SETTINGS.get("vision", True), SETTINGS.get("model", ""))
             if now != before:
-                # The model or its eyes changed under us. The history was
-                # rendered for the old answer -- images dropped to notes, or
-                # notes standing where images could now be -- so it is rebuilt
-                # before anything is sent, and the session records what it is
-                # actually running on.
+                # The history was rendered for the old answer, so it is rebuilt
+                # before anything is sent.
                 sess.set_model(now[1])
                 messages = sess.messages()
             text = env.data.get("text", "")
-            # Inline /commands typed in or beside the message. A blocking one
-            # (provider, model, vision, effort) is the whole answer: it runs,
-            # its result is shown, and the turn stops here -- the request the
-            # model would have made is about to be wrong, so there is nothing
-            # to generate until it is sent again under the new setting. The
-            # read-only ones (context, usage) run, are shown, and the rest of
-            # the message still goes on. Either way the command never reaches
-            # the model as prose.
+            # A blocking inline command is the whole answer and stops the turn; a
+            # read-only one is shown and the rest still goes. Neither reaches the model.
             _inline = inline_command(env, text)
             if _inline is True or (isinstance(_inline, str) and not _inline.strip()):
+                # Nothing is generating and nothing is about to, which only this side
+                # knows. Run state goes in `status`, not `state` (what a payload is).
+                ipc.reply(env, "status", {"status": "idle", **settings_fields(sess)})
                 continue
             if isinstance(_inline, str):
                 text = _inline
-            # What the user attached to this message, as [{"name", "b64"}].
-            # Only the payload reaches the model -- the filename is for the
-            # frontends, which show it in place of a picture they have no way
-            # to draw -- and it is kept on the record so a reopened session
-            # still says what was sent rather than "1 image".
+            # A peer message that took this door reads as one from the moment the turn is
+            # built, not after: it has no user record, so the peer record below is the only
+            # thing the model's turn is filed under.
+            peer_tag = env.data.get("peer") or None
+            # What the user attached: [{"name", "b64"}]. Only the payload reaches
+            # the model; the filename is kept on the record for the frontends.
             attached = [a for a in (env.data.get("images") or [])
                         if isinstance(a, dict) and a.get("b64")]
-            # A model that cannot see is told rather than sent an image it will
-            # 400 on. The attachment is dropped from the request and from the
-            # record both: recording it would put it back into the history on
-            # the next turn, and the turn after that, forever.
+            # A model that cannot see is told, not sent an image it will 400 on, and the
+            # attachment is dropped from the record, or it returns in the history forever.
             if attached and not config.can_see(SETTINGS["provider"]):
                 names = ", ".join(a.get("name") or "image" for a in attached)
                 ipc.reply(env, "token", {"state": "notice", "status": "running",
@@ -749,63 +838,58 @@ while True:
             # Asked before the record is written, because "is this the opening
             # message" stops being answerable the moment it is one.
             opening = not any(r.get("t") == "user" for r in sess.records())
-            # Built by the provider adapter rather than by hand: a user turn
-            # with a picture on it is three different shapes, and this is the
-            # same call replay makes when it rebuilds the turn from disk.
+            # Built by the provider adapter, the same call replay makes: a user
+            # turn with a picture on it is three different shapes.
             turn = providers.get(sess.provider).user_message(text, [a["b64"] for a in attached])
-            # The names, in the message itself. Not recorded as a separate
-            # record: it is derived from the attachments on the user record, so
-            # replay rebuilds the identical line from the identical source
-            # rather than from a note that could drift from it.
+            # The names ride in the message itself rather than as a record:
+            # derived from the attachments, so replay rebuilds the same line.
             providers.append_user_text(turn, providers.attachment_note(attached))
             messages.append(turn)
-            sess.add_user(text, attached)
-            # The opening message is what a session gets its provisional name
-            # from, and that name is set inside the call above. Said now rather
-            # than at the top of the loop: the loop does not come back around
-            # until the turn ends, and a window title that only appears once the
-            # answer is finished is a window title for the wrong thing.
+            # A peer's words are the peer's record and are not drawn as the person's line;
+            # anything else here was typed by the person, so it is theirs.
+            if not peer_tag:
+                sess.add_user(text, attached)
+            # Set inside add_user, said now: the loop does not come back around
+            # until the turn ends, and the title would be for the wrong thing.
             announce_title(env)
-            # Where the turn is happening, for anything that scores by it. Set
-            # before recall runs and before the tool descriptions are rebuilt,
-            # which is what makes the memory index the *right* project's.
+            # Where the turn is happening, set before recall runs and before the
+            # tool descriptions are rebuilt, so the memory index is this project's.
             sess.set_cwd(ctx.get("cwd") or "")
             memory.set_cwd(ctx.get("cwd") or "")
-            # And what is on screen, so an app's memories are listed by the tool
-            # while that app is frontmost instead of waiting for the user to
-            # type its name.
             memory.set_apps([ctx.get("frontmost_app") or ""])
-            # Pointers to things already known that look related. Appended to
-            # the user's own message rather than sent as a second one: two user
-            # messages in a row is a 400 on anthropic, and this is a note about
-            # that message anyway. Never allowed to fail a turn -- a recall
-            # block is a convenience, and no convenience gets to eat a message.
+            # Notes ride beside the user's message, not as a second one: two in a
+            # row is a 400 on anthropic. None of these may fail a turn.
             try:
                 notes = recall.block(text, sid=sess.id, path=ctx.get("cwd") or "",
                                      apps=[ctx.get("frontmost_app") or ""])
             except Exception:
                 notes = []
             # Project documentation: names and sizes only, at most twice in a
-            # conversation, because it answers a different question than recall
-            # -- what does this repo say of itself, not what do I already know.
+            # conversation.
             try:
                 docs = instructions.docs_block(text, sid=sess.id, path=ctx.get("cwd") or "",
                                                first=opening)
             except Exception:
                 docs = ""
             # A message that opens with /<skill> loads that skill's instructions.
-            # Same rail again: the user's line stays the line they typed, and
-            # the body rides beside it rather than replacing it -- so a skill
-            # invoked by hand reads back as what it was.
             try:
                 skill_block = skills.invocation(text)
             except Exception:
                 skill_block = ""
-            # The interrupt note rides the same rail as recall and docs, and for
-            # the same reason: it is runtime text about this user message, so it
-            # is folded into it rather than sent as another. Spent as it is used
-            # -- a turn is only interrupted once, and a note repeated on every
-            # turn after would read as a fresh stop each time.
+            # The interrupt note rides the same rail and is spent as it is used:
+            # repeated, it would read as a fresh stop each time.
+            # A peer message that started this turn: recorded as a peer's words rather
+            # than as the person's, and drawn with the buddy mark. One place for both
+            # paths, because a wake turn takes the same door a typed message does.
+            if peer_tag:
+                sess.add_peer(peer_tag.get("from", ""), peer_tag.get("name", ""),
+                              peer_tag.get("from_cwd", ""), peer_tag.get("text", ""))
+                shown = "peer message from %s\n%s" % (peer_tag.get("name", "?"),
+                                                      peer_tag.get("body", ""))
+                ipc.reply(env, "token", {"state": "peer", "token": shown, "status": "running"})
+            # The block itself still rides beside the message for the model; on a peer
+            # turn the peer state already said all of it, and drawing it twice is a row
+            # nobody can read.
             for extra in (pending_note, *notes, docs, skill_block):
                 if not extra: continue
                 sess.add_recall(extra)
@@ -813,114 +897,108 @@ while True:
                 ipc.reply(env, "token", {"state": "notice", "token": extra, "status": "running"})
             pending_note = ""
             ipc.reply(env, "status", {"type": "chat_received"})
-            # ctx gets this turn's session here: there are three `sess =` sites
-            # and a tool only reads it inside the run. A path, not a mkdir --
-            # an idle launch still leaves no session behind.
+            # Peer mail rides in as a chat envelope. The tag says who wrote it and what
+            # the model was given, since the turn's own text carries the lead-in (which
+            # nobody typed) rather than the block the provider saw. The record and the row
+            # are already done above, so this only answers the mid-turn case.
+            peer_from = (peer_tag or {}).get("from")
+            # This turn's session goes in here: there are three `sess =` sites and
+            # a tool only reads it inside the run.
             ctx["session_dir"] = str(sess.dir)
-            # How hard this conversation is thinking, for anything that starts
-            # a model of its own from inside a tool call. A subagent that did
-            # not name a level runs at the conversation's rather than at a
-            # constant nobody chose -- see handler/agent/subagent.py.
+            # How hard this conversation is thinking, for anything that starts a
+            # model of its own from inside a tool call.
             ctx["effort"] = sess.effort
+            # The door ask_user opens. Per turn, not at boot, because it closes over
+            # this process's ipc and nothing else; passed through ctx because a tool
+            # handler gets ctx and cannot import the worker it is running inside.
+            ctx["ask_user"] = ask_user
+            # The session itself, so the round loop can fold the conversation it is
+            # about to send. An object, not an import: generate() is also the
+            # subagent loop, which runs for callers with no session at all.
+            ctx["session"] = sess
             ipc.begin_run()
             round_mark = len(messages)
-            # What the round in flight has been charged, held only until the
-            # assistant record it belongs to is written. Cleared per round, so a
-            # round the provider never reported on is recorded as unmeasured
-            # rather than inheriting the previous round's numbers.
+            # Held until the assistant record it belongs to is written and cleared
+            # per round, so a round the provider never reported on carries nothing.
             round_cost = {}
             try:
                 # The provider half of the settings is account-wide and the
-                # effort is this conversation's, so they are joined per turn
-                # rather than kept as one stale dict.
+                # effort is this conversation's, so they are joined per turn.
                 for chunk in generate(API_KEY=config.api_key(SETTINGS["provider"]), messages=messages,
                                       ctx=ctx, settings={**SETTINGS, "effort": sess.effort},
-                                      # One segment each: shipped instructions,
-                                      # standing orders, always-on skills (stable,
-                                      # so the cached prefix survives), then this
-                                      # turn's machine facts. Blanks dropped: an
-                                      # empty system block errors on some providers.
+                                      # One segment each: the shipped prefix stays
+                                      # stable, so the cache survives; machine facts last.
                                       system=[s for s in (sess.system, instructions.user_block(),
                                                           skills.always_block(),
                                                           environment.block(ctx, SETTINGS, sess)) if s],
                                       cancelled=ipc.cancelled,
-                                      # steer is a callable, not a list: generate()
-                                      # asks at the one point a user message is
-                                      # legal, and end_run puts the rest back as
-                                      # an ordinary next turn.
+                                      # A callable, not a list: generate() asks at
+                                      # the one point a user message is legal.
                                       steer=ipc.take_steer,
-                                      # The event itself, not a reading of it:
-                                      # generate() clears it as it consumes it,
-                                      # so one press backgrounds one call.
+                                      # Which mailbox the round seam drains. Not
+                                      # `ctx["session_dir"]`, which a subagent shares:
+                                      # a subagent is not the agent peers are talking to.
+                                      peer_sid=sess.id,
+                                      # The event itself: generate() clears it as
+                                      # it consumes it, one press one call.
                                       detach=ipc.background,
-                                      # In auto the gate screens first and ask
-                                      # takes the calls it flags; ask alone is
-                                      # plain ask mode, neither is off.
-                                      ask=ask_permission if PERM_MODE in ("ask", "auto") else None,
+                                      # Who the calls that need asking go to, per
+                                      # mode.
+                                      ask=(ask_permission if PERM_MODE in ("ask", "auto")
+                                           else bypass_gate if PERM_MODE == "bypass" else None),
                                       auto=auto_decide if PERM_MODE == "auto" else None):
                     typ = chunk.get("type")
                     if typ == "round":
-                        # generate() takes its own rollback mark immediately
-                        # before yielding this, so the two stay in step and a
-                        # rewind here drops exactly the round it drops.
+                        # generate() takes its own rollback mark right before
+                        # yielding this, so the two stay in step.
                         round_mark = len(messages)
                         round_cost = {}
-                        # Committed BEFORE the mark is taken: everything in
-                        # _pending right now is provably consistent -- user
-                        # message and recall on the first round, each finished
-                        # round on the rest -- so this is the point a force-
-                        # kill loses nothing but the round in flight. The
-                        # error path below rewinds to a mark of 0 and its
-                        # commit can no longer flush a partial round.
+                        # Committed before the mark is taken: pending state is
+                        # consistent here, so a force-kill loses only this round.
                         sess.commit()
                         sess.round_start()
                     elif typ == "assistant":
                         sess.add_assistant(chunk.get("thinking", ""), chunk.get("content", ""),
                                            chunk.get("tool_calls") or [], usage=round_cost)
                     elif typ == "cancelled":
-                        # No rewind: the loop closed the round off (every
-                        # tool_call has an interrupted result), so `messages`
-                        # is resumable -- deleting them was what erased the stop
-                        # from the model's view.
+                        # No rewind: the loop closed the round off and every
+                        # tool_call has an interrupted result, so messages is resumable.
                         messages = chunk.get("messages", messages)
                         sess.commit()
-                        # Told to the model on its next turn rather than now: the
-                        # note is a user message, and one sent on its own here
-                        # would sit next to the one the user is about to type.
                         pending_note = chunk.get("note", "")
                         ipc.reply(env, "token", {"state": "cancelled", "token": "cancelled", "status": "cancelled", "msg_count": len(messages)})
                     elif typ == "failed":
                         # A dropped connection, handled like a cancel: the round
-                        # was closed off, so what streamed is kept. State is
-                        # "error" because the turn did end badly; `kept` is what
-                        # newer frontends read.
+                        # was closed off, so what streamed is kept.
                         messages = chunk.get("messages", messages)
                         sess.commit()
                         pending_note = chunk.get("note", "")
                         ipc.reply(env, "token", {"state": "error", "token": chunk.get("error", ""),
                                                  "status": "error", "kept": True,
                                                  "msg_count": len(messages)})
+                    elif typ == "compacting":
+                        # A fold is a model call: the screen would otherwise sit on
+                        # "thinking" for however long the summarizer takes, with
+                        # nothing saying what the wait is for. Its own state, so the
+                        # frontend can draw it quietly and differently.
+                        ipc.reply(env, "status", {"state": "compacting",
+                                                  "stage": chunk.get("stage", ""),
+                                                  "folded": chunk.get("folded", 0),
+                                                  "freed": chunk.get("freed", 0)})
                     elif typ == "retry":
-                        # No "status" key, for the same reason "rate" has none:
-                        # this says the request is being sent again, not that
-                        # the run changed state, and a frontend must not be
+                        # No "status" key, same as rate: a frontend must not be
                         # knocked off thinking or tooling by it.
                         ipc.reply(env, "status", {"state": "retry", "attempt": chunk.get("attempt", 0),
                                                   "of": chunk.get("of", 0), "secs": chunk.get("secs", 0),
                                                   "error": chunk.get("error", "")})
                     elif typ == "rate":
-                        # No "status" key: this says how fast, not what state
-                        # the run is in, and a rate arriving mid-stream must not
-                        # move a frontend off tooling or thinking.
                         ipc.reply(env, "status", {"state": "rate", **context.rate_fields(chunk)})
                     elif typ == "usage":
-                        # Mid-run, once a round's request has been counted. Its
-                        # own status rather than a field on the next token: a
+                        # Its own status rather than a field on the next token: a
                         # tool loop can run for minutes without one.
                         turn = turn_fields(chunk)
-                        # Kept for the assistant record that is about to be
-                        # written: the counts arrive one yield before the turn
-                        # they describe.
+                        # Kept for the assistant record about to be written: the
+                        # counts arrive one yield before the turn they describe.
                         round_cost = usage.stamp(turn, SETTINGS["provider"], SETTINGS.get("model", ""))
                         fields = {**context_fields(chunk.get("usage")), **turn}
                         if fields:
@@ -929,9 +1007,7 @@ while True:
                         messages = chunk.get("messages", messages)
                         sess.commit()
                         # After the commit, so the namer reads a turn count that
-                        # has actually happened. Fires at most three times in a
-                        # session, on its own thread: the answer is already
-                        # streamed and nobody waits on a label.
+                        # has happened. At most three times per session, own thread.
                         naming.maybe_start(sess)
                         ipc.reply(env, "token", {"state": "done", "token": "done", "status": "done",
                                                  "msg_count": len(messages),
@@ -939,23 +1015,40 @@ while True:
                     elif typ == "tool_calls":
                         ipc.reply(env, "token", {"state": "tool_calls", "token": chunk.get("text"), "status": "tooling"})
                     elif typ == "background":
-                        # A call left running. Sent as its own state rather than
-                        # folded into tool_output because the two mean opposite
-                        # things to anything drawing a row: one closes it, this
-                        # one says it will not close for a while.
+                        # Its own state rather than folded into tool_output: one
+                        # closes a row, this one says it will not close for a while.
                         job = chunk.get("job", {})
                         ipc.reply(env, "token", {"state": "background", "token": job.get("job", ""),
                                                  "result": job, "status": "tooling"})
+                    elif typ == "peer":
+                        # Only a message that arrived is recorded. One that went out is not:
+                        # the call that sent it is already on the record, and a second entry
+                        # would double it. `peer_in` tells the two apart -- the other name on
+                        # a sent row is the recipient's, so it cannot.
+                        if chunk.get("peer_in"):
+                            sess.add_peer(peer_from, chunk.get("peer_name", ""),
+                                          (peer_tag or {}).get("cwd", ""),
+                                          (peer_tag or {}).get("text", ""))
+                        shown = chunk.get("text", "")
+                        if shown:
+                            ipc.reply(env, "token", {"state": "peer", "token": shown, "status": "running"})
+                    elif typ == "peer_waiting":
+                        # A message that has landed but has not been handed to the model yet:
+                        # the round it arrived in is still running, and the words themselves
+                        # go in at that round's own seam. So there is nothing to record and
+                        # nothing to draw as a line of the conversation -- the record happens
+                        # once, when the message is delivered, and this only says the round
+                        # that is running has something waiting behind it.
+                        ipc.reply(env, "token", {"state": "peer_waiting", "status": "tooling",
+                                                 "from_peer": chunk.get("from_peer", ""),
+                                                 "peer_name": chunk.get("peer_name", ""),
+                                                 "result": {"n": chunk.get("n", 1)}})
                     elif typ == "notice":
-                        # Runtime text put into the conversation, and -- since
-                        # mid-turn messages land here too -- sometimes the user's
-                        # own words with it. Recorded as a user record either
-                        # way: that is the role it occupies in the history, and a
-                        # record that lied about it would replay wrong.
-                        sess.add_user(chunk.get("text", ""), chunk.get("images") or None)
-                        # Only the runtime half goes to the frontend. It drew the
-                        # user's line when they typed it, and a notice repeating
-                        # it would put the same sentence on screen twice.
+                        # Recorded by the peer branch above, or as the user's turn below.
+                        if not peer_from:
+                            sess.add_user(chunk.get("text", ""), chunk.get("images") or None)
+                        # Only the runtime half goes to the frontend: it drew the
+                        # user's line when they typed it.
                         shown = chunk.get("show", chunk.get("text", ""))
                         if shown:
                             ipc.reply(env, "token", {"state": "notice", "token": shown, "status": "running"})
@@ -963,18 +1056,16 @@ while True:
                         result = chunk.get("result", {})
                         name = chunk.get("name")
                         # Taken before the record is added: this is the index the
-                        # call is about to be filed under, and it is what a
-                        # frontend sends back to tool.detail to read it in full.
+                        # call is filed under, and what tool.detail is asked for.
                         idx = tool_ordinal(sess)
                         sess.add_tool(name, result)
                         if name in ("screenshot", "photos"):
-                            # Keep IPC payload under ~75 chars - images live in messages, not the wire
+                            # Keep the IPC payload tiny - images live in messages, not the wire
                             count = result.get("count", 1)
                             ipc.reply(env, "token", {"state": "tool_output", "token": name, "result": {"n": count}, "index": idx, "status": "tooling"})
                         elif name in ("WebFetch", "agent", "workflow", "skill", "describe_image") and isinstance(result.get("result"), dict):
-                            # A page's body stays out of the drawn row: tens of
-                            # thousands of characters per row, and the content is
-                            # already in the messages if anything wants it.
+                            # The body stays out of the drawn row: tens of
+                            # thousands of characters, and messages already hold it.
                             r = result["result"]
                             body = r.get("output")
                             brief = {k: v for k, v in r.items() if k not in ("output", "log", "text", "instructions", "description")}
@@ -986,8 +1077,7 @@ while True:
                                                      "result": {"result": brief}, "index": idx, "status": "tooling"})
                         elif name == "shell" and isinstance(result.get("result"), dict):
                             # Same reason as images: command output belongs in the
-                            # messages, and a frontend reading line-delimited JSON
-                            # should never have to swallow a build log to draw one row.
+                            # messages, not in a row a frontend has to swallow.
                             r = result["result"]
                             brief = {k: v for k, v in r.items() if k not in ("stdout", "stderr")}
                             brief["bytes"] = len(r.get("stdout", "")) + len(r.get("stderr", ""))
@@ -998,16 +1088,13 @@ while True:
                         ipc.reply(env, "token", {"state": typ, "token": chunk.get("text"), "status": "running"})
             except Exception as e:
                 # A turn that dies mid-round leaves an assistant message whose
-                # tool_calls have no results, which the provider rejects on the
-                # next request. Rewind the live list and the records together,
-                # or the session is persisted in a state it can never resume from.
+                # tool_calls have no results, which the provider rejects. Rewind both.
                 del messages[round_mark:]
                 sess.rewind()
                 sess.commit()
                 ipc.reply(env, "token", {"state": "error", "token": str(e), "status": "error"})
             finally:
-                # The turn is over however it ended. Anything typed during it
-                # that the loop never reached goes back on the inbox here and is
-                # answered as an ordinary next message -- queued, not swallowed.
+                # Anything typed during the turn that the loop never reached goes
+                # back on the inbox and is answered as an ordinary next message.
                 ipc.end_run()
     time.sleep(0.001)

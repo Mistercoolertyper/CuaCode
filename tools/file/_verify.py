@@ -9,12 +9,10 @@ except ImportError: tomllib = None
 def check(path: Path, text: str) -> str | None:
     """A syntax error caught now instead of the next time something runs the file.
 
-    Cheap because it is only ever a parse of text already in memory, and worth it
-    because the alternative is the agent discovering a stray bracket several tool
-    calls later, with no idea which of its edits left it there.
-
-    The write still stands: rolling back would leave the agent editing against
-    content that is no longer on disk, and it needs the broken file to fix it.
+    Cheap, because it is only a parse of text already in memory, and worth it: the
+    alternative is the agent finding a stray bracket several tool calls later with
+    no idea which edit left it there. The write still stands, because rolling back
+    would leave the agent editing against content no longer on disk.
     """
     suf = path.suffix.lower()
     try:

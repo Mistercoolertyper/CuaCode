@@ -14,7 +14,7 @@ def _fetch(source: str) -> bytes:
 
 def _to_b64(data: bytes, max_size: int | None = None) -> str:
     img = Image.open(io.BytesIO(data))
-    # Convert to RGB if necessary so JPEG save always works
+    # JPEG save needs RGB.
     if img.mode in ("RGBA", "P", "LA", "L"):
         img = img.convert("RGB")
     if max_size is not None:
@@ -29,7 +29,7 @@ def run(args: dict, ctx) -> dict:
     sources = args.get("sources", [])
     if not sources:
         raise ValueError("No photo sources provided. Pass URLs or file paths in `sources`.")
-    # Default cap to 1920px so phone-camera photos don't blow the context window
+    # Default cap so phone-camera photos do not blow the context window
     max_size = args.get("max_size", 1920)
     results = {"images": [], "errors": [], "count": 0}
     for src in sources:

@@ -5,16 +5,12 @@ def run(args: dict, ctx) -> dict:
     app = args["app"]
     m = _window.backend()
 
-    # The agent's own window, by name -- the session's own app, not whatever
-    # happens to be frontmost right now. Mid-run that is usually the app being
-    # driven, and parking IT in the left strip is how the driven app and the
-    # agent's window swap places for no reason (and how a GUI frontend's
-    # window -- the agent's actual home -- ended up shrunk to a third).
+    # Park the agent's own window by name, not whatever is frontmost: mid-run that
+    # is usually the app being driven, and the two swap places.
     self_snapped = _window.park_self(getattr(ctx, "self_identity", None))
 
-    # Taken before the launch so that anything the app drags up with it -- a
-    # helper process, a second app it hands the request to -- is known to be new
-    # rather than assumed to have always been there.
+    # Taken before the launch so anything it drags up (a helper process, a second
+    # app it hands the request to) reads as new, not as always having been there.
     _window.baseline()
 
     handle = m.open_app(app)
@@ -27,7 +23,6 @@ def run(args: dict, ctx) -> dict:
     app_snapped = m.snap_region(handle, *_window.APP_REGION, focus=True)
     if app_snapped:
         _window.remember(handle, app)
-    # The app is accounted for now, so the next caller that asks what is new
-    # does not find it and park it a second time.
+    # Accounted for now, so the next caller asking what is new does not park it again.
     _window.baseline()
     return {"ok": True, "app": app, "snapped": app_snapped, "self_snapped": self_snapped}

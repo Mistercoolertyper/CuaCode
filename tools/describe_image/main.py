@@ -1,17 +1,13 @@
 """Eyes for a model that has none.
 
-The agent loop already withholds image-returning tools from a provider that
-cannot accept images -- offering them would earn a 400 and cost the turn. That
-leaves a model that is simply blind, with no way to answer "what does that
-error say" and no way to find out why it has no screenshot tool.
+The agent loop withholds image-returning tools from a provider that cannot accept
+images, which leaves a blind model no way to answer "what does that error say". So
+the image goes to a sighted provider from the same config, run as a subagent with the
+picture in its first message; only the looking is delegated.
 
-So the image goes to a different model. A sighted provider from the same
-config, run as a subagent with the picture in its first message, returning
-words. The conversation stays where it is; only the looking is delegated.
-
-The images are fetched by dispatching the existing tools against the *full*
-registry rather than the filtered one the model sees. That is the point:
-screenshot is hidden from this model and still has to run for it.
+Images are fetched by dispatching the existing tools against the full registry rather
+than the filtered one the model sees: screenshot is hidden from this model and still
+has to run for it.
 """
 from handler.agent.subagent import AgentSpec, run as run_agent
 
@@ -65,11 +61,10 @@ def run(args: dict, ctx) -> dict:
     images = _images(got)
     if not images: return {"error": f"no image came back for {source!r}"}
 
-    # Down the list rather than at the first name. The vision flag is per
-    # provider and vision is a property of the model, so a provider that looks
-    # sighted on paper can still be pointed at a text-only model -- which is
-    # only discoverable by asking it. When one refuses, that is written down so
-    # no later call picks it again, and the next candidate gets the image.
+    # Down the list rather than at the first name: the vision flag is per provider while
+    # vision is a property of the model, so a provider that looks sighted on paper can
+    # still be pointed at a text-only model, which is only discoverable by asking it. A
+    # refusal is written down so no later call picks it again.
     tried = []
     for provider, model in candidates:
         used = model or config.model_for(provider)
@@ -79,15 +74,14 @@ def run(args: dict, ctx) -> dict:
                       f"Question: {args['question']}", ctx=ctx, images=images)
         if not r.get("error"):
             out = dict(r["output"])
-            # Named, because this is another model's account and the caller
-            # should weigh it as one -- and because a picture of the screen
-            # went to it, which the user is entitled to see in the result.
+            # Named, because this is another model's account and the caller should weigh
+            # it as one, and because a picture of the screen went to it.
             out["provider"] = f"{provider}/{used}"
             return out
         tried.append(f"{provider}/{used}: {r['error']}")
-        # Every candidate gets a turn regardless of how the last one failed: a
-        # local server that is not running says nothing about a hosted one. Only
-        # an outright refusal to accept images is worth writing down.
+        # Every candidate gets a turn regardless of how the last one failed: a local
+        # server that is not running says nothing about a hosted one. Only an outright
+        # refusal to accept images is worth writing down.
         if config.is_image_rejection(r["error"]):
             config.learn_blind(provider, used)
 

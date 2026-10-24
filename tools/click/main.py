@@ -19,9 +19,8 @@ def run(args: dict, ctx) -> dict:
     plat = _platform_module()
     plat.click(x, y, button, clicks)
     out = {"clicked_at": [x, y], "button": button, "clicks": clicks}
-    # Where the pointer ended up, when the platform can tell us. A click that
-    # went nowhere -- dropped for want of Accessibility permission, or aimed
-    # off-screen and clamped -- otherwise reports success, and the agent spends
-    # the next several rounds re-aiming at a target it can never hit.
+    # Where the pointer ended up, when the platform can tell us. A click that went
+    # nowhere, dropped for want of Accessibility permission or clamped off-screen,
+    # otherwise reports success and the agent re-aims at a target it can never hit.
     out.update(verify(plat, x, y))
     return out

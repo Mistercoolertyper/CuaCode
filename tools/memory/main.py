@@ -1,10 +1,9 @@
 """The `memory` tool: read and write what survives the conversation.
 
-The index is built into the tool's own description rather than pushed into the
-system prompt, the same way the skill tool lists skills. Two reasons, and the
-second is the one that matters: describe() is re-asked every turn by
-refresh_dynamic(), so a memory written now is listed in the next breath -- and
-the system prompt stays a fixed thing that providers can cache.
+The index goes in the tool's own description rather than the system prompt, as
+with skills. describe() is re-asked every turn by refresh_dynamic(), so a memory
+written now is listed on the next turn, and the system prompt stays a fixed
+thing providers can cache.
 """
 import os
 

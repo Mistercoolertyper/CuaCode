@@ -1,7 +1,6 @@
 """The `skill` tool: load one skill's instructions.
 
-Which skills exist is read off disk at load time and again on every turn, so a
-skill written during this conversation is loadable in the next breath.
+The list is read off disk every turn, so a skill written now loads next turn.
 """
 from integrations.skills import loader as skills
 

@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Spotify MCP server -- drives the macOS Spotify desktop app over AppleScript.
+"""Spotify MCP server: drives the macOS Spotify desktop app over AppleScript.
 
 No OAuth, no developer account, no network. Everything here goes through
-`osascript` to the Spotify app already running on this machine, which is the
-only control surface that actually answers: the desktop app's local HTTP API
-(port 4371 and friends) does not respond, so nothing below depends on it.
+`osascript` to the Spotify app already running on this machine, which is the only
+control surface that answers: the desktop app's local HTTP API (port 4371 and
+friends) does not respond, so nothing below depends on it.
 
-That choice sets the boundaries. AppleScript exposes the player and the track
-it is playing, and nothing about where that track came from -- there is no
-playlist property in Spotify's scripting dictionary, so `get_current_context`
-reports what it can and says plainly what it cannot. Anything needing real
+That choice sets the boundaries. The scripting dictionary exposes the player and
+the track it is playing, and nothing about where that track came from, so
+`get_current_context` reports what it can and says plainly what it cannot. Real
 playback context needs the Web API and a developer account.
 
 stdlib only, stdio transport. Run it with any python3:
@@ -26,8 +25,8 @@ import sys
 NAME = "spotify"
 VERSION = "1.0.0"
 
-# Sent if the client asks for something we do not know; otherwise we echo the
-# client's choice back, which is what the spec asks for when we support it.
+# Sent if the client asks for a version we do not know; otherwise the client's
+# own choice is echoed back.
 PREFERRED_PROTOCOL = "2025-06-18"
 SUPPORTED_PROTOCOLS = {"2024-11-05", "2025-03-26", "2025-06-18"}
 
@@ -48,8 +47,8 @@ class SpotifyError(RuntimeError):
 def _clean(stderr: str) -> str:
     """osascript's own wrapping, taken back off.
 
-    Its failures arrive as `execution error: Spotify got an error: ... (-1728)`,
-    and the middle is the only part worth handing to a model.
+    Failures arrive as `execution error: Spotify got an error: ... (-1728)`, and
+    the middle is the only part worth handing to a model.
     """
     msg = (stderr or "").strip().splitlines()
     msg = msg[-1] if msg else ""
@@ -77,9 +76,9 @@ def _osa(script: str, timeout: float = OSA_TIMEOUT) -> str:
 def _require_spotify():
     """Checked before every `tell application "Spotify"`, and in this order.
 
-    `tell` on a closed app launches it. A model asking what is playing should
-    get an answer or an error, never a Spotify window it did not ask for, so
-    the running check -- which does not launch anything -- comes first.
+    `tell` on a closed app launches it, and a model asking what is playing should
+    get an answer or an error, never a Spotify window it did not ask for. The
+    running check, which does not launch anything, comes first.
     """
     if platform.system() != "Darwin":
         raise SpotifyError(f"this server drives the macOS Spotify app; host is {platform.system()}")
@@ -143,8 +142,8 @@ def _player() -> dict:
 def _track() -> dict | None:
     """None rather than an error when the player is empty.
 
-    A stopped Spotify with nothing loaded fails on `current track`, and that is
-    an answer to "what is playing", not a fault.
+    A stopped Spotify with nothing loaded fails on `current track`, and that is an
+    answer to "what is playing", not a fault.
     """
     try:
         parts = _tell(f" set t to current track\n return {_joined(_TRACK_FIELDS)}").split(SEP)
@@ -260,8 +259,7 @@ def t_seek(args):
 def _switch(prop: str, available_key: str, label: str):
     """shuffle and repeat differ only in the word, so they are written once.
 
-    `enabled` left out means toggle -- the model usually wants the other state,
-    not a state it has to read first.
+    `enabled` left out means toggle, which is what the model usually wants.
     """
     def run(args):
         player = _player()
@@ -291,9 +289,9 @@ def t_play_uri(args):
 def t_get_current_context(_):
     """The playlist question, answered honestly.
 
-    Spotify's scripting dictionary has no playlist or context property -- the
-    app simply does not publish where the current track came from. Saying so
-    beats returning the album and letting it be mistaken for the answer.
+    Spotify's scripting dictionary has no playlist or context property, so the app
+    does not publish where the current track came from. Saying so beats returning
+    the album and letting it be mistaken for the answer.
     """
     track = _track()
     return {
@@ -383,8 +381,8 @@ BY_NAME = {t["name"]: t for t in TOOLS}
 # --------------------------------------------------------------------------
 
 def _write(message: dict):
-    """stdout carries protocol and nothing else -- anything else is a parse
-    error at the far end. Diagnostics go to stderr."""
+    """stdout carries protocol and nothing else, because anything else is a
+    parse error at the far end. Diagnostics go to stderr."""
     sys.stdout.write(json.dumps(message) + "\n")
     sys.stdout.flush()
 

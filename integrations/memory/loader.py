@@ -1,18 +1,8 @@
 """Memory: the things that stay true after the conversation ends.
 
-Same bargain as skills, for the same reason -- an index in context, bodies on
-demand. A memory is one file holding one fact, and only its name and one line
-are ever carried by default. Two hundred memories cost two hundred lines, not
-two hundred documents.
+An index in context, bodies on demand: a memory is one file holding one fact, and only its name and one line are carried by default, so two hundred memories cost two hundred lines rather than two hundred documents. One fact per file is also what makes a memory editable by hand and diffable when it turns out to be wrong.
 
-Files rather than a database, and one fact per file rather than a list, because
-both halves of that are what make a memory editable by hand and diffable when
-it turns out to be wrong. A memory the user cannot open and fix is a memory
-they have to delete.
-
-Scope is what keeps the index small as the corpus grows. A memory about one
-project is noise everywhere else, and a memory about an app's dialogs is noise
-until that app is on screen, so nothing is global unless it is actually global.
+Scope keeps the index small as the corpus grows: a memory about one project is noise everywhere else, so nothing is global unless it is actually global.
 """
 import hashlib, os, re, yaml
 from dataclasses import dataclass
@@ -22,9 +12,8 @@ from pathlib import Path
 from tools.loader import parse_frontmatter
 from handler.session import store
 
-# A memory that does not fit in this is not a memory, it is a document. Write
-# the document and point at it -- a `reference` memory holding a path costs one
-# line of index and the file tool reads the rest when it is wanted.
+# A memory that does not fit is a document: write the document and point at it. A
+# `reference` memory holding a path costs one index line, and the file tool reads the rest.
 MAX_BODY = 4000
 MAX_DESC = 200
 
@@ -34,10 +23,8 @@ SCOPE_RE = re.compile(r"^(global|(projects|apps)/[a-z0-9][a-z0-9._-]{0,63})$")
 TYPES = ("user", "feedback", "project", "app", "reference")
 SOURCES = ("user", "agent", "external")
 
-# This turn's cwd and visible apps, set once per turn: both callers (the tool's
-# description and the recall block) run where no ctx reaches. cwd falls back to
-# the worker's own -- wrong harmlessly: at worst an index scoped to the wrong
-# project, never a path escape.
+# This turn's cwd and visible apps, set once per turn: neither caller runs where a ctx reaches, and cwd falls back
+# to the worker's own. That is wrong harmlessly, at worst an index scoped to the wrong project, never a path escape.
 _CWD = ""
 _APPS: list[str] = []
 
@@ -68,10 +55,8 @@ def archive_dir() -> Path:
 def project_slug(path: str = None) -> str:
     """A directory's scope name: readable half, unique half.
 
-    The basename alone collides -- everyone has three checkouts called `core` --
-    and the hash alone is unreadable in a listing, which matters because these
-    are directory names the user is expected to browse.
-    """
+    The basename alone collides (everyone has three checkouts called `core`), and the hash alone is
+    unreadable in a listing browsed by hand."""
     p = os.path.abspath(os.path.expanduser(path or cwd()))
     base = re.sub(r"[^a-z0-9]+", "-", os.path.basename(p).lower()).strip("-") or "root"
     return f"{base[:32]}-{hashlib.sha1(p.encode()).hexdigest()[:6]}"
@@ -129,9 +114,8 @@ def _read(p: Path) -> Memory | None:
                   uses=int(meta.get("uses") or 0), used=str(meta.get("used") or ""))
 
 def all_memories() -> dict[str, Memory]:
-    """Every memory on disk, by name. One flat namespace across scopes: two
-    memories that share a name are one memory that was written twice, and the
-    index has no room to disambiguate them anyway."""
+    """Every memory on disk, by name, in one flat namespace across scopes: two sharing
+    a name are one memory written twice, and the index cannot disambiguate them."""
     out = {}
     r = root()
     for p in sorted(r.rglob("*.md")):
@@ -144,20 +128,11 @@ def all_memories() -> dict[str, Memory]:
 def in_scope(path: str = None, apps: list = None) -> list[Memory]:
     """What is worth putting in front of the model right now.
 
-    Global always, this project always, an app's memories only when that app is
-    named. Everything else stays on disk and is still reachable through search
-    -- out of scope means unlisted, never unavailable.
-
-    `apps` left as None means whatever the loop last saw on screen, the same way
-    `path` means whatever it last saw as the cwd. That default is what puts an
-    app's memories in the tool's index while that app is frontmost, rather than
-    leaving them to be found by a word the user happened to type. Pass `[]` to
-    mean no app at all.
-    """
+    Global always, this project always, an app's memories only when that app is named; everything else stays on disk and is still reachable through search, since out of scope means
+    unlisted, never unavailable. `apps` left None means whatever the loop last saw on screen and `path` whatever it last saw as cwd; pass `[]` for no app."""
     want = {"global", scope_for(path)}
-    # What is frontmost arrives as whatever the platform calls it -- "Safari",
-    # "com.apple.Safari", "Google Chrome" -- and the scope was named by hand.
-    # Matched on the pieces so the two do not have to have agreed in advance.
+    # What is frontmost arrives as whatever the platform calls it ("com.apple.Safari")
+    # and the scope was named by hand, so the two match on their pieces, not in advance.
     here = {p for a in (_APPS if apps is None else apps) if a
             for p in re.sub(r"[^a-z0-9]+", "-", str(a).lower()).strip("-").split("-") if p}
     out = []
@@ -172,12 +147,8 @@ def in_scope(path: str = None, apps: list = None) -> list[Memory]:
 def out_of_scope(path: str = None, apps: list = None) -> list[Memory]:
     """What the index is not already carrying.
 
-    The memory tool's description lists every in-scope memory, name and line,
-    and it is rebuilt every turn -- so a pointer naming one of those spends a
-    line to repeat something the model is already looking at. The only memories
-    a pointer can actually add are the rest: another project's, or an app's that
-    is not on screen.
-    """
+    The memory tool's description lists every in-scope memory, name and line, and is rebuilt every turn, so a pointer naming
+    one of those repeats what the model is already looking at. What a pointer can add is the rest."""
     listed = {m.name for m in in_scope(path, apps)}
     return [m for m in all_memories().values() if m.name not in listed]
 
@@ -200,12 +171,8 @@ def write(name: str, description: str, body: str, type: str = "project",
           scope: str = "global", source: str = "agent", session: str = "") -> Memory:
     """Create or update one memory.
 
-    Update rather than create when the name already exists, wherever it lives.
-    That is the whole dedupe story and it is deliberate: an agent that writes
-    the same fact twice under the same name has corrected itself, and an agent
-    that wants a second fact has to name it differently, which is the moment it
-    notices it already has one.
-    """
+    Update rather than create when the name already exists, wherever it lives: that is the whole dedupe
+    story, since a second fact has to be named differently."""
     name = _safe_name(name)
     description = (description or "").strip()
     if not description: raise ValueError("description required -- it is the only part always in context")
@@ -228,9 +195,8 @@ def write(name: str, description: str, body: str, type: str = "project",
     if prior and prior.used: meta["used"] = prior.used
     p = _path_for(name, scope)
     p.write_text(_render(meta, body))
-    # A memory that moved scope must not be left behind in the old one, or the
-    # flat namespace has two files claiming one name and which wins is down to
-    # sort order.
+    # A memory that moved scope must not be left behind in the old one, or the flat
+    # namespace has two files claiming one name and sort order decides.
     if prior and prior.path != p:
         try: prior.path.unlink()
         except OSError: pass
@@ -250,11 +216,8 @@ def delete(name: str) -> dict:
 def touch(name: str):
     """Record that a memory was actually loaded.
 
-    The counter is what makes pruning possible later without guessing: a
-    memory nothing has read in months is a line of context nobody is paying
-    for on purpose. Best effort -- failing to count a use must never fail the
-    read that earned it.
-    """
+    The counter is what makes pruning possible later without guessing: a memory nothing has read in months is context nobody
+    is paying for. Best effort, since failing to count a use must never fail the read that earned it."""
     try:
         m = get(name)
         meta, body = parse_frontmatter(m.path.read_text())
@@ -266,10 +229,8 @@ def touch(name: str):
 def search(query: str, limit: int = 8) -> list[dict]:
     """Substring hunt over descriptions and bodies, out of scope included.
 
-    Deliberately dumber than the recall scorer: this one is called when the
-    agent already knows what it is looking for, and a literal match on a path
-    or an error string is exactly what it wants.
-    """
+    Deliberately dumber than the recall scorer: this is called when the agent already knows what it is
+    looking for, and a literal match on a path or an error string is what it wants."""
     q = (query or "").strip().lower()
     if not q: return []
     terms = [t for t in re.split(r"\W+", q) if len(t) > 1]
@@ -290,10 +251,8 @@ def index_lines(path: str = None, apps: list = None) -> list[str]:
 def write_index():
     """MEMORY.md, regenerated from the files.
 
-    Generated, never authored: the files are the truth and an index that can
-    disagree with them is a second source that will. It exists for the human
-    browsing ~/.cuacode by hand -- nothing here reads it back.
-    """
+    Generated, never authored: the files are the truth, and an index that can disagree with them is a second source that
+    will. It exists for the human browsing ~/.cuacode by hand and nothing here reads it back."""
     lines = ["# Memory", "",
              "Generated from the files in this directory. Edit the memories, not this.", ""]
     by_scope = {}

@@ -2,22 +2,22 @@ import hashlib
 from pathlib import Path
 
 # "b64" is the attachment shape: a user turn records its images as
-# {"name": ..., "b64": ...} so the filename survives a reload, and the payload
-# is the same megabyte of base64 a screenshot is.
+# {"name": ..., "b64": ...} so the filename survives a reload, and the payload is
+# the same base64 a screenshot is.
 IMAGE_KEYS = ("image_base64", "images", "b64")
 
-# Images live outside messages.jsonl: a screenshot is ~0.5-2MB of base64 and
-# stays in history forever, so inlining would mean re-reading tens of
-# megabytes to open a session. The base64 *string* is stored verbatim, not
-# the decoded bytes -- decode/re-encode is not byte-identical, and a restored
-# session has to hand the model exactly what it saw the first time.
+# Images live outside messages.jsonl: a screenshot is ~0.5-2MB of base64 and stays
+# in history forever, so inlining would mean re-reading tens of megabytes to open a
+# session. The base64 string is stored verbatim, not the decoded bytes, because
+# decode/re-encode is not byte-identical and a restored session has to hand the
+# model exactly what it saw the first time.
 
 def put(blobs: Path, b64: str) -> dict:
     digest = hashlib.sha256(b64.encode()).hexdigest()
     blobs.mkdir(parents=True, exist_ok=True)
     f = blobs / f"{digest}.b64"
-    # Content-addressed: an identical capture costs nothing the second time,
-    # and an agent watching a static screen re-screenshots constantly.
+    # Content-addressed: an identical capture costs nothing the second time, and an
+    # agent watching a static screen re-screenshots constantly.
     if not f.exists(): f.write_text(b64)
     return {"$blob": digest}
 
@@ -27,9 +27,9 @@ def get(blobs: Path, ref: dict) -> str:
     return f.read_text()
 
 def split(value, blobs: Path):
-    """Walk a dispatch result, swapping base64 payloads for refs. Recursive
-    rather than keyed on the two known result shapes, so a tool that nests
-    images somewhere new does not silently inline megabytes."""
+    """Walk a dispatch result, swapping base64 payloads for refs. Recursive rather
+    than keyed on the two known result shapes, so a tool that nests images somewhere
+    new cannot silently inline megabytes."""
     if isinstance(value, dict):
         out = {}
         for k, v in value.items():

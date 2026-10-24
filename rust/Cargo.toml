@@ -1,0 +1,25 @@
+[package]
+name = "cuacode-rs"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "cuacode"
+path = "src/lib.rs"
+
+# The shared half of the frontend side, and nothing that draws: `wire` is the
+# format, `worker` is the process, `session` is the conversation's state, and
+# `transcript` is the conversation as rows. Both frontends are built from it,
+# and neither is built into it -- the terminal one must not link a GUI
+# framework, and a GUI must not link a terminal library.
+[workspace]
+members = ["fastrs", "app"]
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+# GPUI is slow unoptimized even in a debug build of the app itself, which makes
+# `cargo run` unusable while iterating. Zed sets this; so does zeron.
+[profile.dev.package."*"]
+opt-level = 2

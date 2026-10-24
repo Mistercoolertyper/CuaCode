@@ -1,15 +1,11 @@
 """The `mcp` tool: reach the MCP servers registered on this machine.
 
-Deliberately one tool rather than one tool per MCP tool. A registered server can
-expose thirty tools with thirty schemas, and folding those into the model's own
-tool list would put every argument of every server in context for the whole
-conversation, whether or not music ever comes up. Skills already solved this
-here: carry the one-line description, load the body when it is needed.
-
-So the same shape. describe() lists the servers -- a name and a sentence each,
-read from JSON without starting anything -- and `load` is what spends context on
-one server's tool schemas. `call` then runs a tool. A server process starts on
-first use and is kept for the rest of the session.
+Deliberately one tool rather than one tool per MCP tool: a server can expose
+thirty tools with thirty schemas, and folding those into the model's own tool
+list would put every argument of every server in context for the whole
+conversation. describe() lists the servers without starting anything, `load`
+spends context on one server's tool schemas, and `call` runs a tool. A server
+process starts on first use and is kept for the rest of the session.
 """
 from integrations.mcp import client, loader
 from tools import _window
@@ -19,8 +15,8 @@ MAX_TOOLS_SHOWN = 60
 
 
 def _servers() -> dict:
-    # Re-read every turn: a server registered a moment ago has to be usable in
-    # the next one, and this is a single small JSON file.
+    # Re-read every turn so a server registered a moment ago is usable in the
+    # next one.
     try:
         return loader.load_servers()
     except Exception:                                           # noqa: BLE001
@@ -113,24 +109,22 @@ def _session_id_from(res: dict) -> str | None:
 
 def _session_keys(cfg: dict) -> tuple[str, str]:
     """The tool that mints a session and the argument that carries it back.
-    Only the stateless era needs the second one, and only its server knows what
-    it is called, so both are config with a sane default."""
+    Only the stateless era needs the argument, and only its server knows its
+    name, so both are config with a default."""
     return (cfg.get("session_tool") or "session_new",
             cfg.get("session_argument") or "session")
 
 
 def _resolve_session(name: str, conn, cfg: dict, explicit: str | None) -> str | None:
     """Which session a call belongs to. An explicit id wins; otherwise a subagent
-    run (which has a fresh session scope) gets its own browser session, created
-    lazily on first use. The top-level conversation has no scope and uses the
-    server's default session."""
+    run gets its own session, created lazily on first use, while the top-level
+    conversation uses the server's default."""
     if explicit:
         return explicit
     maker, _ = _session_keys(cfg)
     if conn.era == "modern":
-        # No protocol sessions in the stateless era, so there is nothing to
-        # route by default and nothing to create unless the server actually
-        # offers the tool that mints a handle.
+        # Stateless era: nothing to route unless the server offers the session
+        # tool.
         if not conn.has_tool(maker):
             return None
     elif conn.transport != "http":
@@ -148,9 +142,8 @@ def _resolve_session(name: str, conn, cfg: dict, explicit: str | None) -> str | 
 
 
 def _with_handle(conn, cfg: dict, tool: str, arguments: dict, sid: str) -> dict:
-    """The stateless era's answer to a session header: an ordinary argument.
-    Added only when the tool's own schema says it takes one, so a server whose
-    tools are stateless is called exactly as it was before."""
+    """The stateless era's answer to a session header: an ordinary argument, added
+    only when the tool's own schema declares one."""
     _, argument = _session_keys(cfg)
     props = conn.tool_schema(tool).get("properties") or {}
     if argument not in props or arguments.get(argument) is not None:
@@ -160,10 +153,9 @@ def _with_handle(conn, cfg: dict, tool: str, arguments: dict, sid: str) -> dict:
 
 def _call(name: str, tool: str, arguments: dict, session: str | None, ctx) -> dict:
     cfg = loader.get(name)
-    # A server is free to start a GUI of its own -- a browser is the usual one --
-    # and that window is the agent's doing even though no tool here opened it.
-    # Noted before the call so it can be parked after, rather than left sitting
-    # wherever the app last remembered being, which is over the terminal.
+    # A server may start a GUI of its own, a browser usually. Baseline before
+    # the call so that window can be parked after, instead of sitting wherever
+    # the app last remembered being, which is over the terminal.
     _window.baseline()
     conn = client.pool(name, cfg)
     sid = _resolve_session(name, conn, cfg, session)
@@ -175,8 +167,8 @@ def _call(name: str, tool: str, arguments: dict, session: str | None, ctx) -> di
     if opened:
         result["opened_apps"] = opened
     if result.pop("is_error", False):
-        # The server's own explanation, kept as the error so it reaches the
-        # model as a sentence it can act on.
+        # The server's own explanation, so the model gets something it can act
+        # on.
         return {"error": result.get("text") or result.get("data") or f"{name}.{tool} failed"}
     return {"server": name, "tool": tool, **result}
 

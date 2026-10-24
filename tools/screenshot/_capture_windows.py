@@ -10,10 +10,9 @@ def active_app_name() -> str:
 _dpi_done = False
 
 def _dpi_aware():
-    """DPI awareness is process-wide and one-shot -- it has to be set before the
-    first capture, not after. Set late, one shot came back in logical pixels and
-    the next in physical, and the grid the agent clicks from silently changed
-    units mid-session."""
+    """DPI awareness is process-wide and one-shot, and has to be set before the first
+    capture. Set late, one shot came back in logical pixels and the next in physical, and
+    the grid the agent clicks from silently changed units mid-session."""
     global _dpi_done
     if _dpi_done: return
     _dpi_done = True
@@ -37,11 +36,11 @@ def capture():
 def detect_scale(img_w: int, img_h: int) -> tuple[float, int, int]:
     """Primary monitor size in the units this process sees.
 
-    Both readings are taken after _dpi_aware(), so a DPI-aware process gets
-    physical pixels from GetSystemMetrics and from mss alike -- scale 1.0, and
-    SetCursorPos speaks the same unit. The ratio is still computed rather than
-    assumed, because a failed awareness call flips both to virtualized pixels.
-    Errors are not swallowed: a wrong scale mislabels the grid silently.
+    Both readings are taken after _dpi_aware(), so a DPI-aware process gets physical
+    pixels from GetSystemMetrics and from mss alike, scale 1.0, which is the unit
+    SetCursorPos speaks. The ratio is still computed rather than assumed, because a
+    failed awareness call flips both to virtualized pixels. Errors are not swallowed:
+    a wrong scale mislabels the grid silently.
     """
     import ctypes
     u = ctypes.windll.user32

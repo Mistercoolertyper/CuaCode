@@ -69,19 +69,19 @@ say "installing dependencies"
 # The worker imports these at boot, and until it can, a frontend shows nothing
 # at all. Better to say so here than to leave that for the first launch.
 say "checking the worker imports"
-"$python" -c 'import ollama, openai, anthropic, mss, PIL, yaml, httpx' \
+"$python" -c 'import openai, anthropic, mss, PIL, yaml, httpx' \
     || die "dependencies installed but do not import -- try deleting ./$VENV and running this again"
 
 # --- frontends ---------------------------------------------------------------
 if [ "$build" -eq 1 ]; then
-    if command -v go >/dev/null 2>&1; then
+    if command -v cargo >/dev/null 2>&1; then
         say "building frontends"
-        # Keep going: gio needs a C toolchain and X11/Wayland headers, and its
-        # absence is not a reason to leave somebody with no terminal frontend.
+        # Keep going: the GUI links a large graphics stack and a missing SDK is
+        # not a reason to leave somebody with no terminal frontend.
         ./build.sh --keep-going || warn "some frontends did not build (see above)"
     else
-        warn "go not found, skipping the build -- get it from https://go.dev/dl/"
-        warn "you can still run from source once go is installed: ./run.sh deck"
+        warn "cargo not found, skipping the build -- get it from https://rustup.rs/"
+        warn "you can still run nothing until it is installed"
         build=0
     fi
 fi
@@ -89,7 +89,7 @@ fi
 # --- done --------------------------------------------------------------------
 echo
 say "done"
-echo "  run a frontend:   ./bin/deck          (or ./run.sh deck, straight from source)"
+echo "  run a frontend:   ./run.sh fastrs     (builds on first run)"
 echo "  list frontends:   ./run.sh"
 echo "  api keys/models:  ~/.cuacode/config.json, written on first launch"
 [ "$build" -eq 1 ] || echo "  build later:      ./build.sh"

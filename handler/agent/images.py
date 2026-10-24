@@ -1,29 +1,12 @@
-"""Keeping old screenshots out of the request.
-
-An agent loop resends the entire transcript on every round, and a computer-use
-transcript is mostly screenshots. One gridded capture is around 850KB once it
-is base64'd, so ten of them in the history is 8.5MB going up the wire before
-the model can emit its first token -- every round, growing, and paid again for
-each round after. That upload is the silence between a tool finishing and the
-reply starting, and prompt caching does not touch it: cache_control saves the
-server re-reading the prompt, not the client re-sending it.
-
-Nothing is lost by dropping them. Every capture is already archived to the
-session's screenshots directory by the tool itself, and a screenshot from
-fifteen rounds ago is a picture of a screen that no longer looks like that --
-the agent's own reason for taking a new one. What it needs is the *recent*
-frames, to see what its last action did.
-
-Eviction is permanent and in place, which is what keeps it cheap for the
-prompt cache: a message is rewritten once, at the moment it falls out of the
-window, and never touched again. The cached prefix ahead of that point still
-matches, and the point itself is always near the tail -- so a round invalidates
-the last few messages rather than the conversation.
+"""Keeping old screenshots out of the request. Every round resends the whole transcript, and
+ten gridded captures at roughly 850KB base64'd each is 8.5MB up the wire before the first token.
+Prompt caching does not help: cache_control saves the server re-reading the prompt, not the
+client re-sending it. Nothing is lost, the tool archives every capture anyway, and eviction is
+permanent and in place, so the cached prefix ahead of a rewritten message still matches.
 """
 
-# Left where the image was, rather than deleting the block outright. A model
-# that can see the gap asks for a fresh capture; one that finds a tool result
-# it remembers sending mysteriously empty tends to conclude the tool is broken.
+# Left where the image was, not deleted: a model that sees the gap asks for a fresh
+# capture, one that finds a tool result it remembers as empty concludes the tool is broken.
 NOTE = ("[screenshot removed from the transcript -- only the most recent captures are kept. "
         "Take a new screenshot if you need to see the screen.]")
 
@@ -31,27 +14,16 @@ DEFAULT_KEEP = 2
 
 
 class PinnedUser(dict):
-    """A user turn whose images the user attached by hand.
-
-    The window above exists because a computer-use transcript is mostly
-    screenshots of a screen that has since changed. An image someone dragged
-    into the prompt is the opposite of that: it is the subject of the
-    conversation, it never goes stale, and there is no tool the model can call
-    to take another one. So it is exempt, and the exemption travels with the
-    message rather than with a rule here -- providers.user_message returns this
-    type, replay rebuilds it on reload, and the whole of the marking is that.
-
-    A plain dict everywhere else: json.dumps, the provider clients and every
-    `msg["role"]` in this codebase see nothing different.
+    """A user turn whose images the user attached by hand. Exempt from the window above, which
+    exists for screenshots of a screen that has changed: an attached image is the subject, never
+    goes stale, and no tool can take another. The exemption travels with the type, a plain dict.
     """
 
 
 def _slots(msg: dict) -> list[tuple]:
-    """Every encoded image in one message, in the order it appears.
-
-    Three dialects, three shapes, and a tool result nests one of them a level
-    down. Returned as (container, key) pairs so the caller can blank one
-    without needing to know which shape it came from.
+    """Every encoded image in one message, in the order it appears. An image is a content block
+    in both dialects here, and a tool result nests one a level down: (container, key) pairs, so
+    the caller blanks one without knowing which shape it came from.
     """
     slots = []
     content = msg.get("content")
@@ -66,26 +38,17 @@ def _slots(msg: dict) -> list[tuple]:
                 for j, inner in enumerate(block["content"]):
                     if isinstance(inner, dict) and inner.get("type") in ("image", "image_url"):
                         slots.append((block["content"], j))
-    # ollama hangs a plain list of base64 strings off the message.
-    if msg.get("images"):
-        slots.append((msg, "images"))
     return slots
 
 
-def _blank(container, key) -> None:
-    if isinstance(key, int):
-        container[key] = {"type": "text", "text": NOTE}
-        return
-    container.pop("images", None)
-    text = container.get("content")
-    container["content"] = f"{text}\n{NOTE}" if isinstance(text, str) and text else NOTE
+def _blank(container: list, key: int) -> None:
+    container[key] = {"type": "text", "text": NOTE}
 
 
 def evict(messages: list[dict], keep: int = DEFAULT_KEEP) -> int:
-    """Blank every image except the newest `keep`. Returns how many went.
-
-    keep=0 is a real answer -- a blind model's transcript replayed onto a
-    sighted one has images in it that nothing will ever look at again.
+    """Blank every image except the newest `keep`. Returns how many went. keep=0 is a real
+    answer: a blind model's transcript replayed onto a sighted one has images nothing will ever
+    look at again.
     """
     if keep < 0: return 0
     slots = [s for msg in messages if not isinstance(msg, PinnedUser) for s in _slots(msg)]

@@ -5,13 +5,10 @@ import _common, _diff, _fs_ops
 def build(args: dict, path: Path) -> dict | None:
     """What this call would do, in the terms the person approving it needs.
 
-    A permission dialog showing {"action": "edit", "edits": [{"old": ...}]} asks
-    the user to diff two strings in their head. Showing the patch instead is most
-    of the difference between a prompt that gets read and one that gets clicked
-    through.
-
-    Read-only by construction: this runs before anyone has said yes, so it opens
-    files and touches nothing -- not the disk, not the edit gate.
+    Showing the patch instead of {"action": "edit", "edits": [{"old": ...}]} saves
+    the user diffing two strings in their head, which is most of the difference
+    between a prompt that gets read and one that gets clicked through. Read-only by
+    construction: it runs before anyone has said yes, so it touches nothing.
     """
     action = args.get("action")
     if action == "write": return _write(args, path)

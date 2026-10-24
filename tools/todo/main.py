@@ -1,15 +1,9 @@
 """The `todo` tool: plan a job, then work the plan.
 
-What this replaces was a shared SQLite table of strings. The difference is not
-the storage, it is that a list is only useful if it says what is *happening* --
-which step is running, what the last one found, what is left -- and a checklist
-of descriptions says none of that.
-
-So the actions are shaped around the loop the agent actually runs: `plan` writes
-the steps out before any of them starts, `start` says which one it is on, `done`
-closes it and hands back the next, `note` records what a step turned up so the
-list is still worth reading twenty rounds later. Every one of them returns the
-whole list, which is what makes looking back free.
+The actions follow the loop the agent runs: `plan` writes the steps out before
+any of them starts, `start` says which one it is on, `done` closes it and hands
+back the next, `note` records what a step turned up. Every one of them returns
+the whole list, which is what makes looking back free.
 """
 from tools.todo import state
 
@@ -47,9 +41,8 @@ def run(args: dict, ctx) -> dict:
         steps, err = _steps(args)
         if err: return {"error": err}
         if action == "plan":
-            # A new plan replaces the old one outright. Merging would leave the
-            # agent working two plans at once, and the moment it writes a fresh
-            # one is exactly the moment the previous one stopped being the job.
+            # A new plan replaces the old one outright: merging would leave the
+            # agent working two plans at once.
             data["items"] = []
         room = state.MAX_ITEMS - len(data["items"])
         if room <= 0:
@@ -68,10 +61,8 @@ def run(args: dict, ctx) -> dict:
         if item["state"] == state.DONE:
             return {"error": f"todo {item['id']} is already done"}
         warning = ""
-        # One in_progress at a time, enforced rather than suggested: two of them
-        # means the list has stopped describing what is happening, which is the
-        # only thing it is for. The interrupted step goes back to pending and is
-        # said out loud, so nothing is silently abandoned.
+        # One in_progress at a time, enforced: two means the list has stopped
+        # describing what is happening. The interrupted step returns to pending.
         if (prev := state.active(data)) and prev["id"] != item["id"]:
             prev["state"] = state.PENDING
             warning = f"todo {prev['id']} was in progress and is back to pending: {prev['text']}"
@@ -86,9 +77,8 @@ def run(args: dict, ctx) -> dict:
         if n := _note(args): item["note"] = n
         state.save(ctx, data)
         out = state.view(data)
-        # Said in words as well as in the list, because this is the moment the
-        # agent decides what to do next and the answer should not need reading
-        # off an array.
+        # Spelled out as well as in the list: this is where the agent decides
+        # what to do next.
         if out.get("next"): out["do_next"] = out["next"]["text"]
         elif not out["open"]: out["do_next"] = "nothing left open -- report what was done"
         return out

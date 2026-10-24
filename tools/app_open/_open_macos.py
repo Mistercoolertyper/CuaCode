@@ -1,9 +1,7 @@
 import subprocess, time
 
-# A window that just appeared has not finished appearing: apps animate, splash,
-# and restore saved frames late. Every constant below outlives one of those.
-# Reads are ~1ms through the Accessibility API; they were 180ms of osascript,
-# which is why the gaps used to be sized for call count instead of animation.
+# A window that just appeared has not finished appearing: apps animate, splash and
+# restore saved frames late. Every constant below outlives one of those.
 _STABLE_SAMPLES = 2       # identical geometry readings before a window counts as settled
 _SAMPLE_GAP = 0.08        # seconds between those readings
 _MIN_WINDOW_PX = 100      # smaller than this is a splash/tooltip, not the app
@@ -16,9 +14,8 @@ _TOLERANCE = 12           # px slack when checking the window actually landed
 
 # ---------------------------------------------------------------- AX backend
 
-# Loaded once, on first use. False means this machine cannot answer through the
-# Accessibility API -- pyobjc missing, or the app was never granted Accessibility
-# permission -- and every call below falls back to the AppleScript it replaces.
+# Loaded once, on first use. False means no Accessibility API here, pyobjc missing or
+# permission never granted, and every call below falls back to the AppleScript.
 _AX = None
 
 
@@ -51,20 +48,8 @@ _APPS = {}          # pid -> AXUIElement, so the app handle is built once
 def _pump():
     """Let the workspace hear about launches that happened since the last look.
 
-    NSWorkspace's list of running applications is not a query, it is a cache
-    kept up to date by notifications -- and notifications are delivered on a run
-    loop. The agent's worker has none: it starts, imports this, and then spends
-    its life blocking on a socket. So runningApplications() answered with the
-    process list as it stood at import for the whole session, and an app the
-    agent launched a minute later was invisible to every lookup here -- which is
-    the whole of why an app opened from the shell was never seen, never snapped,
-    and reported as "no such app" when asked about directly.
-
-    Draining the loop with a zero timeout costs nothing when there is nothing
-    queued, which is the common case. On recent macOS, though, it also turns
-    out never to deliver a launch that arrives while the process is blocked on
-    a socket -- which is why the fallbacks below (_cg_apps) exist.
-    """
+    Its list of running applications is a notification-fed cache and this worker has no run loop, so without a drain it answers with the process list as it stood at
+    import for the whole session; on recent macOS it still misses a launch arriving while blocked on a socket, which is why _cg_apps exists."""
     ax = _ax()
     if not ax: return
     try:
@@ -76,16 +61,8 @@ def _pump():
 def _cg_apps() -> dict[str, int]:
     """{owner name: pid} for every regular app owning a window, per the window server.
 
-    NSWorkspace's list is a notification-fed cache and this process misses the
-    notifications: it has no run loop, and the zero-timeout drain in _pump does
-    not deliver the queued ones either -- so an app launched mid-session was
-    invisible to every lookup here for the worker's whole life, and app_open
-    reported "window not detected" for a window that was plainly on screen.
-    The window server instead answers "who owns a window right now" on demand,
-    no notifications involved. Reconstructed NSRunningApplications answer
-    activationPolicy() live, which is what keeps helper processes that own
-    real windows ("AutoFill (iTerm2)", "Software Update") out of the result.
-    """
+    NSWorkspace's notification-fed list misses launches this process never hears about, so the window server is asked, answering "who owns a window right now" on
+    demand. The reconstructed NSRunningApplication answers activationPolicy() live, keeping helper processes that own real windows (AutoFill, Software Update) out."""
     ax = _ax()
     if not ax: return {}
     try:
@@ -96,8 +73,7 @@ def _cg_apps() -> dict[str, int]:
     for w in wins or []:
         name = w.get("kCGWindowOwnerName") or ""
         pid = w.get("kCGWindowOwnerPID")
-        # Layer 0 is a normal window; menu bar items, the Dock and friends sit
-        # above it, and this filter is most of what keeps system UI out.
+        # Layer 0 is a normal window; menu bar items, the Dock and friends sit above it.
         if name and pid is not None and w.get("kCGWindowLayer", 1) == 0:
             candidates.setdefault(name, pid)
     out = {}
@@ -114,13 +90,8 @@ def _cg_apps() -> dict[str, int]:
 def _running(name: str):
     """The NSRunningApplication whose name matches, or None.
 
-    localizedName is what `System Events` reports as the process name, which is
-    what every caller here passes around. The bundle's own name is checked too:
-    an app launched by bundle id or by path can be running under a display name
-    the caller never saw. Neither list is complete for apps launched after this
-    process first looked (see _cg_apps), so a miss falls through to the window
-    server and the handle is rebuilt from the pid.
-    """
+    localizedName is what every caller passes around, and the bundle basename is checked too, since an app launched by id or path can run under
+    a display name the caller never saw. A miss falls through to the window server and is rebuilt from the pid."""
     ax = _ax()
     if not ax: return None
     _pump()
@@ -151,10 +122,8 @@ def _running(name: str):
 def _element(name: str):
     """The app's AX handle, cached by pid.
 
-    Cached because building it is the only part that is not free; the *window*
-    is deliberately re-fetched on every call, since a handle to a window that has
-    since closed reads back stale geometry rather than failing.
-    """
+    Building it is the only part that is not free; the window is re-fetched on every call, since a
+    handle to a window that has closed reads back stale geometry, not an error."""
     app = _running(name)
     if not app: return None
     pid = app.processIdentifier()
@@ -165,9 +134,8 @@ def _element(name: str):
 
 
 def _attr(el, name):
-    """One attribute, or None. pyobjc returns (err, value); a non-zero err is
-    every reason this can fail -- no such attribute, app not responding, and
-    Accessibility permission denied all arrive the same way."""
+    """One attribute, or None. pyobjc returns (err, value); a non-zero err covers no
+    such attribute, an unresponsive app, and a denied Accessibility permission alike."""
     try:
         err, val = _ax().get(el, name, None)
         return None if err else val
@@ -178,10 +146,8 @@ def _attr(el, name):
 def _window(name: str):
     """The app's real window, picked the same way the AppleScript did.
 
-    Not `window 1`: a dialog or splash opening mid-snap changes what window 1
-    means between two statements, which is how the second half of a snap ended
-    up moving something other than what the first half sized.
-    """
+    Not `window 1`: a dialog or splash opening mid-snap changes what window 1 means between two
+    statements, so the second half of a snap could move something other than what the first half sized."""
     el = _element(name)
     if el is None: return None
     wins = _attr(el, "AXWindows")
@@ -217,16 +183,13 @@ def _ax_apply(name: str, x0: int, y0: int, w: int, h: int, focus: bool):
         app = _running(name)
         if app: app.activateWithOptions_(ax.AppKit.NSApplicationActivateIgnoringOtherApps)
     size = ax.mk(ax.SIZE, ax.Q.CGSize(w, h))
-    # Size before position: moving a window that is still full-width pushes its
-    # right edge off-screen, and apps clamp that by refusing the move outright --
-    # leaving the window parked mid-screen. Size again after, because some apps
-    # re-lay-out on move and take the height back.
+    # Size before position: moving a full-width window pushes its edge off-screen and
+    # apps refuse the move. Size after, since some re-lay-out on move.
     ax.set(win, "AXSize", size)
     ax.set(win, "AXPosition", ax.mk(ax.POINT, ax.Q.CGPoint(x0, y0)))
     ax.set(win, "AXSize", size)
-    # These writes are messages to another process. Reading straight back reports
-    # where the window was, not where it is going to be, and the retry loop then
-    # spends a pass correcting something that was already correct.
+    # Writes are messages to another process, so a read straight back reports where the
+    # window was, not where it is going.
     time.sleep(_SETTLE)
     return _ax_geometry(name)
 
@@ -331,8 +294,8 @@ def _geometry(proc_name: str) -> tuple[int, int, int, int] | None:
     if _ax():
         geo = _ax_geometry(proc_name)
         if geo is not None: return geo
-        # An app AX will not answer for at all is not the same as one with no
-        # window yet, and only the fallback can tell the difference.
+        # An app AX cannot answer for at all is not the same as one with no window
+        # yet, and only the fallback can tell the difference.
         if _running(proc_name) is None: return None
     return _osa_geometry(proc_name)
 
@@ -370,12 +333,8 @@ def get_frontmost() -> str | None:
 def _menu_bar() -> int:
     """Height of the menu bar, in points, or 0 if it cannot be measured.
 
-    Needed because a snap asks for y=0 and most apps refuse it: AppKit clamps a
-    window to below the menu bar and reports the clamped position back. Checking
-    that against y=0 with 12px of slack said "did not land" for every one of
-    them -- so every snap burned all four attempts and then returned False,
-    which is both a second of latency and a lie about what happened.
-    """
+    A snap asks for y=0 and most apps refuse it: AppKit clamps the window below the menu bar and reports that back, which
+    reads as "did not land" against y=0 and used to burn all four attempts before returning False."""
     ax = _ax()
     if not ax: return 0
     try:
@@ -389,18 +348,11 @@ def _menu_bar() -> int:
 def _launch(app: str):
     """Start the app, by name, by bundle id, or by path -- and by nothing else.
 
-    The fallback here used to be a bare `open <app>`, which is not a second way
-    of naming an application: it is `open` treating the string as a path or a
-    URL and handing it to whatever the system has registered as the default
-    handler for it. A name macOS did not recognise therefore did not fail, it
-    launched something -- Python Launcher.app for anything that looked like a
-    .py, a browser for anything that looked like a URL, Finder for a directory.
-    Being told "no such application" is strictly better than being handed an
-    unrelated program and left to drive it.
-    """
+    A bare `open <app>` is not a second way of naming an application: it treats the string as a path or a URL and hands it to the default handler, so an
+    unrecognised name launches an unrelated program (Python Launcher for a .py, a browser for a URL). Refusing is the better failure."""
     if subprocess.run(["open", "-a", app], capture_output=True).returncode == 0: return
-    # A bundle id, which is the other thing callers legitimately pass. Checked
-    # by shape rather than tried blindly, so a plain name never reaches it.
+    # A bundle id, the other thing callers legitimately pass. Checked by shape rather
+    # than tried blindly, so a plain name never reaches it.
     if "." in app and "/" not in app and " " not in app:
         if subprocess.run(["open", "-b", app], capture_output=True).returncode == 0: return
     # A path, and only if it is really there and really an application.
@@ -415,10 +367,8 @@ def _launch(app: str):
 
 
 def open_app(app: str) -> str | None:
-    # Asked before launching: `open -a` on an app that is already up is a no-op
-    # that still costs a process spawn, and the poll below used to sleep 0.4s
-    # before its first look regardless -- so re-focusing a running app paid the
-    # full launch wait every time.
+    # Asked before launching: `open -a` on an app that is already up is a no-op that still
+    # costs a process spawn, and the poll below used to sleep before its first look.
     running = _running(app)
     proc_name = running.localizedName() if running else None
 
@@ -448,10 +398,8 @@ def open_app(app: str) -> str | None:
 def _wait_for_window(proc_name: str, timeout: float = 8) -> bool:
     """Wait until the app has a window whose geometry stops changing.
 
-    The old check -- window count > 0 -- returned during the open animation, so
-    the snap landed on a window the app was still positioning. The app then put
-    it back wherever it wanted, which is why a snapped app sometimes ended up
-    centered."""
+    A check for window count > 0 returns during the open animation, and the app then
+    puts the window back wherever it wanted."""
     deadline = time.time() + timeout
     last, stable = None, 0
     while time.time() < deadline:
@@ -482,33 +430,24 @@ def _screen_size() -> tuple[int, int]:
 
 
 def _landed(geo: tuple[int, int, int, int] | None, x0: int, y0: int) -> bool:
-    # Position only: an app that refuses to shrink is fine, being in the wrong
-    # half is not. y=0 is checked against a range -- some apps clamp it to the
-    # menu bar, and both are the top of the screen as far as this is concerned.
+    # Position only: refusing to shrink is fine, being in the wrong half is not. y=0 is
+    # checked against a range, since apps clamp it to the menu bar, which is still the top.
     if geo is None: return False
     if abs(geo[0] - x0) > _TOLERANCE: return False
     if y0 == 0: return -_TOLERANCE <= geo[1] <= _menu_bar() + _TOLERANCE
     return abs(geo[1] - y0) <= _TOLERANCE
 
 
-# What each (process, target slice) pair actually settled at, last verified.
-# Compared against verified geometry, not the request: an app clamped to a
-# minimum width never matches its requested size, and re-deriving "correct"
-# from the request would call that drift and move it forever.
+# What each (process, target slice) pair actually settled at, last verified. Compared
+# against verified geometry, not the request, whose clamp would read as drift forever.
 _SETTLED = {}
 
 
 def snap_region(proc_name: str | None, x_start_frac: float, x_end_frac: float, focus: bool = False) -> bool:
     """Move/resize a process's real window into a horizontal slice of the screen.
 
-    Returns True only after reading the window back and confirming it is where
-    it was asked to be -- the window server accepts a geometry write whether or
-    not the app honours it, so a successful write proves nothing.
-
-    focus defaults to False: a window can be repositioned without being raised,
-    and whoever calls this last would otherwise decide what the keyboard and
-    mouse are pointed at. Only the caller that genuinely wants the window in
-    front should ask for it."""
+    Returns True only after reading the window back and confirming it landed: the window server accepts a geometry write whether or not the app
+    honours it. `focus` defaults to False, so a caller that only repositions decides nothing about the keyboard and mouse."""
     if not proc_name: return False
     try:
         sw, sh = _screen_size()
@@ -516,9 +455,8 @@ def snap_region(proc_name: str | None, x_start_frac: float, x_end_frac: float, f
         w, h = x1 - x0, sh
         key = (proc_name, x0, w, h)
 
-        # Already parked, and nothing has touched it since. One geometry read,
-        # no writes, no waiting for an app to re-lay-out something that is
-        # already where it belongs.
+        # Already parked and untouched since: one geometry read, no writes, no waiting
+        # for an app to re-lay-out something already where it belongs.
         settled = _SETTLED.get(key)
         if settled is not None and _geometry(proc_name) == settled:
             if focus:
@@ -533,8 +471,8 @@ def snap_region(proc_name: str | None, x_start_frac: float, x_end_frac: float, f
         for attempt in range(_SNAP_ATTEMPTS):
             geo = _apply(proc_name, x0, 0, w, h, focus)
             if _landed(geo, x0, 0):
-                # Apps that restore a saved frame do it shortly after launch,
-                # i.e. after a snap that just verified clean. Look once more.
+                # Apps that restore a saved frame do it shortly after launch, i.e. after
+                # a snap that just verified clean. Look once more.
                 time.sleep(_LATE_MOVE_WAIT)
                 final = _geometry(proc_name)
                 if _landed(final, x0, 0):
@@ -557,15 +495,8 @@ def snap_region(proc_name: str | None, x_start_frac: float, x_end_frac: float, f
 def gui_apps() -> dict[str, str]:
     """{process name: the same name} for every app with a Dock presence.
 
-    The value is what snap_region takes here, which on macOS is the process
-    name -- callers hold a handle without caring what a handle is on this
-    platform.
-
-    Activation policy is the filter, not the window count: an app that is still
-    drawing its first window is exactly the app a caller wants to hear about,
-    while agents, daemons and menu bar extras never get a window at all and
-    would otherwise be reported as newly launched apps forever.
-    """
+    The value is what snap_region takes here, so callers can hold a handle without caring what a handle is on this platform.
+    Activation policy is the filter, not the window count, and agents and daemons never get a window at all."""
     ax = _ax()
     out = {}
     if ax:
@@ -578,10 +509,8 @@ def gui_apps() -> dict[str, str]:
                 if name: out[name] = name
         except Exception:
             out = {}
-    # The list above stopped growing the first time this process missed a
-    # launch notification (see _cg_apps). Merge what the window server knows
-    # that it does not, or park_new stays blind to every app launched
-    # mid-session -- `firefox &` from the shell, a browser an MCP starts.
+    # The list above stops growing the first time this process misses a launch
+    # notification (see _cg_apps), so merge what the window server knows that it does not.
     known = {n.lower() for n in out}
     for name in _cg_apps():
         if name.lower() not in known: out[name] = name

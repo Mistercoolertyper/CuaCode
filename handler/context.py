@@ -1,38 +1,20 @@
-"""What the context window is actually full of.
-
-Nobody can tell you exactly. A provider reports one number for the whole prompt
-and never says which part of it cost what, so the parts here are measured in
-characters, converted at a fixed rate, and then scaled so they add up to the one
-number that was actually measured. That makes the shares trustworthy where the
-absolute figures are not, which is the right way round: the question this
-answers is "what is eating the window", not "how many tokens exactly is the
-system prompt".
-
-Images are the exception, and they are counted rather than estimated. An encoded
-screenshot reads as a quarter of a million characters, so a chars-per-token rule
-would report one photo as several windows' worth and drown every other category.
-A picture is charged at a flat rate instead, which is far closer to what the
-provider actually bills for one.
-
-Nothing here asks the provider anything. It reads what is already loaded -- the
-prompt, the tool schemas, the history in memory -- so /context costs no tokens
-to answer, which would be a poor joke if it did.
+"""What the context window is actually full of. Parts are measured in characters and scaled to the one
+number the provider reported, so the shares are trustworthy where the absolute figures are not. Images are
+counted rather than estimated, since an encoded screenshot would read as several windows' worth of characters.
+Nothing here asks the provider, so /context costs no tokens.
 """
 import json
 
-# English prose lands near 4 characters per token, JSON and code a little under;
-# the prompt is a mix of both. The exact rate barely matters once the parts are
-# scaled to a measured total -- it decides the reading only for a conversation
-# that has not sent a request yet.
+# English prose lands near 4 characters per token, JSON and code a little under.
+# The rate barely matters once the parts are scaled to a measured total.
 CHARS_PER_TOKEN = 3.8
 
-# What one image costs, near enough. Anthropic bills roughly width*height/750,
-# which for a screenshot capped at its long edge lands here. A count of images is
-# reported beside it, so a reading that looks wrong can at least be recomputed.
+# What one image costs, near enough: anthropic bills roughly width*height/750, which for a
+# screenshot capped at its long edge lands here. The count is reported beside it.
 IMAGE_TOKENS = 1600
 
-# Anything longer than this that looks like base64 is an encoded image rather
-# than text. Real prose does not run a thousand characters without a space.
+# Anything longer than this that looks like base64 is an image, not text: real
+# prose does not run a thousand characters without a space.
 BLOB_CHARS = 1000
 
 _B64 = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=-_")
@@ -50,12 +32,9 @@ def tokens(value) -> int:
 
 
 def rate_fields(chunk: dict) -> dict:
-    """A live rate, mid-round. Estimated, and says so in every field it sets.
-
-    The phase is carried too, because the same number means different things in
-    the two halves of a round: a hundred tokens a second while thinking is a
-    model racing through a thought nobody will read, and the same figure while
-    answering is the answer arriving.
+    """A live rate, mid-round. Estimated, and says so in every field it sets. The phase is carried too: a
+    hundred tokens a second while thinking is a model racing through a thought nobody will read, and the
+    same number while answering is the answer arriving.
     """
     out = {"phase": chunk.get("phase", ""), "tps_est": True}
     tps = chunk.get("tps") or 0
@@ -76,23 +55,16 @@ def _rate_of(tokens: int, secs: float) -> float:
 
 
 def turn_fields(chunk: dict) -> dict:
-    """What the round that just generated cost, phase by phase.
-
-    Thinking is reported by the provider where the provider reports it -- only
-    the openai dialect breaks reasoning out -- and estimated from the text
-    otherwise, marked as an estimate so nothing downstream presents a guess as a
-    count. Anthropic bills thinking inside output_tokens and never itemises it,
-    so the alternative to estimating is saying nothing at all about the part of
-    the turn that took the longest.
-
-    The reply is then whatever the round wrote that was not thinking: a
-    subtraction where the split is known, an estimate where it is not. The two
-    phases and their two clocks divide the round between them, so "where did the
-    ninety seconds go" has an answer rather than one averaged rate that hides it.
+    """What the round that just generated cost, phase by phase. Thinking is reported where the provider
+    reports it (only the openai dialect breaks reasoning out) and estimated from the text otherwise, marked as
+    such: anthropic bills thinking inside output_tokens and never itemises it. The reply is the rest of the round.
     """
     usage = chunk.get("usage") or {}
     out, secs = {}, chunk.get("secs") or 0
     if n := usage.get("input"): out["in_tokens"] = n
+    # Part of the prompt above, billed cheaper. Reported separately rather than subtracted:
+    # it is the same window, and a total that hid it would read as a smaller conversation.
+    if n := usage.get("cached"): out["cached_tokens"] = n
     total = usage.get("output") or 0
     if total: out["out_tokens"] = total
 
@@ -100,9 +72,8 @@ def turn_fields(chunk: dict) -> dict:
     if (n := usage.get("reasoning")) is not None:
         think = n
     elif total and (think_chars or reply_chars):
-        # The provider bills one number for the whole reply; the split follows
-        # where the characters went, because estimating each half separately
-        # produced 147 thinking tokens inside a 141-token reply.
+        # The provider bills one number for the whole reply, so the split follows where the
+        # characters went: estimating each half separately once put 147 think in a 141 reply.
         think = round(total * think_chars / (think_chars + reply_chars))
         out["thinking_est"] = True
     else:
@@ -122,9 +93,8 @@ def turn_fields(chunk: dict) -> dict:
     if r := _rate_of(out.get("reply_tokens", 0), chunk.get("reply_secs") or 0): out["reply_tps"] = r
     if r := _rate_of(total, secs):
         out["tps"], out["gen_secs"] = r, secs
-    # Measured now, whatever was estimated a moment ago: a live rate still
-    # marked as a guess after the provider has answered is the wrong kind of
-    # honest, and the tilde on screen is how anyone tells the two apart.
+    # Measured now, whatever was estimated a moment ago: the tilde on screen is how anyone
+    # tells a guess from a count, and a measured rate still marked as a guess lies.
     out["tps_est"] = False
     for key in ("thinking_secs", "reply_secs"):
         if chunk.get(key): out[key] = chunk[key]
@@ -139,10 +109,8 @@ def _is_blob(s: str) -> bool:
 
 
 def strip_images(value):
-    """The same structure with encoded images taken out, and how many there were.
-
-    Their bytes are worthless to a character count and ruinous to it, so they are
-    removed before anything is measured and charged separately.
+    """The same structure with encoded images taken out, and how many there were. Their bytes are worthless
+    to a character count and ruinous to it, so they go before anything is measured and are charged separately.
     """
     if isinstance(value, str):
         return ("", 1) if _is_blob(value) else (value, 0)
@@ -163,8 +131,8 @@ def strip_images(value):
 
 
 def _count(fn) -> int:
-    """A count from an integration, or zero. None of them is worth failing the
-    readout over -- a missing number is a missing row, not an error."""
+    """A count from an integration, or zero: a missing number is a missing row, not an error
+    worth failing the readout over."""
     try: return int(fn())
     except Exception: return 0
 
@@ -176,8 +144,8 @@ def _counts(cwd: str, app: str) -> dict:
     from integrations.subagents import loader as subagents
 
     return {
-        # scope="model": what the window actually holds is the skill tool's
-        # index, and a skill the user alone may invoke is not in it.
+        # scope="model": what the window holds is the skill tool's index, and a
+        # skill the user alone may invoke is not in it.
         "skills": _count(lambda: len(skills.load_skills(scope="model"))),
         "memory": _count(lambda: len(memory.in_scope(path=cwd, apps=[app] if app else None))),
         "mcp": _count(lambda: len(mcp.load_servers())),
@@ -185,11 +153,8 @@ def _counts(cwd: str, app: str) -> dict:
     }
 
 
-# Which tools are big enough, and separate enough, to answer for themselves. Each
-# of these carries an index of something that is loaded on demand -- the skills
-# on disk, the memories in scope, the MCP servers registered -- and that index is
-# the whole reason the thing is cheap. Folding them into one "tools" number would
-# hide exactly the trade the design is making.
+# Tools carrying an index of something loaded on demand: the skills on disk, the memories
+# in scope, the MCP servers registered. Priced as their own rows, not folded into tools.
 SIDECARS = {"skill": "skills", "memory": "memory", "mcp": "mcp"}
 
 LABELS = {
@@ -207,12 +172,8 @@ LABELS = {
 
 
 def _tool_parts(provider_name: str, vision: bool) -> tuple[dict, list, int]:
-    """Every offered tool's schema, priced one at a time.
-
-    Per tool rather than in one lump because the sidecars have to be pulled back
-    out of the total, and because a toolbox that has quietly grown to a fifth of
-    the window is a thing worth being able to see per row.
-    """
+    """Every offered tool's schema, priced one at a time, so the sidecars can be pulled back
+    out of the total and a toolbox that has grown to a fifth of the window is visible per row."""
     from handler.agent.main import registry, _visible
     from tools._parser.ToProvider import to_provider
 
@@ -226,11 +187,9 @@ def _tool_parts(provider_name: str, vision: bool) -> tuple[dict, list, int]:
 
 
 def report(sess, settings: dict, ctx=None, messages: list = None, last: dict = None) -> dict:
-    """The whole readout, as one reply.
-
-    measured is the prompt size the provider last charged for. When there is one
-    the estimates are scaled to it, so the categories add up to something real;
-    until then they are the estimates alone and say so.
+    """The whole readout, as one reply. measured is the prompt size the provider last charged for: with one,
+    the estimates are scaled to it and the categories add up to something real; without one they are estimates
+    alone and say so.
     """
     from handler import config, environment
     from handler.agent import providers
@@ -252,15 +211,11 @@ def report(sess, settings: dict, ctx=None, messages: list = None, last: dict = N
 
     parts = [
         {"key": "system", "tokens": tokens(sess.system)},
-        # The user's own AGENTS.md, priced separately from the prompt it is
-        # appended to: it is the one part of the system prompt they wrote, and
-        # a file that has quietly grown to a tenth of the window is exactly the
-        # sort of thing this readout exists to show them.
+        # The user's own AGENTS.md, priced apart from the prompt it is appended to, since a
+        # file quietly grown to a tenth of the window is what this readout is for.
         {"key": "instructions", "tokens": tokens(instructions.user_block())},
-        # Skills marked always-on: whole bodies in the system prompt, not an
-        # index entry. Its own row because it is the one category a user can
-        # make arbitrarily expensive with one line of frontmatter, and the row
-        # is where they find out they did.
+        # Always-on skills, whole bodies rather than an index entry, and its own row: one
+        # line of frontmatter can make this category arbitrarily expensive.
         {"key": "skills_on", "tokens": tokens(skills_mod.always_block())},
         {"key": "environment", "tokens": tokens(environment.block(ctx, settings, sess))},
         {"key": "tools", "tokens": tools_left, "count": tool_count - len(sidecar)},
@@ -268,9 +223,8 @@ def report(sess, settings: dict, ctx=None, messages: list = None, last: dict = N
         {"key": "memory", "tokens": sidecar["memory"]},
         {"key": "mcp", "tokens": sidecar["mcp"]},
         {"key": "messages", "tokens": tokens(clean), "count": len(history)},
-        # Charged flat, and never scaled with the rest: the reason it is a
-        # separate category is that the character count everything else is
-        # derived from is meaningless for it.
+        # Charged flat and never scaled with the rest: the character count
+        # everything else derives from is meaningless for it.
         {"key": "images", "tokens": images * IMAGE_TOKENS, "count": images, "flat": True},
     ]
 
@@ -309,19 +263,16 @@ def report(sess, settings: dict, ctx=None, messages: list = None, last: dict = N
 
 
 def _calibrate(parts: list, measured: int, estimate: int) -> bool:
-    """Scale the estimated parts onto the measured prompt, if there is one.
-
-    Only the estimated ones: the flat-rate categories are already closer to the
-    truth than anything a character count could say about them, and stretching
-    them to close a gap would corrupt the one number here that is not a guess.
+    """Scale the estimated parts onto the measured prompt, if there is one. Only the estimated ones: the
+    flat-rate categories are already closer to the truth than a character count could say about them, and
+    stretching them to close a gap would corrupt the one number here that is not a guess.
     """
     flat = sum(part["tokens"] for part in parts if part.get("flat"))
     room, base = measured - flat, estimate - flat
     if measured <= 0 or base <= 0 or room <= 0: return False
     factor = room / base
-    # A wild factor means the two are not measuring the same thing -- a history
-    # rebuilt for another provider, a window that has just been cleared -- and
-    # scaling by it would turn a rough answer into a confident wrong one.
+    # A wild factor means the two are not measuring the same thing, a history rebuilt for
+    # another provider or a just-cleared window, and scaling by it invents confidence.
     if not 0.4 <= factor <= 2.5: return False
     for part in parts:
         if not part.get("flat"): part["tokens"] = round(part["tokens"] * factor)

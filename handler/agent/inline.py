@@ -5,37 +5,40 @@ A message can carry a command in the middle of it ("explain X and then
 A token is only a command when the `/` starts a word and the name is one we
 know; anything else is prose and goes to the model untouched.
 
-Two classes:
+Two classes. Blocking (`provider`, `model`, `vision`, `effort`) must run
+before the request goes out, because the request would otherwise be built
+against the setting the command changes; the result is shown and generation
+waits for the next message. Parallel (`context`, `usage`) are read-only, and
+the rest of the message still generates.
 
-- blocking: must run before the request goes out (`provider`, `model`,
-  `vision`, `effort`), because the request would otherwise be built against
-  the setting the command changes. The command runs, its result is shown,
-  and generation waits for the next message.
-- parallel: read-only (`context`, `usage`). They run and are shown, and the
-  rest of the message still generates.
-
-The dispatch itself lives in main.py, which holds the session and the config;
-this only decides what in the text is a command and what a command needs.
+Dispatch lives in main.py, which holds the session and the config; this only
+decides what in the text is a command and what a command needs.
 """
 from dataclasses import dataclass
 
-# The commands, in the order a menu should list them: name, what it does, and
+# The commands, in the order a menu should list them: name, description, and
 # whether it must run before the request goes out. One not in BLOCKING is
-# parallel by definition, and one not in this table is not a command at all --
-# it is a path, a URL, a date, prose with a slash in it. The description is the
-# frontend's `/` menu, so a command added here reaches the parser and the menu
-# in the same edit, and a frontend never carries a second copy of the list.
+# parallel by definition, and one not in this table is not a command at all,
+# it is a path, a URL, or prose with a slash in it. The description is what the
+# frontend's `/` menu shows, so a command added here reaches the parser and the
+# menu in the same edit.
 COMMANDS = (
     ("provider", "which provider answers, from here on", True),
     ("model",    "which model that provider runs", True),
     ("vision",   "which provider looks at pictures", True),
     ("effort",   "how hard it thinks: off low medium high max", True),
+    ("compact",  "fold the conversation now, or set the limit it folds at", True),
     ("context",  "how much of the window the conversation fills", False),
     ("usage",    "what this and every other session has cost", False),
 )
 
-_ALL = frozenset(name for name, _, _ in COMMANDS)
-_BLOCKING = frozenset(name for name, _, blocking in COMMANDS if blocking)
+# The old spelling, kept working and kept out of the menu. A command someone has
+# in their fingers should go on working; a menu listing two names for one thing is
+# a menu asking a question that has no answer.
+ALIASES = {"compress": "compact"}
+
+_ALL = frozenset(name for name, _, _ in COMMANDS) | frozenset(ALIASES)
+_BLOCKING = frozenset(name for name, _, blocking in COMMANDS if blocking) | frozenset(ALIASES)
 
 
 def listing() -> list:
@@ -53,11 +56,10 @@ class Result:
 def parse(text: str) -> Result:
     """Pull `/command arg` occurrences out of `text`.
 
-    A command is a `/` that opens a word (start of line, or after whitespace)
-    followed by a known name and an optional single-token argument. Every other
-    slash is left alone. The residue -- prose, and any unknown `/word` -- comes
-    back as `text`, so a parallel command leaves its message intact for the
-    model.
+    A command is a `/` that opens a word followed by a known name and an
+    optional single-token argument; every other slash is left alone. The
+    residue, prose and any unknown `/word`, comes back as `text`, so a parallel
+    command leaves its message intact for the model.
     """
     blocking, parallel, out = [], [], []
     i, n = 0, len(text or "")
@@ -70,13 +72,12 @@ def parse(text: str) -> Result:
             j = i + 1
             while j < n and text[j].isalpha():
                 j += 1
-            name = text[i + 1:j]
+            name = ALIASES.get(text[i + 1:j], text[i + 1:j])
             if name in _ALL and (j >= n or text[j].isspace()):
                 k = j
                 arg = ""
-                # Only the blocking commands take an argument (/provider fr);
-                # context and usage read nothing, so anything after them is
-                # prose and has to stay.
+                # Only blocking commands take an argument (/provider fr);
+                # context and usage read nothing, so anything after is prose.
                 if name in _BLOCKING:
                     while k < n and text[k].isspace():
                         k += 1

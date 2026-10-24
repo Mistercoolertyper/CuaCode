@@ -29,15 +29,17 @@ handler/usage.py        per-round cost stamped on records, rolled into meta.json
 tools/<name>/           one folder per tool: Description.md, InputSchema.json, main.py
 tools/_parser/          schema translation per provider dialect, arg validation
 integrations/           subagents, workflows, skills, mcp
-go/core/protocol/       the wire format
-go/core/session/        spawns the worker, tracks state, emits events
-go/frontends/<name>/    one package main per frontend
-bin/                    built binaries, one per frontend
+rust/src/wire.rs        the wire format
+rust/src/session.rs     spawns the worker, tracks state, emits events
+rust/src/transcript.rs  events folded into the rows a UI draws
+rust/fastrs/            the terminal frontend
+rust/app/               the GUI frontend (GPUI)
+rust/target/release/    built binaries, one per frontend
 ```
 
-Frontends: `classic` (terminal), `deck` (terminal, action-tape feed), `sketch`,
-`gio` (GUI window). `./run.sh <name>` runs one from source, `./build.sh` builds
-them all into `bin/`.
+Frontends: `fastrs` (terminal) and `cuacode` (GUI window). `./run.sh <name>`
+runs one from source, `./build.sh` builds them all. `rust/AGENTS.md` and
+`rust/README.md` are the pages for that half.
 
 ## Where your state lives
 
@@ -82,7 +84,7 @@ numbers were measured and which estimated.
 
 Each round's cost is stamped onto the assistant record (`u`), rolled into
 `meta.json` on commit, and totalled across every session by `./run.sh --usage`
-(or `/usage` in deck) without opening a transcript. Input is summed as billed -
+(or `/usage` in a frontend) without opening a transcript. Input is summed as billed -
 the prompt is re-sent every round - with the largest single prompt beside it.
 
 Subagents and workflows both run through the same `generate()`. A subagent is
@@ -204,9 +206,8 @@ provider that can see and returns a written answer.
 Which provider does the looking is the top-level `"vision"` key in
 `config.json`: a provider name, or empty to use whichever configured provider
 can see (preferring the active one). It is a role, not a model setting - the
-helper uses the model already configured for that provider. In the deck
-frontend the user sets it with `/vision`; otherwise it is one line in
-`config.json`.
+helper uses the model already configured for that provider. In a frontend the
+user sets it with `/vision`; otherwise it is one line in `config.json`.
 
 Computer use needs a real vision model. Descriptions are not a substitute for
 looking, and coordinates read off a description are not clickable - say so
@@ -221,6 +222,8 @@ rather than trying.
 - CuaCode is not macOS-specific. Anything OS-bound or personal ships inert:
   code may live in the repo, but the bundled config stays empty and the user
   registers it from `~/.cuacode/`.
-- The Go side has tests: `cd go && go test ./...`.
+- The Rust side has tests: `cargo test --workspace` from `rust/` (a bare
+  `cargo test` there tests only the root package).
 - Both halves have to agree about the wire. Changing an event shape in `main.py`
-  means changing `go/core/protocol/` too.
+  means changing `rust/src/wire.rs` too, and `rust/fixtures/record.py`
+  re-records the fixture the tests hold the types to.

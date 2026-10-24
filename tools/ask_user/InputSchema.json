@@ -1,0 +1,23 @@
+{
+    "properties": {
+        "questions": {
+            "type": "array",
+            "description": "One or more questions, asked in order. Each is a string for a free-text question, or an object with question and options.",
+            "items": {
+                "anyOf": [
+                    {"type": "string"},
+                    {"type": "object",
+                     "properties": {
+                         "question": {"type": "string", "description": "What to ask. One sentence."},
+                         "options": {"type": "array", "items": {"type": "string"},
+                                     "description": "The answers to choose between. Leave out when the answer has to be typed."},
+                         "detail": {"type": "string",
+                                    "description": "Anything the person needs to answer: the two diffs, the file list, the error."}
+                     },
+                     "required": ["question"]}
+                ]
+            }
+        }
+    },
+    "required": ["questions"]
+}

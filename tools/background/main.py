@@ -1,9 +1,9 @@
 """Reading the background registry from inside the agent loop.
 
-Everything here is a view. The jobs themselves are started by the loop, not by
-this tool, because backgrounding is something the loop does to a call rather
-than something a call can do to itself -- and because half of them are started
-by the user, mid-call, with no model involvement at all.
+Everything here is a view. The jobs are started by the loop, not by this tool,
+because backgrounding is something the loop does to a call rather than something
+a call can do to itself, and because half of them are started by the user,
+mid-call, with no model involved.
 """
 import time
 
@@ -17,10 +17,9 @@ POLL = 0.1
 def _wait(job, timeout: float, cancel) -> dict:
     """Sit on one job until it ends.
 
-    Polled rather than joined, so the cancel in ctx is read on the way round.
-    Without that the whole point is undone: this call runs on the interruptible
-    thread like every other, but a thread parked in join() is exactly the thing
-    that thread exists to avoid becoming.
+    Polled rather than joined, so the cancel in ctx is read on the way round:
+    this call runs on the interruptible thread, and a thread parked in join() is
+    the thing that thread exists to avoid becoming.
     """
     deadline = time.monotonic() + timeout
     while not job.call.done:
@@ -56,9 +55,9 @@ def run(args: dict, ctx) -> dict:
             return {**job.brief(), "note": "already finished -- nothing to stop, read it with output"}
         JOBS.kill(jid)
         # A moment's grace, then report what is actually true rather than what
-        # was asked for. The token is cooperative and some tools do not watch
-        # it, and "killed" over a process still running is the one answer that
-        # would send the model off believing something false.
+        # was asked for. The token is cooperative and some tools do not watch it,
+        # and "killed" over a process still running would leave the model
+        # believing something false.
         deadline = time.monotonic() + 2.0
         while not job.call.done and time.monotonic() < deadline: time.sleep(POLL)
         return {**job.brief(),

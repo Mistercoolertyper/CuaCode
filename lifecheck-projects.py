@@ -4,8 +4,8 @@ be, because the demo paints its lists fake and never folds a real reply.
 
 Boots main.py against a throwaway CUACODE_HOME, sends the terminal envelope,
 then walks the project.* and session.pin commands, asserting every reply
-shape the bridge frontend folds on (an envelope type with no data.state -
-the wire guarantee the boot archive bug taught us to pin). Exits nonzero on
+shape a frontend folds on (an envelope type with no data.state - the wire
+guarantee the boot archive bug taught us to pin). Exits nonzero on
 any failure, so a fresh agent can run it as the first thing after touching
 the worker or the sidebar.
 

@@ -1,0 +1,11 @@
+{
+    "properties": {
+        "action": {"type": "string", "enum": ["init", "message"],
+            "description": "init lists the agents you can talk to; message sends one"},
+        "to": {"type": "string",
+            "description": "Agent id from init, or a unique prefix of its name. Leave out to send to every peer (message)"},
+        "body": {"type": "string",
+            "description": "What to say. Text only; the recipient knows it is from an agent, not the person (message)"}
+    },
+    "required": ["action"]
+}

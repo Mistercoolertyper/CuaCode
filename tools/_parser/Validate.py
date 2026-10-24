@@ -1,20 +1,13 @@
 """The slice of JSON Schema this repo actually writes, and nothing else.
 
-Every InputSchema.json here uses the same handful of keywords -- type,
-properties, required, enum, items, default -- so a dependency that implements
-the other ninety percent of the spec would be paying rent on rooms nobody
-enters.
-
-Two callers, and they want different things. dispatch() validates a model's
-tool arguments before a handler ever sees them, and must not invent values the
-handler did not ask for, so it leaves defaults alone. A subagent's structured
-output is a return value the caller is about to index into, so there defaults
-are filled and the dict comes back complete.
-
-Errors are written to be read by a model, because that is exactly where they
-go: a failed submit_result hands this text back as the tool result, and the
-next round is the model fixing it. "missing required field 'confidence'" gets
-corrected; "$.confidence: required" gets argued with.
+Every InputSchema.json here uses the same handful of keywords (type, properties,
+required, enum, items, default), so a full implementation would be paying rent on
+rooms nobody enters. Two callers want different things: dispatch() validates a
+model's tool arguments before a handler sees them and must not invent values, so
+it leaves defaults alone; a subagent's structured output is a return value the
+caller is about to index into, so there defaults are filled. Errors are written to
+be read by a model, because that is where they go: "missing required field
+'confidence'" gets corrected; "$.confidence: required" gets argued with.
 """
 import json
 
@@ -42,11 +35,10 @@ _TRUE, _FALSE = ("true", "yes", "1"), ("false", "no", "0")
 def _coerce(v, t: str):
     """A quoted scalar into the scalar it obviously is.
 
-    Models quote numbers and booleans constantly, and some servers hand back
-    tool arguments where every leaf is a string. Rejecting that costs a whole
-    round to be told what the value already said. Anything that does not
-    convert cleanly is returned untouched, so the type check below still
-    reports it.
+    Models quote numbers and booleans constantly, and some servers hand back tool
+    arguments where every leaf is a string; rejecting that costs a whole round to be
+    told what the value already said. Anything that does not convert cleanly is
+    returned untouched, so the type check below still reports it.
     """
     if not isinstance(v, str) or t in (None, "string"): return v
     s = v.strip()
@@ -69,12 +61,11 @@ def _coerce(v, t: str):
 def _label(path: str) -> str: return f"'{path}'" if path else "input"
 
 def check(value, schema: dict, path: str = "", defaults: bool = False) -> tuple:
-    """(cleaned value, list of errors). Never raises -- a malformed schema
-    yields no errors rather than an exception in the middle of a turn.
+    """(cleaned value, list of errors). Never raises: a malformed schema yields no
+    errors rather than an exception in the middle of a turn.
 
-    Unknown keys are kept, not stripped: a handler that reads something its
-    schema forgot to declare keeps working, which is the friendlier failure of
-    the two.
+    Unknown keys are kept, not stripped, so a handler that reads something its
+    schema forgot to declare keeps working.
     """
     schema = schema if isinstance(schema, dict) else {}
     t = schema.get("type")
