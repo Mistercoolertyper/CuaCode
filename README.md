@@ -7,7 +7,7 @@ CLI agent for computer use and more.
 ## Requirements
 
 - [Python](https://www.python.org/) 3.10 or newer
-- [Go](https://go.dev/) - only to build or run a frontend
+- [Rust](https://rustup.rs/) - only to build or run a frontend
 
 ## Install
 
@@ -24,16 +24,16 @@ interpreter as found. Re-running is safe - an existing `venv/` is reused.
 Then run one:
 
 ```bash
-./bin/deck        # built binary
-./run.sh deck     # or straight from source, no build step
+./run.sh fastrs   # terminal frontend, built on first run
+./run.sh cuacode  # the GUI app
 ./run.sh          # list the frontends you have
 ./run.sh --usage  # what every conversation has cost, no session started
 ```
 
 Building on its own is `./build.sh`, optionally with one frontend's name, or
-`--keep-going` to report failures at the end rather than stopping at the first
-- `bridge` needs a C toolchain and platform headers (it hosts the OS webview),
-  and the terminal frontend does not.
+`--keep-going` to report failures at the end rather than stopping at the first.
+Both frontends come out of `rust/`; `app.sh` in `rust/app` builds the GUI as a
+real macOS bundle.
 
 ### Doing it by hand
 
@@ -79,7 +79,7 @@ fill-in-the-blank template with a blank entry per registered provider:
 ```
 
 Fill in `model` and `api_key` for the one you want and set `active` to its name,
-or pick both from inside `deck` with `/provider` - the file is written either
+or pick both from inside a frontend with `/provider` - the file is written either
 way. `vision` picks the provider that looks at images (see Vision), `effort`
 sets the level a new conversation starts on, `always_skills` is the short list
 of skills held in the system prompt. It is re-read every turn, so an edit lands
@@ -119,15 +119,13 @@ The environment variable wins over the key in `config.json`, so a shell can
 override a stored key without editing anything. Anything OpenAI-compatible is
 one line in `handler/agent/providers/__init__.py` - default model, base URL,
 key variable - and a local server (ollama local, litellm, LM Studio) joins the
-registry the same way, because the `ollama` dialect itself is cloud-only.
+registry the same way.
 
-`ollama` means ollama.com, not the daemon on your machine, and the model picker
-lists that account's catalog rather than `ollama list`. The agent opens every
-conversation with roughly 10k tokens of instructions and environment and carries
-twenty-odd tool schemas beside it; models small enough to run at home follow
-that badly, and the failure is silent rather than loud. Either way in works and
-neither needs a key in the file: `ollama signin` through the desktop app leaves
-one in `~/.ollama/keys`, which is read when nothing else is set.
+`ollama` means ollama.com, not the daemon on your machine, and it speaks the
+openai schema - there is no native ollama dialect in here - with the model picker
+listing that account's catalog rather than `ollama list`. It needs no key in the
+file: `ollama signin` through the desktop app leaves one in `~/.ollama/keys`,
+which is read when nothing else is set.
 
 **Vision is the thing that decides what the agent can do.** A model that cannot
 see is never handed the screenshot tools - offered them it would call them, and
@@ -137,31 +135,33 @@ asked of the provider where it can be, learned from a refusal where it cannot,
 and remembered per model. A blind model can borrow eyes: set `vision` to another
 configured provider - a name, or `{"provider": ..., "model": ...}` to pin the
 model that does the looking - and `describe_image` routes screenshots through
-it; `/vision` does this from the deck palette.
+it; `/vision` does this from the palette.
 
 Thinking effort is per conversation, not per account: `off`, `low`, `medium`,
 `high`, `max`, set with `/effort` and stored with the session. Each provider's
-own dialect for it - `reasoning_effort`, thinking budgets, `num_ctx` - is
+own dialect for it - `reasoning_effort`, thinking budgets - is
 translated from that one ladder.
 
 ## Layout
 
-The Python agent is the worker; the Go side is one or more interchangeable
+The Python agent is the worker; the Rust side is one or more interchangeable
 frontends talking to it over line-delimited JSON on stdin/stdout.
 
 ```
 main.py, handler/, tools/     the Python worker (the actual agent)
 integrations/                 subagents, workflows, skills, MCP servers
-go/core/protocol/             the wire format: envelopes, events, subprocess IPC
-go/core/session/              frontend-agnostic state: spawns the worker, tracks
-                              status/msgs/turns, emits Events
-go/core/runner/               finds python + main.py, hands back a started Session
-go/frontends/<name>/          one package main per frontend - pick one at run time
-bin/                          build output, one binary per frontend
+rust/src/wire.rs              the wire format: the envelope, its events, its fields
+rust/src/worker.rs            finds python and main.py, spawns, reads, reaps
+rust/src/session.rs           frontend-agnostic state, folded from events
+rust/src/transcript.rs        events folded into rows: the model a UI draws
+rust/fastrs/                  the terminal frontend
+rust/app/                     the GUI frontend (GPUI)
+rust/target/release/          build output, one binary per frontend
 ```
 
-Nothing in `core/` knows a frontend exists, and no frontend knows about
-another. Adding one never touches the others.
+Nothing in the shared half knows a frontend exists, and no frontend knows about
+another: the terminal one must not link a UI framework and the GUI must not link
+a terminal library. Adding one never touches the others.
 
 ### Tools
 
@@ -178,43 +178,39 @@ The pointer-and-keyboard ones (`click`, `key`, `scroll`, `type_text`,
 
 | Name | What it is |
 | --- | --- |
-| `deck` | Terminal, the one to start with: an action tape rather than a chat log. Every block's text starts in the same column and only the marker to its left changes, so the model's prose is the unmarked baseline and what you asked, what it thought, and what it did to the machine are what catch the eye. Tool calls group under a header listing each call, its arguments and its result, with the error spelled out under any that failed. Prose renders a small subset of markdown (fenced and inline code, bold, italic, headings, bullets, quotes, tables - a table is laid out in columns sized to its contents, right- and centre-aligned from the rule row, and one too wide to draw as a grid stays plain text). The status bar carries state, a live timer, the call count and a context gauge. `Ctrl+T` expands thinking, `Tab` collapses the tool calls, `Shift+Tab` spells their arguments out in place instead of summarizing them to a line, `Ctrl+V` attaches an image to the message, `Ctrl+O` opens the call under the cursor in full - every argument as it was sent and the whole result, including the command output and page text the wire only reports the size of (`←`/`→` step between calls, `↑`/`↓` and `PgUp`/`PgDn` scroll, `Esc` closes; it opens on a call that is still running too, where the arguments are the point). `Esc` stops the run. `/` opens the command palette (`/help`, `/context`, `/usage`, `/new`, `/provider`, `/model`, `/effort`, `/vision`, `/params`, `/permissions`, `/clear`, `/quit`), at any position in the line - typing it mid-message pops the same menu, and Esc closes it taking the trigger and filter back out. `$` opens the skill menu the same way: choosing one writes `$name ` into the message, and a skill answers to `$name` in any frontend's input. `@` opens a fuzzy file picker over the directory you launched from, inserting absolute paths so the agent resolves them the same way wherever it is running. `Shift+Enter` (or `Alt+Enter`) puts a newline in the message instead of sending it. Reopening an earlier conversation is a startup flag rather than a command - `./run.sh deck --resume` to pick one, `--resume <id>` to go straight there - and it is redrawn by replaying its stored records as ordinary events. Asks before the calls that can change something (`file`, `shell`, `WebFetch`, `WebSearch`, `mcp`, `workflow`) - a `file` read or a look-only command runs without a prompt (see Tool permissions); allowing one "for the session" is scoped to that exact call, never the whole tool, and a refusal is always for the single call. The mouse is left to the terminal so selection, copy and paste work normally; scroll with the arrows and `PgUp`/`PgDn`, and bracketed paste arrives as one line. |
-| `bridge` | GUI window: the same action tape `deck` draws in a terminal, drawn in the OS webview (WKWebView on macOS, WebView2 on Windows, WebKitGTK on Linux) - no bundled browser, no second runtime. Go owns the worker and the session; every pixel is hand-written HTML/CSS/JS under `go/frontends/bridge/ui/`, embedded in the binary and served on loopback behind a random token, so the page loads nothing from the network. The window is a workspace: several sessions at once with a project-grouped sidebar (state dots, recency, window-lifetime pins), and a ⌘K palette that searches sessions across every project and starts new ones in any project's directory or a freshly picked folder. `--resume` opens the session picker, `--serve` prints the page's URL with no worker and no window. Enter sends, **Esc stops the run in flight**. Needs a C toolchain to build. |
+| `fastrs` | Terminal. One conversation as an action tape rather than a chat log: the model's prose is the unmarked baseline, and what you asked, what it thought and what it did to the machine are what catch the eye. Tool calls fold into one row per run - `5 calls · read, edit` - which opens on a press. `/` opens the worker's own command table (with `help` and `permissions` in front), `$` the skill menu, `@` a file picker. `Ctrl+O` opens the call under the cursor in full, `Ctrl+V` attaches a picture, `Esc` stops the run, `Shift+Enter` (or `Alt+Enter`, or `Ctrl+J`) puts a newline in the message. `/help` lists every key; there is no key row drawn in the corner of the frame. |
+| `cuacode` | GUI window. A rail of promoted projects and the sessions standing in each, the conversation, and a composer that sets provider, model, permissions and location. It reads the state root directly, so the rail draws with no worker up. A run is one row, the same fold fastrs uses. `rust/app/app.sh` builds it as a real macOS bundle so it owns a Dock identity and a menu bar. |
+
+Both are documented at length in `rust/README.md`, which is the page for the
+frontend half.
+
 ### Adding a frontend
 
-Make `go/frontends/<name>/` with a `package main`, and let `runner` do the wiring:
+A frontend is a crate under `rust/` with a `[[bin]]`, built on the shared half
+(`wire`, `worker`, `session`, `transcript`). Nothing registers it: `build.sh` and
+`run.sh` read the cargo manifests and pick up the new binary by its `[[bin]]
+name`, so `./run.sh <name>` works the moment the crate exists.
 
-```go
-sess, err := runner.Start(func(ev session.Event) { /* hand to your loop */ })
-if err != nil { ... }
-defer sess.Close()
-
-sess.SendChat("hello")   // user input in
-sess.Cancel()            // abandon the run in flight, worker stays up
-sess.Background()        // push the running tool call into the background
-sess.Snapshot()          // current state out
+```rust
+let mut sess = Session::start(home, cwd)?;   // spawns the worker, reads its lines
+sess.chat("hello", &[])?;                    // user input in
+sess.cancel()?;                              // abandon the run in flight, worker stays up
+sess.background()?;                          // push the running tool call into the background
+sess.command("session.list", json!({}))?;    // any of the worker's other commands
+for ev in sess.drain() { /* fold it */ }
 ```
 
-Each `session.Event` carries the parsed worker envelope plus a `Snapshot`
-(state, msgs, turns, last streamed token, context used and left, error, and
-the token rates of the generating round). It arrives on the
-worker's reader goroutine, so forward it to your own event loop rather than
-mutating UI state in the callback. A worker that dies arrives the same way, as
-an `error` status carrying its stderr, so a frontend that draws errors already
-draws that one.
-
-`sess.Command(action, fields)` sends any of the worker's other commands
-(`session.list`, `session.new`, `session.load`, `session.delete`,
+The other commands are the worker's own table: `session.list`, `session.new`,
+`session.load`, `session.rename`, `session.delete`, `session.archive`,
 `session.effort`, `provider.list`, `provider.use`, `provider.set`,
 `model.list`, `vision.use`, `permission.mode`, `tool.detail`,
 `background.list`, `background.kill`, `skill.list`, `context.report`,
-`usage.report`); the reply arrives through the same event
-callback, matched by the envelope ID.
+`usage.report`, `project.list`, `project.add`. A reply comes back as an event
+under the id it was sent with.
 
-`build.sh` and `run.sh` pick up the new directory
-automatically - no registration anywhere. Copy `frontends/deck/` for the
-bubbletea scaffolding; `frontends/bridge/` shows the other extreme, a window
-whose entire UI is a plain page.
+`rust/fastrs` is the smallest complete example and `rust/app` the other extreme,
+a window over the same types. `rust/AGENTS.md` has the rules that keep them
+apart, and `rust/README.md` explains the fold each of them draws from.
 
 ### Cancelling
 
@@ -248,9 +244,9 @@ tool results.
 
 For a frontend drawing a jobs panel:
 
-```go
-sess.Command("background.list", nil)                              // -> {"type":"jobs", ...}
-sess.Command("background.kill", map[string]any{"job": "bg_3"})
+```rust
+sess.command("background.list", json!({}))?;                  // -> {"type":"jobs", ...}
+sess.command("background.kill", json!({"job": "bg_3"}))?;
 ```
 
 Killing is cooperative, for the same reason cancelling is: a tool that watches
@@ -276,7 +272,7 @@ comes back with `{index, total, name, ts, args, result}` - the arguments the
 model actually sent and the whole stored result, strings capped at 20k
 characters each and images left as `{"$blob": ...}` refs rather than moving a
 megabyte of base64. A call that has been rewound away answers
-`{"unavailable": "no such call"}` rather than somebody else's result. `deck`
+`{"unavailable": "no such call"}` rather than somebody else's result. `fastrs`
 draws this on `Ctrl+O`; a frontend that never asks sees exactly what it saw
 before.
 
@@ -301,9 +297,10 @@ map[string]any{"allow": true})`. A refusal comes back to the model as a normal
 failed call (`denied by the user`) rather than a missing one, so the turn stays
 valid.
 
-The mode is the frontend's to set, and there are three: `ask` (the user
-decides), `auto`, and `off`. In `auto` the calls that would prompt go to a
-small model instead. `permission` in config.json names it, spelled like
+The mode is the frontend's to set, and there are four: `ask` (the user
+decides), `auto`, `bypass`, and `off`. In `auto` the calls that would prompt go to a
+small model instead, and `bypass` asks nothing either but still puts the irreversible
+calls to the user. `permission` in config.json names it, spelled like
 `vision` - a provider, and optionally a model, blank to inherit whichever the
 conversation runs on:
 
@@ -322,7 +319,7 @@ the person still decides. `off` runs everything the tools ask for without a
 word.
 
 The prompt shows what is actually being allowed rather than a summary of it.
-`deck` draws the call's arguments in full, and where the tool supplies a
+Both frontends draw the call's arguments in full, and where the tool supplies a
 `preview` - `file` does, for a write or an edit - it draws that instead: the
 summary line and then the patch itself, with line numbers off the hunk headers,
 a marked gutter beside every line that changes and the code syntax-coloured
@@ -382,7 +379,7 @@ else is the error the frontend was not showing you.
 
 ## Extending it
 
-Four ways that need no Go and no restart - files are re-read every turn, so
+Four ways that need no rebuild and no restart - files are re-read every turn, so
 one written mid-conversation is usable in the next. The ones under
 `integrations/` ship with the app; the ones under `~/.cuacode/` are yours, and a
 name collision goes to yours.

@@ -1,7 +1,6 @@
 mss
 pillow
 pyyaml
-ollama
 openai
 anthropic
 rich

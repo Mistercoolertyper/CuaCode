@@ -99,6 +99,6 @@ reg = load_tools('tools')
 print(dispatch(reg, '<name>', {...}))"
 ```
 
-Then check the frontend renders it: `go/frontends/deck/calls.go` formats
-arguments and results per tool, and a tool with no case there falls back to
-`key=value`, which is fine but rarely reads well.
+Then check the frontend renders it: `rust/src/transcript.rs` folds a record into
+a row, and `rust/fastrs/src/view.rs` decides how that row reads. A tool the fold
+has no case for falls back to `key=value`, which is fine but rarely reads well.

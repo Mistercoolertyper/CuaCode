@@ -1,34 +1,37 @@
 #!/usr/bin/env bash
-# Build every frontend in go/frontends/ into bin/.
+# Build every frontend into rust/target/release/.
 #   ./build.sh                build all
-#   ./build.sh classic        build one
+#   ./build.sh fastrs         build one frontend
 #   ./build.sh --keep-going   build all, report failures at the end instead of
-#                             stopping at the first (gio needs a C toolchain and
-#                             platform headers; the terminal frontends do not)
+#                             stopping at the first
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-if ! command -v go &> /dev/null; then
-    echo "error: go is not installed or not in PATH" >&2
-    echo "       get it from https://go.dev/dl/" >&2
-    exit 1
-fi
+# Frontends are the [[bin]] targets of the crates under rust/.
+rust_frontends() {
+    # One "dir:bin" per frontend: the crate directory relative to the repo
+    # root, and the binary that crate builds. Read from the manifests rather
+    # than listed here, so adding a frontend is a single file.
+    local m d b
+    for m in rust/Cargo.toml rust/*/Cargo.toml; do
+        [ -f "$m" ] || continue
+        d="${m%/Cargo.toml}"
+        for b in $(awk '/^\[\[bin\]\]/{f=1;next} /^\[/{f=0} f && /^name/{print $3}' "$m" | tr -d '"'); do
+            echo "$d:$b"
+        done
+    done
+}
+
+# The crate a frontend belongs to, or nothing.
+rust_bin_dir() {
+    # No early `exit` in the awk: it would close the pipe while rust_frontends
+    # still had a line to write, SIGPIPE on that write, and `pipefail` plus
+    # `set -e` would then end the script silently before it runs anything.
+    rust_frontends | awk -F: -v want="$1" '$2 == want && !seen { print $1; seen = 1 }'
+}
 
 mkdir -p bin
-
-# cgo links against whichever SDK clang resolves for itself, and that is the
-# last one the Command Line Tools installed - which can be newer than the linker
-# the selected Xcode ships. When it is, the link dies on an architecture token
-# in the .tbd files (arm64e.x1-macos) that this ld does not know, and the error
-# reads as though the Go code were at fault. Pin the build to the SDK belonging
-# to the active developer directory instead. An SDKROOT the caller set is their
-# call and is left alone; on a machine without xcrun this is a no-op.
-if [ -z "${SDKROOT:-}" ]; then
-    if sdk="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null)" && [ -n "$sdk" ]; then
-        export SDKROOT="$sdk"
-    fi
-fi
 
 keep_going=0
 args=()
@@ -38,14 +41,14 @@ done
 
 targets=("${args[@]+"${args[@]}"}")
 if [ ${#targets[@]} -eq 0 ]; then
-    for d in go/frontends/*/; do
-        [ -d "$d" ] || continue
-        targets+=("$(basename "$d")")
+    # Names, not "dir:bin": the loop below resolves a name back to its crate.
+    for pair in $(rust_frontends); do
+        targets+=("${pair#*:}")
     done
 fi
 
 if [ ${#targets[@]} -eq 0 ]; then
-    echo "no frontends in go/frontends/" >&2
+    echo "no frontends declared in rust/Cargo.toml" >&2
     exit 1
 fi
 
@@ -54,17 +57,23 @@ exe=""
 
 failed=()
 for name in "${targets[@]}"; do
-    if [ ! -d "go/frontends/$name" ]; then
-        echo "error: no such frontend: $name" >&2
-        exit 1
+    if [ -n "$(rust_bin_dir "$name")" ]; then
+        # Built from inside the crate: cargo walks up to the workspace on its
+        # own, so the artifact lands in the one shared target directory and
+        # run.sh has a single path to exec. `--bin` from the workspace root
+        # would not find it: the binary belongs to a member, not to the root.
+        crate="$(rust_bin_dir "$name")"
+        if (cd "$crate" && cargo build --release); then
+            echo "built: rust/target/release/$name$exe"
+        elif [ "$keep_going" -eq 1 ]; then
+            failed+=("$name")
+        else
+            exit 1
+        fi
+        continue
     fi
-    if (cd go && go build -o "../bin/$name$exe" "./frontends/$name"); then
-        echo "built: bin/$name$exe"
-    elif [ "$keep_going" -eq 1 ]; then
-        failed+=("$name")
-    else
-        exit 1
-    fi
+    echo "error: no such frontend: $name" >&2
+    exit 1
 done
 
 if [ ${#failed[@]} -gt 0 ]; then

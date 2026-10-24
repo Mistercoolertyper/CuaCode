@@ -3,3 +3,6 @@ venv
 .venv
 .DS_Store
 /bin/
+rust/target/
+.env
+rust/app/cuacode.app/
