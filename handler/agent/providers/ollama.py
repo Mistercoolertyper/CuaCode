@@ -23,6 +23,12 @@ class OllamaOpenAI(OpenAI):
     """ollama.com over the openai schema. The key `ollama signin` leaves behind is this host's
     own business and is looked for here, never in the generic class: stored_key is the hook
     config.api_key and setup() both read.
+
+    Prior reasoning goes back under `reasoning`: that is the spelling this endpoint answers
+    with and reads on replay. `reasoning_content`, the field deepseek's own docs name, is
+    accepted here and silently dropped, so anything worked out before a tool call is lost.
     """
+    think_key = "reasoning"
+
     def stored_key(self) -> str:
         return _signed_in_key()

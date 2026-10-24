@@ -13,6 +13,9 @@ class OpenAI:
     lm studio) is this class with a different base_url, registered under its own key.
     """
     name = "openai"
+    # The key a host reads prior reasoning back out of, or None for the ones that read none.
+    # openai's own chat-completions has no such field: the text is display-only there.
+    think_key = None
 
     def __init__(self, default_model="gpt-5.6-sol", base_url=None, key_env="OPENAI_API_KEY", vision=True,
                  models_url=None, show_url=None):
@@ -170,12 +173,14 @@ class OpenAI:
         return 0
 
     def assistant_message(self, thinking: str, content: str, tool_calls: list) -> dict:
-        # Reasoning text is display-only here: chat-completions has no field to send it back in.
-        # It still reaches disk, on the session record. Content is always a string, never null:
-        # a round that said nothing is still a turn on the wire, and null is a 400 on servers
-        # stricter than openai's own (ollama: "invalid message content type: <nil>"), while an
-        # empty string is accepted by both.
+        # Content is always a string, never null: a round that said nothing is still a turn on the
+        # wire, and null is a 400 on servers stricter than openai's own (ollama: "invalid message
+        # content type: <nil>"), while an empty string is accepted by both.
         msg = {"role": "assistant", "content": content or ""}
+        # Reasoning text has a field here only if the host says which one. Without it a model's
+        # own thinking is gone the moment a tool result lands, and anything it worked out before
+        # the call (a number it picked, a decision it made) cannot be recalled after it.
+        if self.think_key and thinking: msg[self.think_key] = thinking
         if tool_calls: msg["tool_calls"] = tool_calls
         return msg
 

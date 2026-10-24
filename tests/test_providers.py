@@ -123,6 +123,19 @@ new = replay.to_messages(session({}), "ollama")
 check("a record with no stored shape replays the same", new[1]["tool_calls"] == old[1]["tool_calls"],
       new[1]["tool_calls"])
 
+# Thinking survives a replay only where the host has a field for it. Losing it costs the model
+# everything it worked out before a tool call, which no later round can recover.
+from handler.agent.providers.ollama import OllamaOpenAI
+
+kept = replay.to_messages(session({"thinking": "SECRET=4718"}), "ollama")[1]
+check("a replayed ollama turn carries its thinking back", kept.get("reasoning") == "SECRET=4718", kept)
+check("and under the one key this endpoint reads, not deepseek's spelling",
+      "reasoning_content" not in kept, kept)
+check("openai's own dialect has no such field and adds none",
+      OpenAI("m").assistant_message("x", "y", []).get("reasoning") is None)
+check("an empty thinking adds no field at all",
+      "reasoning" not in OllamaOpenAI("m").assistant_message("", "y", []))
+
 # show_url: what one model is, for a dialect whose own catalog says nothing about it.
 shown = OpenAI("m", "https://host/v1", "K", show_url=base + "/show")
 check("show_url answers what the model can do", shown.capabilities("m") == ["completion", "thinking",
