@@ -1,20 +1,8 @@
-"""Tool calls that outlive the round that started them.
-
-Two things ask for this and they are not the same request. The model can start a
-call in the background because it already knows the call is slow and has other
-work to do meanwhile -- a build, a test suite, a long fetch. The user can push a
-call that is *already running* into the background because it turned out slow
-and they are tired of watching it. The second is why this cannot just be a flag
-in an input schema: by the time anyone wants it, the call has started.
-
-Both doors open onto the same Job, holding the same interrupt.Call. A job does
-not know which way it came in.
-
-Nothing is pushed at the model. A finished job sits here until something asks,
-and what asks is either the model calling the background tool or the loop
-dropping a one-line notice between rounds. A result injected into the middle of
-a round would arrive while the model is partway through something else, and the
-notice-then-fetch shape lets it read the thing when it is ready for it.
+"""Tool calls that outlive the round that started them. Two doors onto one Job holding one
+interrupt.Call: the model backgrounds a slow call and carries on, or the user pushes one that is
+already running, which is why this cannot be an input-schema flag, since by then the call has
+started. Nothing is pushed at the model: a finished job waits for the background tool or the
+loop's one-line notice between rounds, a mid-round result landing mid-task.
 """
 import itertools, threading, time
 
@@ -26,7 +14,7 @@ ARG_PREVIEW = 120      # chars of an argument kept for display
 
 def _short(args: dict) -> dict:
     """Arguments trimmed to something a status line can hold. The full ones are
-    already in the transcript; this is a label, not a record."""
+    already in the transcript, so this is a label, not a record."""
     out = {}
     for k, v in (args or {}).items():
         if isinstance(v, str) and len(v) > ARG_PREVIEW: out[k] = v[:ARG_PREVIEW] + "..."
@@ -36,18 +24,15 @@ def _short(args: dict) -> dict:
 
 
 class Job:
-    """One backgrounded call.
-
-    State is read off the Call rather than copied, so there is exactly one place
-    a result exists and no second copy to keep in step with it.
+    """One backgrounded call. State is read off the Call rather than copied, so there is
+    exactly one place a result exists.
     """
 
     def __init__(self, jid: str, name: str, args: dict, call: Call, started: float):
         self.id, self.name, self.args, self.call = jid, name, args, call
         self.started, self.finished = started, None
-        # Whether the model has been handed this result. Only used to decide
-        # what the between-rounds notice mentions -- output can be read again as
-        # many times as it likes.
+        # Whether the model has been handed this result. Only decides what the
+        # between-rounds notice mentions; output can be read again.
         self.reported = False
 
     def _tick(self):
@@ -73,7 +58,7 @@ class Job:
 
     def full(self) -> dict:
         """brief plus the result, once there is one. A running job returns no
-        result key at all rather than a null -- absent and empty are different
+        result key at all rather than a null: absent and empty are different
         answers, and the model acts on the difference."""
         d = self.brief()
         if self.call.done: d["result"] = self.call.result
@@ -104,9 +89,9 @@ class Registry:
         return job
 
     def _trim(self):
-        """Caller holds the lock. Only finished jobs are ever dropped, and the
-        oldest first -- a running job has a live thread behind it and forgetting
-        it would lose the only handle on that thread."""
+        """Caller holds the lock. Only finished jobs are ever dropped, oldest
+        first: a running job has a live thread behind it and forgetting it
+        would lose the only handle on that thread."""
         done = [j for j in self._jobs.values() if j.call.done]
         for j in done[:max(0, len(done) - MAX_KEPT)]: self._jobs.pop(j.id, None)
 
@@ -121,10 +106,10 @@ class Registry:
         return [j for j in self.list() if j.state in ("running", "killing")]
 
     def kill(self, jid: str) -> bool:
-        """Ask, do not force. The token is cooperative, so a tool that watches
-        it stops and one that does not runs to completion and is ignored --
-        there is no way to kill a Python thread, and pretending otherwise would
-        be a lie in the tool's output."""
+        """Ask, do not force: the token is cooperative, so a tool that watches it stops and
+        one that does not runs to completion and is ignored. There is no way to kill a Python
+        thread, and pretending otherwise would be a lie in the tool's output.
+        """
         job = self.get(jid)
         if not job or job.call.done: return False
         job.call.token.cancel()
@@ -135,8 +120,8 @@ class Registry:
 
     def newly_finished(self) -> list[Job]:
         """Jobs that ended since the last time anyone asked. Marking them here
-        rather than on read is what keeps the between-rounds notice to one
-        mention per job."""
+        rather than on read keeps the between-rounds notice to one mention per
+        job."""
         with self._lock:
             out = [j for j in self._jobs.values() if j.call.done and not j.reported]
             for j in out: j.reported = True

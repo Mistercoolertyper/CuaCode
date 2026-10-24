@@ -1,29 +1,22 @@
 """One place that decides where the agent's windows go.
 
-app_open parks the app it launches, and the screenshot tool re-parks the
-terminal before every capture. Neither of them sees an app that arrived some
-other way -- `firefox &` from the shell tool, a browser an MCP server starts
-for itself because that is the only way that server can be driven. Those
-windows open wherever the app last felt like being, which is usually on top of
-the terminal the agent reads its own output from, and nothing ever moved them.
+app_open parks the app it launches and screenshot re-parks the terminal, but an app
+that arrived some other way (`firefox &` from the shell, a browser an MCP server
+starts for itself) opened wherever it last felt like being, usually on top of the
+terminal. So the rule lives here rather than inside one tool: an app that was not
+running when the agent started looking is an app the agent caused, and it belongs in
+the same right-hand slice as everything else it drives.
 
-So the rule lives here rather than inside the one tool that used to own it: an
-app that was not running when the agent started looking is an app the agent
-caused, and it belongs in the same right-hand slice as everything else it
-drives. Every tool that can cause a launch reports in afterwards; the cost when
-nothing launched is a single list of running apps.
-
-State is module level and therefore per worker process, which is the same
-lifetime as the conversation -- exactly the window over which "new" means
-"the agent opened it".
+State is module level, so it is per worker process, which is the lifetime over which
+"new" means "the agent opened it".
 """
 import importlib.util, platform, threading
 from pathlib import Path
 
 OS = platform.system()
 
-# The two slices. The terminal keeps the left third because it is read, not
-# driven; whatever is being driven gets the rest.
+# The terminal keeps the left third because it is read, not driven; whatever is
+# being driven gets the rest.
 SELF_REGION = (0.0, 0.3)
 APP_REGION = (0.3, 1.0)
 
@@ -37,11 +30,10 @@ _parked: dict = {}          # app -> handle, everything this module put in APP_R
 def backend():
     """The platform window module, loaded once for the whole process.
 
-    Loaded by path rather than imported, because tools/ is not a package the
-    tool folders import from each other -- and loading it once is not a detail:
-    the module holds the Accessibility handles and the record of where each
-    window was last verified to be parked. A second copy would mean a second
-    set of empty caches, so every re-park would pay full price.
+    Loaded by path rather than imported, because tools/ is not a package the tool
+    folders import from each other. Loading it once matters: the module holds the
+    Accessibility handles and the record of where each window was last verified to be
+    parked, and a second copy would mean a second set of empty caches.
     """
     global _BACKEND
     if _BACKEND is None:
@@ -57,9 +49,9 @@ def backend():
 def _apps() -> dict:
     """{app name: handle snap_region accepts}, or {} if the platform cannot say.
 
-    Nothing here is allowed to raise. Parking is cosmetic and every caller is in
-    the middle of doing something that is not: a window manager that cannot
-    answer must not fail a shell command or lose a screenshot.
+    Nothing here is allowed to raise: parking is cosmetic and every caller is in the
+    middle of doing something that is not, so a window manager that cannot answer must
+    not fail a shell command or lose a screenshot.
     """
     try:
         return backend().gui_apps() or {}
@@ -85,9 +77,9 @@ def _wait_for_window(handle) -> bool:
 def baseline() -> dict:
     """Record what is running now, so anything later is the agent's doing.
 
-    Called before a command that might launch something. Also called implicitly
-    by the first park_new, which is why a session that never takes a baseline
-    still does not sweep up the windows the user already had open.
+    Called before a command that might launch something, and implicitly by the first
+    park_new, so a session that never takes a baseline still does not sweep up the
+    windows the user already had open.
     """
     global _seeded
     apps = _apps()
@@ -101,9 +93,8 @@ def baseline() -> dict:
 def park_new(self_name: str | None = None, focus: bool = True) -> list:
     """Park every app that has appeared since the last look. Returns their names.
 
-    focus defaults to True because the caller is reporting a launch, and an app
-    the agent just opened is the app it is about to drive -- the same reason
-    app_open raises the window it opened.
+    focus defaults to True because the caller is reporting a launch, and an app the
+    agent just opened is the app it is about to drive.
     """
     global _seeded
     apps = _apps()
@@ -111,8 +102,8 @@ def park_new(self_name: str | None = None, focus: bool = True) -> list:
         return []
     with _LOCK:
         if not _seeded:
-            # First look of the session. Everything up right now predates the
-            # agent, so it is remembered, not moved.
+            # First look of the session: everything up right now predates the agent, so
+            # it is remembered, not moved.
             _seen.update(apps)
             _seeded = True
             return []
@@ -122,9 +113,9 @@ def park_new(self_name: str | None = None, focus: bool = True) -> list:
     parked = []
     for name in fresh:
         handle = apps[name]
-        # A name in the app list is a process, not yet a window: apps register
-        # with the window server well before they have drawn anything, and a
-        # snap that lands in that gap moves nothing and reports failure.
+        # A name in the app list is a process, not yet a window: apps register with the
+        # window server well before they have drawn anything, and a snap that lands in
+        # that gap moves nothing and reports failure.
         if not _wait_for_window(handle):
             continue
         if _snap(handle, APP_REGION, focus):
@@ -137,11 +128,10 @@ def park_new(self_name: str | None = None, focus: bool = True) -> list:
 def park_known(self_name: str | None = None) -> list:
     """Re-park what has already been parked once, without raising anything.
 
-    Apps drift: they restore a saved frame, open a second window, or resize
-    themselves after the page they loaded settles. Nothing re-checks on its own,
-    so this runs on the screenshot path where a drifted window is about to be
-    photographed sitting over the terminal. An app still parked costs one
-    geometry read -- snap_region short-circuits on the frame it last verified.
+    Apps drift: they restore a saved frame, open a second window, or resize after the
+    page they loaded settles, and nothing else re-checks. This runs on the screenshot
+    path, where a drifted window is about to be photographed sitting over the terminal.
+    An app still parked costs one geometry read.
     """
     with _LOCK:
         known = list(_parked.items())
@@ -169,9 +159,8 @@ def forget(name: str) -> None:
 def remember(handle, name: str | None = None) -> None:
     """Record a window somebody else parked, so it is re-checked with the rest.
 
-    app_open does its own snap -- it is the only caller that wants the window
-    raised -- and without this the app it opened would be the one app nothing
-    ever looked at again.
+    app_open does its own snap, since it is the only caller that wants the window
+    raised; without this the app it opened would be the one app nothing looked at again.
     """
     with _LOCK:
         _parked[name or (handle if isinstance(handle, str) else str(handle))] = handle

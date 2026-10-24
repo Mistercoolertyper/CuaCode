@@ -17,7 +17,7 @@ def run(args: dict, ctx) -> dict:
     plat = _platform_module()
     plat.move(x, y)
     out = {"moved_to": [x, y]}
-    # Same read-back the click tool does: a move that was silently dropped
-    # reports success otherwise. See tools/_pointer.py.
+    # Same read-back the click tool does: a move that was silently dropped reports
+    # success otherwise. See tools/_pointer.py.
     out.update(verify(plat, x, y))
     return out

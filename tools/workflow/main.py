@@ -1,8 +1,7 @@
 """The `workflow` tool: run one stored orchestration script.
 
-Same runtime-description trick as the agent tool -- what is installed is read
-off disk at load time, so the model is offered the workflows that exist rather
-than a list written when this file was.
+The installed list is read off disk at load time by describe() and schema(), as
+in the agent tool.
 """
 from handler.agent import workflow as wf, subagent
 
@@ -28,8 +27,7 @@ def schema() -> dict:
             "required": ["workflow"]}
 
 def run(args: dict, ctx) -> dict:
-    # A workflow spawns agents, so a subagent running one would be recursion
-    # with a for-loop attached.
+    # A workflow spawns agents, so a subagent running one is recursion.
     if subagent.depth() > 0:
         return {"error": "subagents cannot run workflows"}
     return wf.run(args["workflow"], args.get("args") or {}, ctx=ctx)

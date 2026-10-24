@@ -1,35 +1,20 @@
 """What a conversation is called.
 
-A session is found again by its name, so the name is the only part of the
-record that has to be readable in a list of forty. The first message is a bad
-name and the first message truncated is a worse one -- people open with "hi",
-and a picker full of "hi" is a picker with no information in it at all.
-
-So: nothing is named from a greeting, a stub is only ever a placeholder, and
-the real name is written by a tiny model call once the conversation has said
-enough to have a subject. Three attempts at most, at turn 1, 3 and 6, stopping
-as soon as one comes back confident -- a session that turns out to be about
-something else by turn 6 gets to be renamed, and one that was obvious at turn 1
-costs exactly one call.
-
-The call runs on its own thread and never touches disk or the wire. It hands
-its answer to a queue the loop drains between turns, because the alternative is
-a background thread writing meta.json while the main one is committing to it,
-or writing to stdout in the middle of a stream.
+A session is found again by its name, the only part of the record that has to be readable in a list of forty, and the first message is a bad name (people open with "hi"). So a stub stands in until a small model call, once the conversation has a subject, returns a real name: three attempts at most, at turns 1, 3 and 6, stopping at the first confident answer.
+That call runs on its own thread and never touches disk or the wire, handing its answer to a queue the loop drains between turns, because the alternative is a background thread writing meta.json while the main one is committing to it.
 """
 import queue, re, threading
 
 from handler.session import store
 from integrations.memory.recall import tokens
 
-# Turn counts at which naming is attempted. Not "every turn": the answer rarely
-# changes and each attempt is a request.
+# Turn counts at which naming is attempted. Not every turn: the answer rarely changes
+# and each attempt is a request.
 THRESHOLDS = (1, 3, 6)
 MAX_TITLE = 48
 
-# Who set the current title, strongest first. Auto-naming may only overwrite
-# what auto-naming (or the stub) put there -- a name the user or the agent
-# chose deliberately is not a guess to be improved on.
+# Who set the title, strongest first: auto-naming may only overwrite what auto-naming
+# or the stub put there, never a name the user or the agent chose deliberately.
 PRECEDENCE = ("user", "agent", "auto", "stub", "")
 
 SYSTEM = """You name conversations. You are given the opening of one; return a short label for it.
@@ -61,10 +46,8 @@ _done: "queue.Queue[dict]" = queue.Queue()
 _running: set = set()
 _lock = threading.Lock()
 
-# The conversation the loop is currently on. Tools run in the same process, so
-# the memory tool can retitle the live object rather than writing meta.json
-# behind its back -- which would be silently undone by the next commit, since
-# the Session holds its meta in memory and writes the whole dict.
+# The conversation the loop is on: tools share the process, so the memory tool retitles
+# the live object rather than a meta.json the next commit would silently undo.
 _live = None
 
 def set_live(session):
@@ -75,19 +58,14 @@ def live():
     return _live
 
 def low_signal(text: str) -> bool:
-    """Whether a message says anything worth naming a conversation after.
-
-    Content words after the stoplist, which already holds the greetings. Two is
-    the bar: "hi" and "hey are you there" have none, "fix the installer" has
-    two.
-    """
+    """Whether a message says anything worth naming a conversation after: content
+    words after the stoplist, which already holds the greetings, two being the bar."""
     return len(set(tokens(text))) < 2
 
 def provisional(text: str) -> str:
     """The placeholder shown until a real name arrives, or "" for a greeting.
 
-    Empty on purpose rather than clever: a frontend showing the session id is
-    telling the truth, and "hi" is not.
+    Empty on purpose: a frontend showing the session id is telling the truth.
     """
     if low_signal(text): return ""
     line = re.sub(r"\s+", " ", (text or "").strip().splitlines()[0] if text.strip() else "")
@@ -110,10 +88,8 @@ def may_overwrite(meta: dict, source: str = "auto") -> bool:
 def _opening(records: list, limit: int = 8) -> str:
     """Enough of the conversation to name it, and no more.
 
-    Tool *names* rather than tool results: "screenshot, click, type_text" says
-    what kind of work this was in ten tokens, where the results would be a
-    megabyte of base64 and say less.
-    """
+    Tool names rather than tool results: "screenshot, click, type_text" says what the work was in ten
+    tokens, where the results would be a megabyte of base64."""
     parts, tools = [], []
     for r in records[:limit]:
         t = r.get("t")
@@ -137,8 +113,8 @@ def _work(sid: str, opening: str, current: str, provider: str, model: str):
             out["title"] = clean(str(got.get("title") or ""))
             out["confident"] = bool(got.get("confident")) and bool(out["title"])
     except Exception:
-        # A name is a nicety. Nothing about a failed one is worth surfacing to
-        # the user, and nothing about it should reach the turn that follows.
+        # A name is a nicety: a failure is not worth surfacing to the user and should
+        # not reach the turn that follows.
         pass
     finally:
         with _lock: _running.discard(sid)
@@ -170,9 +146,8 @@ def drain() -> list[dict]:
 def rename(sid: str, title: str, source: str = "agent", session=None) -> dict | None:
     """Retitle one session, live object or file, whichever this id is.
 
-    Returns None when a stronger hand already named it -- an auto-namer landing
-    late must not undo a title the user typed, and neither must the agent.
-    """
+    Returns None when a stronger hand already named it: a late auto-namer must not undo a title the user
+    typed, and neither must the agent."""
     title = clean(title)
     if not sid or not title: return None
     session = session if session is not None else live()

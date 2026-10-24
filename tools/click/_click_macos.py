@@ -9,9 +9,9 @@ _BUTTONS = {
 def cursor() -> tuple[int, int]:
     """Where the pointer actually is, in the same logical points click() takes.
 
-    A posted event carries the cursor with it, so this is what tells us whether
-    the click landed. It is read some milliseconds after the post rather than
-    immediately -- see tools/_pointer.py, which owns the waiting.
+    A posted event carries the cursor with it, so this is what tells us whether the
+    click landed. Read some milliseconds after the post, not immediately; see
+    tools/_pointer.py, which owns the waiting.
     """
     loc = _Q.CGEventGetLocation(_Q.CGEventCreate(None))
     return round(loc.x), round(loc.y)

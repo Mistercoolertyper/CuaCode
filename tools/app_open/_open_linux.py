@@ -18,8 +18,8 @@ def open_app(app: str) -> str | None:
     return None
 
 def snap_region(win_id: str | None, x_start_frac: float, x_end_frac: float, focus: bool = False) -> bool:
-    """See _open_macos.snap_region -- focus defaults to False so repositioning
-    a window does not decide what has keyboard focus."""
+    """See _open_macos.snap_region. focus defaults to False so repositioning a
+    window does not decide what has keyboard focus."""
     if not win_id: return False
     r = subprocess.run(["xdotool", "getdisplaygeometry"], capture_output=True, text=True)
     sw, sh = map(int, r.stdout.strip().split())
@@ -32,10 +32,9 @@ def snap_region(win_id: str | None, x_start_frac: float, x_end_frac: float, focu
 def gui_apps() -> dict[str, str]:
     """{window name: window id} for every visible window.
 
-    X has no notion of "the application" that survives being asked from the
-    outside, so the window title is the identity here. It is coarse -- a title
-    that changes reads as a new window -- but the only thing built on it is
-    "was this here a moment ago", and a retitled window is already parked.
+    X has no notion of "the application" that can be asked from the outside, so the
+    window title is the identity. That is coarse, but the only thing built on it is
+    "was this here a moment ago".
     """
     r = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "."],
                        capture_output=True, text=True)

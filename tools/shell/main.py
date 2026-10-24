@@ -4,27 +4,25 @@ from pathlib import Path
 from tools import _window
 from tools._safety import shell as safety
 
-OUT_CAP = 20_000        # chars per stream, keeps a runaway command out of the model's context
+OUT_CAP = 20_000        # chars per stream
 DEFAULT_TIMEOUT = 30
-# The loop watches this call from another thread now, so a long timeout no
-# longer means a long stretch where nothing can be stopped -- the ceiling is
-# only about how long a command is allowed to be *wrong* for before it is cut
-# off, not about how long the app is deaf.
+# The loop watches this call from another thread, so this is only how long a
+# command may be wrong before it is cut off, not how long the app is deaf.
 MAX_TIMEOUT = 600
 MARK = "<<cuacode-cwd>>"
 
 WINDOWS = platform.system() == "Windows"
 
 # Survives between calls: `cd` in one command still holds for the next, which
-# is what the model assumes a shell does. Resolved on first use rather than at
-# import, because the frontend only reports its terminal after the worker is up.
+# is what the model assumes a shell does. Resolved on first use, because the
+# frontend only reports its terminal after the worker is up.
 _cwd = None
 
 def _start_dir(ctx) -> str:
     """The directory the user launched from, when there is one.
 
     Not the worker's own cwd: that is wherever the frontend process happened to
-    be, and for a GUI launch it is / or an app bundle. A frontend that has no
+    be, which for a GUI launch is / or an app bundle. A frontend with no
     meaningful directory sends none, and home is the honest answer there.
     """
     d = (ctx or {}).get("cwd") if hasattr(ctx, "get") else None
@@ -36,11 +34,8 @@ def _argv(command: str) -> list[str]:
 
     The status is saved before the trailer runs and restored after it, or the
     printf would be the last command in the shell and every failure would come
-    back as a success.
-
-    A login shell, not a plain one: launched from an app bundle the worker
-    inherits a bare PATH, and every tool the user installed would be missing
-    from a shell that skips their profile.
+    back as a success. A login shell, because launched from an app bundle the
+    worker inherits a bare PATH.
     """
     if WINDOWS:
         return ["powershell", "-NoProfile", "-Command",
@@ -50,23 +45,22 @@ def _argv(command: str) -> list[str]:
             f"{command}\n__rc=$?; printf '\\n%s%s' '{MARK}' \"$PWD\"; exit $__rc"]
 
 def _split_cwd(out: str) -> tuple[str, str | None]:
-    """Take the trailer back off. It is absent whenever the command ended the
-    shell itself -- `exit 1`, a kill on timeout -- and then the directory is
-    simply left where it was."""
+    """Take the trailer back off: absent whenever the command ended the shell
+    itself, and then the directory is left where it was."""
     i = out.rfind(MARK)
     if i < 0: return out, None
     return out[:i].rstrip("\n"), out[i + len(MARK):].strip()
 
 def _cap(s: str) -> tuple[str, bool]:
     """Head and tail both: a failing build puts the reason at the end and the
-    context at the start, and keeping only one of them loses the failure."""
+    context at the start, and keeping only one loses the failure."""
     if len(s) <= OUT_CAP: return s, False
     head, tail = s[:OUT_CAP * 2 // 3], s[-OUT_CAP // 3:]
     return f"{head}\n... [{len(s) - len(head) - len(tail)} chars omitted] ...\n{tail}", True
 
 def _kill(proc):
     """The whole process group. Killing just the shell orphans whatever it
-    spawned, which then holds our pipe open and hangs the read that follows."""
+    spawned, which holds our pipe open and hangs the read."""
     try:
         if WINDOWS: proc.kill()
         else: os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -76,15 +70,14 @@ def _kill(proc):
 def _collect(proc, timeout: float, cancel) -> tuple[str, str, str]:
     """Read the command to the end, while staying interruptible.
 
-    It has to be communicate(), and communicate() blocks -- but the pipes are
-    the reason a plain poll loop is not an option. A command that fills the pipe
-    buffer blocks in its own write() until somebody drains it, so waiting on the
-    process without reading it is not a slow wait, it is a deadlock. The read
-    goes on a thread and the watching happens here.
+    It has to be communicate(), and communicate() blocks, but the pipes are why
+    a plain poll loop is not an option: a command that fills the pipe buffer
+    blocks in its own write() until somebody drains it, so waiting on the
+    process without reading it is a deadlock. The read goes on a thread and the
+    watching happens here.
 
     cancel is the token the agent loop puts in ctx. Honouring it is what makes
-    stopping the *run* also stop the command: without it the shell keeps going
-    after the turn that asked for it is gone, holding whatever it was holding.
+    stopping the run also stop the command.
 
     Returns (stdout, stderr, why) where why is ok | timeout | cancelled.
     """
@@ -107,7 +100,7 @@ def _collect(proc, timeout: float, cancel) -> tuple[str, str, str]:
     if why != "ok":
         _kill(proc)
         # Killing the group closes the pipes, so the drain returns on its own;
-        # the bound is only there so a wedged read can never hold this thread.
+        # the bound only stops a wedged read from holding this thread.
         t.join(5.0)
     out, err = box.get("io") or ("", "")
     return out, err, why
@@ -138,11 +131,10 @@ def run(args: dict, ctx) -> dict:
 
     timeout = max(1.0, min(float(args.get("timeout") or DEFAULT_TIMEOUT), MAX_TIMEOUT))
     started = time.monotonic()
-    # What was on screen before the command ran. A shell command is a perfectly
-    # ordinary way to start a GUI app -- and for a browser an MCP server drives,
-    # the only way -- so anything that appears between here and the result is
-    # parked like an app_open would have parked it, instead of opening on top of
-    # the terminal the agent reads its own output from.
+    # What was on screen before the command ran. A shell command is an ordinary
+    # way to start a GUI app -- for an MCP-driven browser, the only way -- so
+    # anything that appears during the call is parked like an app_open would
+    # have parked it, instead of opening on top of the terminal.
     _window.baseline()
     # stdin closed: a command that would prompt fails immediately instead of
     # waiting on input nobody is there to give it.
@@ -157,10 +149,8 @@ def run(args: dict, ctx) -> dict:
     out, cut_out = _cap(out)
     err, cut_err = _cap(err)
 
-    # Only the apps that were not running before this call, so a command that
-    # touched no window costs one list of running apps and moves nothing. An app
-    # whose window arrives later than its process -- most of them -- is caught
-    # on the screenshot path instead, which asks the same question again.
+    # Only the apps that were not running before this call; one whose window
+    # arrives later than its process is caught on the screenshot path instead.
     opened = _window.park_new(getattr(ctx, "self_identity", None))
 
     result = {"cwd": _cwd, "exit_code": proc.returncode, "stdout": out, "stderr": err,

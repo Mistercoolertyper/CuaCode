@@ -1,28 +1,13 @@
 """Did the pointer event actually happen.
 
-CGEventPost does not fail when the process is missing Accessibility permission
--- the event is dropped and the call returns as though it had worked. The only
-way to tell from inside is to read the pointer back, because a posted event
-carries the cursor with it.
-
-Reading it back is not immediate. The post is asynchronous: WindowServer moves
-the cursor a few milliseconds later, so a read taken straight after the post
-usually sees the *old* position. Measured over 300 moves on an idle machine the
-gap runs 1.3ms at the median and 11ms at the worst -- small enough that a single
-read looks reliable while it is being written, large enough to report a phantom
-dropped click in front of a user.
-
-So the read polls until the pointer arrives, and a mismatch that survives the
-deadline asks the Accessibility API directly rather than assuming permission is
-what went wrong. A pointer that ends up elsewhere with permission in hand is an
-ordinary thing -- the user moved the mouse, the app warped it, the coordinate
-was off-screen and got clamped -- and saying "no permission" to that sends the
-agent, and the user, off fixing something that was never broken.
+CGEventPost does not fail when the process is missing Accessibility permission: the event is dropped and the call returns as though it had worked. The only way to tell from inside is to read the pointer back, because a posted event carries the cursor with it.
+The read cannot be immediate: the post is asynchronous and WindowServer moves the cursor a few milliseconds later, so it polls until the pointer arrives rather than reading once, which would report a phantom dropped click in front of a user.
+A mismatch that survives the deadline asks the Accessibility API rather than assuming permission is the problem, since a pointer elsewhere with permission in hand is ordinary.
 """
 
 import time
 
-_DEADLINE = 0.25      # seconds to wait for the pointer to arrive; ~24x the observed worst case
+_DEADLINE = 0.25      # seconds to wait for the pointer to arrive; ~24x the worst case seen
 _GAP = 0.001          # between reads; a read costs ~30us, so this is nearly all sleep
 _TOLERANCE = 1        # px, for the rounding between logical points and the read-back
 
@@ -43,10 +28,8 @@ _UNKNOWN = ("the pointer is not where the event was aimed. It may have been off-
 def _trusted():
     """Whether this process is allowed to post events, or None where unanswerable.
 
-    None on every platform but macOS, and on a macOS without pyobjc: "cannot
-    ask" has to stay distinct from "asked, and the answer is no", because only
-    the second one is worth telling the user to go fix a setting over.
-    """
+    None on every platform but macOS, and on a macOS without pyobjc: "cannot ask" has to stay distinct from "asked, and the
+    answer is no", since only the second is worth telling the user to fix a setting over."""
     try:
         from ApplicationServices import AXIsProcessTrusted
     except Exception:
@@ -60,10 +43,8 @@ def _trusted():
 def verify(plat, x: int, y: int) -> dict:
     """Result fields describing where the pointer actually ended up.
 
-    Empty when it arrived where it was sent, and empty on a platform whose
-    module defines no cursor() to ask -- an absent read-back reports nothing
-    rather than guessing.
-    """
+    Empty when it arrived where it was sent, and on a platform whose module defines no cursor() to ask:
+    an absent read-back reports nothing rather than guessing."""
     read = getattr(plat, "cursor", None)
     if read is None:
         return {}

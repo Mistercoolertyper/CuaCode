@@ -1,16 +1,10 @@
 """The list itself, kept apart from the tool that edits it.
 
-Two callers need it and only one of them is the tool. The agent loop reads a
-summary to decide whether the list has gone stale, and importing a tool's
-handler to ask that would drag the whole tool in; a module with no dependencies
-but the standard library can be imported from either side.
+Two callers need it and only one is the tool: the agent loop reads a summary to
+decide whether the list has gone stale.
 
-One list per conversation, in the session's own directory. A global list -- what
-this replaced -- was shared by every chat ever held, so yesterday's half-finished
-plan was still sitting there this morning claiming to be what the agent was doing.
-Scoping it to the session is what makes "look back at the list" mean "look back at
-*this* task": it appears with the conversation, survives a reload, and goes when
-the conversation does.
+One list per conversation, in the session's own directory, so a list appears
+with the conversation, survives a reload, and goes when the conversation does.
 """
 import json, os
 from datetime import datetime, timezone
@@ -21,8 +15,7 @@ STATES = (PENDING, ACTIVE, DONE, DROPPED)
 OPEN = (PENDING, ACTIVE)
 
 # A plan longer than this is not a plan, it is the whole task written out. The
-# cap is deliberately generous -- it exists to catch a model looping on `add`,
-# not to argue with a genuinely long job.
+# cap catches a model looping on `add`, it is not there to argue with a long job.
 MAX_ITEMS = 60
 MAX_TEXT = 200
 MAX_NOTE = 500
@@ -31,7 +24,7 @@ FILE = "todo.json"
 
 # Lists with nowhere to live: a subagent's, or a run with no session directory at
 # all. Held in the process and never written, because both are gone by the time
-# anyone could read the file -- and a subagent writing into its parent's session
+# anyone could read the file, and a subagent writing into its parent's session
 # directory would overwrite the plan the parent is working through.
 _memory: dict[str, dict] = {}
 
@@ -78,7 +71,7 @@ def load(ctx) -> dict:
     except (OSError, ValueError):
         # A missing file is the normal case -- most conversations never plan
         # anything -- and an unreadable one is not worth failing a tool call
-        # over when the recovery is an empty list the agent can just refill.
+        # over: the recovery is an empty list the agent can refill.
         return _empty()
     if not isinstance(data, dict) or not isinstance(data.get("items"), list): return _empty()
     return data
@@ -134,11 +127,9 @@ def _brief(item: dict) -> dict:
 def view(data: dict, **extra) -> dict:
     """The whole list, every time.
 
-    Returning it on writes as well as reads is the point: the agent's most recent
-    tool result then always holds the current state of the plan, so remembering
-    what it was doing costs nothing and needs no extra call. A write that echoed
-    only the row it touched would make the list something you have to go and ask
-    about, which is the habit this tool exists to remove.
+    Returning it on writes as well as reads is the point: the agent's most
+    recent tool result then always holds the current state of the plan, so
+    remembering what it was doing needs no extra call.
     """
     items = data["items"]
     done = sum(1 for i in items if i["state"] == DONE)
@@ -153,9 +144,7 @@ def view(data: dict, **extra) -> dict:
 def snapshot(ctx) -> dict | None:
     """What the loop needs to decide whether to nudge, or None for no list.
 
-    Deliberately cheap and deliberately silent: it runs every round, and a
-    conversation that never planned anything must pay a stat call for it and
-    nothing more.
+    Runs every round, so it stays cheap and silent.
     """
     try:
         data = load(ctx)

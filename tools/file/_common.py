@@ -15,14 +15,13 @@ IGNORE_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv",
                "venv", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",
                "dist", "build", ".next", "target", ".idea", ".gradle"}
 
-# Paths read (or written) this session, gates edit. A plain set of strings because
+# Paths read this session, gates edit. A plain set of strings because
 # handler/session persists it between runs and re-seeds it by name.
 read_files: set[str] = set()
 
-# What those files looked like when they were read: enough to notice one moved
-# underneath us, plus how to write it back in the shape it was found. Absent for a
-# path restored from a saved session -- that one was checked against disk at restore
-# time instead, which is the same answer arrived at earlier.
+# What those files looked like when read: enough to notice one moved underneath us,
+# plus how to write it back in the shape it was found. Absent for a path restored
+# from a saved session, which was checked against disk at restore time instead.
 seen: dict[str, dict] = {}
 
 def _base(ctx) -> str:
@@ -34,7 +33,7 @@ def resolve(args: dict, ctx=None) -> Path:
 
     Joined to the directory the session was launched from, not the worker's own
     cwd: launched from an app bundle that is / or the bundle itself, and a model
-    writing "notes.md" would land somewhere nobody would think to look for it.
+    writing "notes.md" would land somewhere nobody would look for it.
     """
     raw = args.get("path")
     if not raw: raise ValueError("path required")
@@ -46,8 +45,8 @@ def load(path: Path) -> dict:
     """The file as text, plus what it takes to put it back unchanged.
 
     Newline style, encoding and the trailing newline are recorded rather than
-    normalised away, because a tool that rewrites CRLF as LF turns a three-line
-    edit into a diff against every line in the file.
+    normalised away: rewriting CRLF as LF turns a three-line edit into a diff
+    against every line in the file.
     """
     raw = path.read_bytes()
     st = path.stat()
@@ -60,8 +59,8 @@ def load(path: Path) -> dict:
     try:
         text = raw.decode(enc)
     except (UnicodeDecodeError, UnicodeError):
-        # Readable, but not writable: re-encoding the replacement characters would
-        # silently destroy the bytes they stand in for, so edit and write refuse.
+        # Readable but not writable: re-encoding the replacement characters would
+        # destroy the bytes they stand in for, so edit and write refuse.
         text, meta["lossy"] = raw.decode("utf-8", errors="replace"), True
     # The raw bytes ride along: a snapshot has to restore what was there,
     # not a re-encoding of what it decoded to.
@@ -70,7 +69,7 @@ def load(path: Path) -> dict:
 def save(path: Path, text: str, meta: dict | None = None) -> dict:
     """Written whole, atomically, in the shape the file already had.
 
-    A crash partway through write_text leaves a truncated source file behind. A
+    A crash partway through write_text leaves a truncated source file behind; a
     rename cannot be seen half done, so the worst case here is the old file.
     Returns the fingerprint of what is now on disk.
     """
@@ -82,8 +81,8 @@ def save(path: Path, text: str, meta: dict | None = None) -> dict:
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f: f.write(data)
-        # mkstemp is 0600 by design, and inheriting that would quietly strip the
-        # execute bit off a script the agent only meant to edit a line of.
+        # mkstemp is 0600 by design, and inheriting that would strip the execute
+        # bit off a script the agent only meant to edit a line of.
         os.chmod(tmp, (meta.get("mode") or 0o644) & 0o7777)
         os.replace(tmp, path)
     except BaseException:
@@ -100,10 +99,10 @@ def record(path: Path, meta: dict) -> None:
 def stale(path: Path) -> str | None:
     """Whether the file moved since the agent last saw it.
 
-    The gate on its own only proves a path was read at some point, which is the
-    wrong question after a build script, a formatter or the user has rewritten the
-    file in between -- an edit against remembered content silently drops their work.
-    A missing fingerprint is not staleness; see `seen`.
+    The gate alone only proves a path was read at some point, which is the wrong
+    question after a build script, a formatter or the user has rewritten the file
+    in between; an edit against remembered content silently drops their work. A
+    missing fingerprint is not staleness; see `seen`.
     """
     prev = seen.get(str(path))
     if not prev: return None

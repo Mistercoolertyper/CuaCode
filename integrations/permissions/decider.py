@@ -1,19 +1,15 @@
 """The call-level permission screen for auto mode.
 
-When permission mode is auto, a tool call that would normally prompt the user
-is handed to a small model first, which returns a strict allow:true/false
-verdict plus one line of reason. A yes runs. A no is not a verdict -- the call
-goes to the user through the ordinary prompt, reason attached, and they
-decide; only where nobody can be asked does the refusal stand. The screen is
-a gate, not a peer: no tools of its own, low effort, one structured answer --
-the same shape as the auto-namer, so it inherits that proven path rather than
-inventing a second agent loop.
+When permission mode is auto, a tool call that would normally prompt the user is
+handed to a small model first, which returns a strict allow:true/false verdict
+plus one line of reason. A yes runs. A no is not a verdict: the call goes to the
+user through the ordinary prompt with the reason attached, and only where nobody
+can be asked does the refusal stand. The screen is a gate rather than a peer: no
+tools of its own, low effort, one structured answer.
 
-Fails closed in every direction. No verdict, an unparseable one, an
-exception, a provider that cannot be reached -- all of them refuse, which
-means the person sees the call and decides. Where nobody can be asked, the
-refusal stands, because the cost of a needless prompt is one less tool call
-and the cost of a missed one is whatever the call did.
+Fails closed in every direction. No verdict, an unparseable one, an exception, a
+provider that cannot be reached, all of them refuse. The cost of a needless
+prompt is one less tool call; the cost of a missed one is whatever the call did.
 """
 import json
 from handler.agent.subagent import AgentSpec, run as run_agent
@@ -61,9 +57,9 @@ def _rules():
 def decide(ctx, tool, name, args, preview, tail):
     """(allow, reason) for one call. Refuses on anything that goes wrong.
 
-    Called by generate() with everything the gate needs already in scope -- the
-    tool's own description, the exact arguments, what the call says it would
-    do, and the conversation tail the decision should be anchored to.
+    Called by generate() with everything the gate needs already in scope: the
+    tool's description, the exact arguments, what the call says it would do, and
+    the conversation tail.
     """
     try:
         provider, model = config.permission_decider()

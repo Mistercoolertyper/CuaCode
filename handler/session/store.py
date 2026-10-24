@@ -18,7 +18,6 @@ def sessions_root() -> Path:
 
 # Read fresh on every load, never persisted into a session: editing the
 # prompt has to reach old conversations too.
-# v0 used to exist but i lowkey nuked it, you can rename v1 -> v0 and v2 -> v1 but I haven't been able to quit having v1 yet LOL
 def system_prompt() -> str: return (_REPO / f"system_prompt.txt").read_text()
 
 def tools_dir() -> Path: return _REPO / "tools"
@@ -75,9 +74,24 @@ def append_jsonl(p: Path, records: list[dict]):
         f.flush()
         os.fsync(f.fileno())
 
+def write_jsonl(p: Path, records: list[dict]):
+    """Replace a jsonl file outright. Only the compaction fold does this: everything
+    else appends, because a record is a thing that happened. A fold is the one
+    deliberate rewrite, and it goes through here so the truncation is in one place.
+    """
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    with open(tmp, "w") as f:
+        for r in records: f.write(json.dumps(r) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    # Renamed rather than truncated in place: a kill mid-write leaves the old
+    # conversation intact instead of a half-written one.
+    os.replace(tmp, p)
+
 def list_sessions() -> list[dict]:
-    """Meta only, newest first. Never reads messages.jsonl -- a listing must
-    not pay for megabytes of screenshot history."""
+    """Meta only, newest first. Never reads messages.jsonl: a listing must not
+    pay for megabytes of screenshot history."""
     out = []
     for d in sorted(sessions_root().iterdir(), reverse=True):
         if not d.is_dir(): continue
@@ -86,9 +100,7 @@ def list_sessions() -> list[dict]:
     return out
 
 # ---- projects ----
-# A project is a directory the user said matters, not any directory a session
-# ever happened to start in. The list is the tree's whitelist; every session
-# stays findable through the palette regardless.
+# A project is a directory the user said matters, not any directory a session happened to start in; every session stays findable through the palette.
 
 def projects_path() -> Path: return home() / "projects.json"
 
@@ -109,14 +121,10 @@ def list_project_details() -> tuple[dict, dict]:
     return names, icons
 
 def rename_project(d: str, name: str, icon: str) -> tuple[dict, dict]:
-    """Set a project's display name and/or icon. An icon is one of: one emoji
-    (up to 8 chars), a gradient circle "grad:<n>", or an uploaded image
-    "img:data:image/...;base64,..." as the page downscaled it (capped at
-    96KB). Anything else is dropped rather than stored. Empty string clears
-    the field, falling back to the plain folder. Any real directory may
-    carry details - the launch repo's group is not promoted, and Boaz wants
-    it editable like the rest; the fields only ever render on a group that
-    exists in the tree."""
+    """Set a project's display name and/or icon.
+
+    An icon is one emoji (up to 8 chars), a gradient circle "grad:<n>", or an uploaded image "img:data:image/...;base64,..."
+    capped at 96KB; anything else is dropped, and an empty string clears the field."""
     p = _norm_dir(d)
     if not Path(p).is_dir(): raise ValueError(f"no such directory: {p}")
     data = read_json(projects_path())
@@ -147,10 +155,8 @@ def pin_project(name: str, on: bool) -> list[str]:
     return cur
 
 def move_project(name: str, dir_: str, delta: int) -> None:
-    """Move a group one slot up/down: within the pin order for a pinned
-    group, within the promotion order otherwise. The tree renders exactly
-    these two orders, so this is all the reordering there is. No-op at the
-    edges and for a group that is in neither list."""
+    """Move a group one slot up/down: within the pin order for a pinned group, within
+    the promotion order otherwise. No-op at the edges and in neither list."""
     if not name or not isinstance(name, str): raise ValueError("project name required")
     delta = 1 if (delta or 0) > 0 else -1
     data = read_json(projects_path())
@@ -190,9 +196,8 @@ def add_project(d: str) -> str:
     return p
 
 def remove_project(d: str) -> str:
-    """Demote by directory (or by basename, since the tree only knows names).
-    Returns the removed path, empty when nothing went. The custom name and
-    icon go with it - details of a demoted project are not kept."""
+    """Demote by directory, or by basename since the tree only knows names. Returns the
+    removed path, empty when nothing went; the custom name and icon go with it."""
     cur = list_projects()
     want = _norm_dir(d).lower()
     gone = next((p for p in cur if p.lower() == want or Path(p).name.lower() == Path(want).name), "")
@@ -207,16 +212,8 @@ def remove_project(d: str) -> str:
 def transcript(sid: str, turns: int = 12, cap: int = 6000) -> dict:
     """What was said in a past conversation, in text.
 
-    The counterpart to list_sessions() refusing to open messages.jsonl: a
-    listing must stay cheap, but once something has decided *this* session is
-    the one, there has to be a way to actually read it. Reading one on purpose
-    is the only time that cost is worth paying.
-
-    Text only, and only the tail. Screenshots, thinking, and tool results are
-    the bulk of a transcript and almost none of its meaning -- what a later
-    conversation needs is what was asked and what was concluded, so a tool call
-    is kept as its name and nothing else.
-    """
+    The counterpart to list_sessions() refusing to open messages.jsonl: reading one on purpose is the only time that cost is
+    worth paying. Text only, and only the tail, with a tool call kept as its name."""
     meta = read_json(path(sid) / "meta.json")
     if not meta: raise ValueError(f"no session {sid!r}")
     lines, tools = [], []
@@ -226,24 +223,22 @@ def transcript(sid: str, turns: int = 12, cap: int = 6000) -> dict:
             if tools: lines.append(f"[tools: {', '.join(tools)}]"); tools = []
             if (x := (r.get("text") or "").strip()): lines.append(f"user: {x}")
         elif t == "assistant":
-            # Names, not results. A tool result is the largest thing in the file
-            # and the least re-readable: what matters later is that the shell was
-            # run, not the eighty lines it printed.
+            # Names, not results: what matters later is that the shell was run,
+            # not the eighty lines it printed.
             tools += [c.get("name", "?") for c in (r.get("calls") or [])]
             if (x := (r.get("content") or "").strip()):
                 if tools: lines.append(f"[tools: {', '.join(tools)}]"); tools = []
                 lines.append(f"assistant: {x}")
     if tools: lines.append(f"[tools: {', '.join(tools)}]")
-    # The opening survives the trim, always. The tail says how it ended and the
-    # first line says what it was ever about -- keeping only the tail of a long
-    # session hands back a conclusion with nothing to attach it to.
+    # The opening survives the trim: the tail says how it ended, the first line
+    # says what it was ever about.
     keep = lines[-max(turns, 1) * 2:]
     opening = next((l for l in lines if l.startswith("user: ")), "")
     if opening and opening not in keep: keep = [opening, "..."] + keep
     text = "\n\n".join(keep)
     clipped = len(text) > cap or len(keep) < len(lines)
-    # Trimmed from the front, because the tail is the conclusion and the
-    # conclusion is the reason anyone reopened this.
+    # Trimmed from the front: the tail is the conclusion, the reason anyone
+    # reopened this.
     if len(text) > cap: text = "..." + text[-cap:]
     return {"id": meta.get("id", sid), "title": meta.get("title", ""), "cwd": meta.get("cwd", ""),
             "updated": meta.get("updated", ""), "turns": meta.get("turns", 0),
@@ -257,8 +252,8 @@ def delete(sid: str) -> bool:
 
 
 def archive(sid: str) -> bool:
-    """Move a session out of the store into the archive: gone from every
-    listing, back by moving the folder in. The trash can, not the dump."""
+    """Move a session into the archive: gone from every listing, back by moving
+    the folder in. The trash can, not the dump."""
     d = path(sid)
     if not d.is_dir(): return False
     out = home() / "archive" / "sessions"
@@ -270,10 +265,9 @@ def archive(sid: str) -> bool:
     return True
 
 def pin_session(sid: str, on: bool) -> str:
-    """Pin a conversation for the tree: a ts on the meta, order being oldest
-    pin first. Returns the ts, empty when unpinned. Not for the worker's own
-    open session - its commit() rewrites meta.json from memory, so a pin set
-    behind its back would be lost; callers pin that one through the Session."""
+    """Pin a conversation for the tree: a ts on the meta, oldest pin first. Returns the
+    ts, empty when unpinned. Not for the worker's own open session, whose commit()
+    rewrites meta.json from memory; callers pin that one through the Session."""
     d = path(sid)
     meta = read_json(d / "meta.json")
     if not meta: raise ValueError(f"no session {sid!r}")
@@ -281,3 +275,16 @@ def pin_session(sid: str, on: bool) -> str:
     else: meta.pop("pinned", None)
     write_json(d / "meta.json", meta)
     return meta.get("pinned", "")
+
+
+def rename_session(sid: str, title: str, source: str = "user") -> str:
+    """Name a conversation the worker is not in. Returns the name as stored. The
+    twin of pin_session, and for the same reason: the worker's own open session
+    rewrites meta.json from memory on the next commit, so it is named through the
+    Session instead and never here."""
+    d = path(sid)
+    meta = read_json(d / "meta.json")
+    if not meta: raise ValueError(f"no session {sid!r}")
+    meta["title"], meta["title_source"] = title.strip()[:80], source
+    write_json(d / "meta.json", meta)
+    return meta["title"]

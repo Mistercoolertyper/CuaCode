@@ -1,43 +1,17 @@
-"""Stopping something that is already running.
-
-The loop could always be stopped between steps -- between streamed chunks, and
-between tool calls -- because those are the moments it is holding nothing. That
-covers a run that is thinking, and misses the one case where somebody actually
-reaches for the key: a call that has been running for ninety seconds and is not
-going to end on its own.
-
-The gap is that dispatch() is an ordinary blocking call. Nothing in the loop can
-observe a cancel while it is inside one, because the loop *is* inside it. So the
-handler runs on its own thread and the loop watches the flags instead of the
-handler. The handler is unchanged; the thread it runs on is the whole of what
-makes it interruptible.
-
-Two ways out, and the difference is bookkeeping, not mechanism:
-
-  cancelled  the user is done with this turn. The round rewinds past the call,
-             so it needs no result -- an assistant message whose tool_calls have
-             no matching results is what rewinding exists to avoid, and rewinding
-             is what makes a missing result fine.
-  detached   the user wants the turn to carry on without waiting. The thread
-             keeps its box, and whatever it eventually writes there is collected
-             by the background registry.
-
-A tool that wants to stop early is told through the token in ctx. One that
-ignores it is abandoned, which is why these threads are daemons: a handler
-sitting in a socket read must never be the reason the app will not exit.
+"""Stopping something that is already running. dispatch() blocks and the loop sits inside it,
+so the handler runs on its own thread and the loop watches flags. Cancelled rewinds the round
+past the call, which is what makes a missing result fine; detached keeps the thread and its box
+for the background registry. A tool that ignores the token in ctx is abandoned rather than
+stopped, which is why these threads are daemons: a socket read must never block app exit.
 """
-import threading
+import queue, socket, threading
 
 POLL = 0.02          # how often the flags are read while a call is in flight
 
 
 class Token:
-    """The cancel a running tool can see.
-
-    Handed to handlers through ctx["cancel"], so a long call can give up on its
-    own terms -- shell kills its process group rather than leaving one running
-    past the turn it belonged to. Looking at it is optional: a handler that
-    never does still works, it just cannot finish early.
+    """The cancel a running tool can see, handed to handlers through ctx["cancel"]. Looking at
+    it is optional: a handler that never does still works, it just cannot finish early.
     """
     __slots__ = ("_event",)
 
@@ -46,25 +20,19 @@ class Token:
     def cancelled(self) -> bool: return self._event.is_set()
     def wait(self, timeout=None) -> bool: return self._event.wait(timeout)
 
-    # Deliberately no __bool__. Either answer is a trap: truthy-when-cancelled
-    # makes `token or Token()` silently swap a live token for a fresh one, and
-    # truthy-when-present makes `if token:` read as "has it been cancelled" to
-    # everyone who did not write it. Callers say cancelled() and mean it.
+    # No __bool__ on purpose: truthy-when-cancelled would make `token or Token()` swap a
+    # live token for a fresh one, truthy-when-present would make `if token:` a cancel test.
 
 
 class Call:
-    """One handler running on its own thread, plus the box it writes to.
-
-    The box outlives the wait. That is the point: whoever backgrounds the call
-    keeps a reference to this object and reads the result whenever it lands,
-    long after the loop that started it moved on.
+    """One handler running on its own thread, plus the box it writes to. The box
+    outlives the wait: whoever backgrounds the call keeps this object and reads the result
+    whenever it lands, long after the loop that started it moved on.
     """
 
     def __init__(self, fn, token: "Token" = None):
-        # `token is None`, never `token or ...`: the caller's token is the one
-        # already sitting in the ctx the handler will read, and quietly
-        # replacing it would leave the loop cancelling an object nobody is
-        # watching -- a cancel that reports success and does nothing.
+        # `token is None`, never `token or ...`: a fresh token here would be unknown to
+        # the ctx the handler reads, so the loop would cancel what nobody is watching.
         self.token = Token() if token is None else token
         self._fn = fn
         # done is written last, after result, so a reader that sees done sees
@@ -76,10 +44,8 @@ class Call:
         try:
             self.box["result"] = self._fn()
         except BaseException as e:
-            # Shaped like every other failed call, because that is what it is
-            # from the model's side. dispatch() already catches Exception; this
-            # is the layer under it, and it must not lose a job to a traceback
-            # nobody is standing under.
+            # Shaped like every other failed call, since that is what it is from the
+            # model's side, and a traceback here would lose the job to nobody.
             self.box["result"] = {"error": str(e)}
         finally:
             self.box["done"] = True
@@ -96,20 +62,10 @@ class Call:
 
 
 def ctx_with(ctx, token: Token):
-    """A per-call copy of ctx carrying this call's cancel token.
-
-    A copy rather than a mutation: ctx is shared, and a background job still
-    holding it would otherwise watch the next call's token appear underneath it
-    and stop when that one was cancelled. The class is preserved because ctx is
-    a dict subclass with properties on it that tools read.
-
-    Two keys for one signal, because there are two kinds of reader. A tool
-    watches "cancel" and decides what stopping means for it -- shell kills its
-    process group. A nested agent loop takes "cancelled" and passes it straight
-    to generate() as its stop predicate, which is how cancelling a run reaches
-    the subagent inside the tool call inside it. The token is per call, so a
-    subagent that was backgrounded keeps running when a later turn is cancelled:
-    it is no longer the call anyone is cancelling.
+    """A per-call copy of ctx carrying this call's cancel token, in ctx's own class since tools read
+    its properties. Not a mutation: a background job holding the shared ctx would watch the next call's
+    token appear and stop with it. "cancel" is for tools, "cancelled" for a nested loop's stop predicate;
+    per call, so a backgrounded subagent keeps running after a later cancel.
     """
     try: out = type(ctx)(ctx) if ctx is not None else {}
     except Exception: out = dict(ctx or {})
@@ -120,30 +76,129 @@ def ctx_with(ctx, token: Token):
     return out
 
 
+class Stopped(Exception):
+    """Raised by stream() when the consumer's stop() fired mid-read. Not an error: the
+    caller is already on its cancel path, and this is only what gets the iteration out of
+    the way so that path runs.
+    """
+
+
+def abort(source) -> None:
+    """Make a read blocked on this stream return, now.
+
+    Closing an SDK stream is not enough: it returns at once and leaves the read exactly
+    where it was, waiting on a socket nobody will ever write to again. The read is waiting
+    on the socket, so the socket is what is shut down. Every step is best-effort: this runs
+    while unwinding a cancel, and the stream may not have a connection under it at all.
+
+    ponytail: httpx's transport only, which is what every SDK here uses. A transport that
+    does not expose a network_stream leaves the read to the client's own timeout.
+    """
+    try:
+        response = getattr(source, "response", None)
+        network = ((getattr(response, "extensions", None) or {}).get("network_stream")
+                   if response is not None else None)
+        sock = network.get_extra_info("socket") if network is not None else None
+        if sock is not None: sock.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        pass
+
+
+def stream(source, stop=None, first=None, poll: float = POLL, peek=None, every: int = 16):
+    """The items of a blocking producer, on a thread, with stop() read while nothing arrives.
+
+    generate() iterated the provider's stream directly, which parked the worker inside a
+    blocking read: a cancel was only noticed between chunks, and a link that went away sends
+    nothing rather than closing, so `stop()` was never reached and the turn could not be
+    ended at all. The producer moves to its own thread and the caller polls, which is what
+    makes the wait abandonable -- the same shape a tool call already has.
+
+    abort() is the other half and a different job. Stopping gets the caller out at once, but
+    the producer is still in the read it was in, and the socket under it has to be shut or
+    that thread sits there until the client's own timeout. Both matter: one ends the turn,
+    the other ends the connection the turn left open.
+
+    peek() is asked on the same idle stretch, and what it finds is yielded as a Notice: a
+    waiting peer message, which is a thing to say and not a reason to end the read. That is
+    the difference from stop() and the whole point of it. The items are asked for in batches
+    of `every` so the peeking costs nothing on a stream that is answering normally: a poll
+    per frame is a poll per token on a fast model, and the idle stretch is the only place
+    anything can have changed. A peek that raises is nothing to say: a mailbox fault is not
+    the link's fault, and this is not the place it takes a turn down.
+
+    Raises Stopped if stop() fires, and the producer's own exception otherwise.
+    """
+    stop = stop or (lambda: False)
+    q: queue.Queue = queue.Queue()
+    done = threading.Event()
+
+    def produce():
+        try:
+            if first is not None: q.put(("item", first))
+            for item in source: q.put(("item", item))
+        except BaseException as e:
+            q.put(("error", e))
+        else:
+            q.put(("end", None))
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=produce, name="cuacode-stream", daemon=True)
+    thread.start()
+    try:
+        idle = 0
+        while True:
+            try:
+                kind, payload = q.get(timeout=poll)
+                idle = 0
+            except queue.Empty:
+                if stop(): raise Stopped
+                idle += 1
+                if peek is not None and idle % every == 0:
+                    try: news = peek()
+                    except Exception: news = None
+                    if news: yield Notice(news)
+                continue
+            if kind == "item":
+                yield payload
+            elif kind == "error":
+                # A cancel that shut the socket arrives here as the read's own error. It is
+                # the stop it was, and saying otherwise would report a link that dropped.
+                if stop(): raise Stopped from payload
+                raise payload
+            else:
+                return
+    finally:
+        if not done.is_set():
+            # Left early, so nothing is reading it. Shutting the socket is what returns the
+            # producer from the read it is parked in, rather than leaving it there until the
+            # client's timeout: a cancelled turn should not keep a connection to a provider.
+            abort(source)
+            thread.join(poll * 5)
+
+
+class Notice:
+    """Something the loop was told while it waited, that is not a provider frame.
+
+    A wrapper rather than an item of the same shape, because the caller unpacks provider
+    deltas field by field and a notice carrying `peek` would either read as an empty delta
+    or be dropped by whoever looked first. `what` is for the caller; it is not drawn here.
+    """
+
+    def __init__(self, what): self.what = what
+
+
 def run(fn, stop=None, detach=None, token: Token = None, poll: float = POLL) -> tuple[str, object]:
-    """Run fn on a thread, watching both flags while it does.
-
-    Returns ("done", result) when it finished, ("cancelled", call) when stop()
-    went true, ("detached", call) when the detach event was set. The Call comes
-    back in the latter two because the thread is still running and the caller is
-    what decides where it goes next.
-
-    stop cancels the token on the way out, so a cooperative tool gets the chance
-    to stop rather than grind on toward a result nobody will read. detach does
-    not -- the entire point of backgrounding is that the work continues.
-
-    detach is a threading.Event rather than a predicate, and it is cleared here
-    on entry. A press that arrived before this call started was aimed at
-    something else, or at nothing; honouring it would background whatever ran
-    next, which is never what the person pressing the key meant.
+    """Run fn on a thread, watching both flags. Returns ("done", result), or ("cancelled" or
+    "detached", call) with the still-running Call. stop cancels the token so a cooperative tool
+    can stop; detach does not, the work continues. detach is cleared on entry, a press from before.
     """
     stop = stop or (lambda: False)
     if detach is not None: detach.clear()
     call = Call(fn, token).start()
     while True:
         # join returns the moment the thread ends, so the poll interval is a
-        # ceiling on how long a flag goes unnoticed, not on how long a fast
-        # call takes.
+        # ceiling on how long a flag goes unnoticed, not on how long a call takes.
         call.thread.join(poll)
         if call.done: return "done", call.result
         if stop():

@@ -1,9 +1,7 @@
 """Fetch one page, hand back either the whole thing or what a subagent made of it.
 
-The fetch is ours and only the html-to-markdown step is trafilatura's. That
-split is deliberate: the redirect budget, the byte cap, the timeout and which
-hosts may be reached are policy, and a library that fetches for you owns all
-four of them.
+The fetch is ours and only the html-to-markdown step is trafilatura's: the
+redirect budget, byte cap, timeout and reachable hosts are policy.
 """
 import ipaddress, os, re, socket
 from urllib.parse import urlparse
@@ -14,11 +12,10 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 TIMEOUT = 20.0
 MAX_BYTES = 5 * 1024 * 1024
-MAX_CHARS = 50_000          # ~12k tokens; full mode is for reading, not for hoarding
+MAX_CHARS = 50_000
 MAX_REDIRECTS = 5
 
-# Anything that is not a page. Checked because a 400MB tarball answers the
-# content-type question far too late to be useful.
+# Not a page. Checked before the body is read: content-length is no help.
 TEXTUAL = ("text/html", "application/xhtml", "text/plain", "text/markdown",
            "application/json", "application/xml", "text/xml")
 
@@ -52,10 +49,9 @@ DIGEST = AgentSpec(
 def _private(host: str) -> bool:
     """Whether a hostname lands anywhere on this machine or its network.
 
-    The permission prompt asks the user about fetching a url; it does not ask
-    them about reaching their own router's admin page or a cloud metadata
-    endpoint, and the model picks the host. Resolved rather than pattern
-    matched, because a public name is free to point at 127.0.0.1.
+    The permission prompt covers fetching a url, not the user's router admin
+    page or a cloud metadata endpoint, and the model picks the host. Resolved
+    rather than pattern matched, because a public name may point at 127.0.0.1.
     """
     try: infos = socket.getaddrinfo(host, None)
     except OSError: return False                # unresolvable: the request fails on its own
@@ -79,8 +75,8 @@ def _fetch(url: str) -> tuple:
             ctype = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
             if ctype and not any(ctype.startswith(t) for t in TEXTUAL):
                 raise ValueError(f"not a readable page: content-type {ctype}")
-            # Capped while reading, not after: content-length is optional and
-            # a server is free to lie about it.
+            # Capped while reading, not after: content-length is optional and a
+            # server may lie about it.
             chunks, size = [], 0
             for chunk in r.iter_bytes():
                 size += len(chunk)
@@ -97,11 +93,9 @@ _LINK = re.compile(r"(?<!!)\[([^\]]*)\]\(([^)\s]*)\)")
 def _delink(md: str, base: str) -> str:
     """Unlink same-page anchors.
 
-    An anchor href resolves against the document, and the resolver only knows
-    the site -- so every `#section` on a docs page comes out as
-    `https://docs.python.org#section`, a url that exists and is not the page it
-    came from. The links this tool hands back are fetch targets, so a plausible
-    wrong one is worse than none: the text stays, the target goes.
+    A `#section` href resolves against the site, not the page, so it comes out
+    as a plausible url that is not the page it came from. The links returned
+    here are fetch targets, so the text stays and the target goes.
     """
     root = f"{urlparse(base).scheme}://{urlparse(base).hostname}"
     def sub(m):
@@ -116,14 +110,13 @@ def _markdown(html: str, url: str) -> str:
     md = trafilatura.extract(html, output_format="markdown", url=url, include_links=True,
                              include_images=True, include_tables=True, with_metadata=False)
     if not md:
-        # Boilerplate removal is a judgement call and it sometimes judges the
-        # whole page to be boilerplate. Recall over precision beats an empty
-        # result the caller has to fetch again to work around.
+        # Boilerplate removal sometimes judges the whole page to be boilerplate;
+        # an empty result costs a refetch, so retry with recall favored.
         md = trafilatura.extract(html, output_format="markdown", url=url, favor_recall=True,
                                  include_links=True, include_tables=True)
     if not md: raise ValueError("nothing extractable on the page (js-rendered, or not an article)")
-    # This tool returns text. An inlined image url is a link the model cannot
-    # follow to something it cannot see, so the alt text is the whole content.
+    # Images become alt text: the model cannot follow an image url to anything
+    # it can see.
     md = _IMG.sub(lambda m: f"[image: {m.group(1)}]" if m.group(1) else "[image]", md)
     return _delink(md, url)
 
@@ -157,9 +150,8 @@ def run(args: dict, ctx) -> dict:
 
     r = run_agent(DIGEST, f"Goal: {goal}\n\n<page url=\"{final}\">\n{body}\n</page>", ctx=ctx)
     if r.get("error"):
-        # The page was fetched and paid for either way. Handing back the
-        # markdown beats making the caller fetch it a second time to find out
-        # what the digest could not tell them.
+        # The page was fetched either way, so hand back the markdown rather than
+        # making the caller fetch it again.
         return {"website": final, "output": body, "truncated": truncated,
                 "note": f"digest failed ({r['error']}), returning the full page instead"}
     return {"website": final, "output": r["output"], "truncated": truncated, "rounds": r["rounds"]}

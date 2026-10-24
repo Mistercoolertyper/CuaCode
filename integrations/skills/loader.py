@@ -1,23 +1,8 @@
 """Skills: instructions loaded on demand instead of carried all the time.
 
-A skill is a folder with a SKILL.md in it. Only the name and one-line
-description are ever in the model's context by default -- enough to decide the
-skill is relevant -- and the body is read when it asks for it. That is the
-whole trick: fifty skills cost fifty lines of context, not fifty documents.
-
-Anything else in the folder (templates, examples, scripts) stays on disk. The
-body can point at those by path and the agent reads them with the file tool if
-it needs them.
-
-One skill in ten is not like that. A house style, a safety rule, a format every
-answer has to be in -- something that is only useful if it is already in force
-by the time the agent decides anything. Asking for it in AGENTS.md ("always load
-the X skill") does not work reliably: the agent has to notice, decide, and spend
-a tool call, and it is exactly on the turn it forgets that the rule mattered. So
-those are marked `always: true` and their bodies go into the system prompt at
-startup, whole, every conversation. That costs their full length on every
-request -- which is the trade, made deliberately, for a handful of skills rather
-than for fifty.
+A skill is a folder with a SKILL.md; only its name and one-line description are in context by default, so fifty skills cost fifty lines rather than fifty documents, and the body is read when asked for, with anything else in the folder left on disk and pointed at by path.
+A house style or a safety rule is only useful already in force, and asking for it in AGENTS.md does not work reliably: the agent has to notice, decide and spend a tool call, exactly on the turn it forgets.
+Those are marked `always: true` and their bodies go into the system prompt at startup, whole, every conversation, costing their full length on every request. That trade is deliberate, and made for a handful of skills rather than fifty.
 """
 import re
 from dataclasses import dataclass
@@ -29,11 +14,8 @@ from handler.session import store
 _BUNDLED = Path(__file__).parent
 MAX_BODY = 20_000        # a skill that does not fit is a skill that should link out
 
-# What every always-on skill may cost between them, in characters. A ceiling
-# rather than a limit on how many may be marked: forcing six skills on is a
-# decision, forcing the window shut is an accident. Bodies past it are dropped
-# and named in the block, so the reason is in front of the model rather than
-# only in a log nobody reads.
+# What every always-on skill may cost between them, in characters: a ceiling, not a cap on how many may be marked.
+# Bodies past it are dropped and named in the block, so the reason reaches the model rather than only a log nobody reads.
 MAX_ALWAYS = 40_000
 
 @dataclass
@@ -43,17 +25,12 @@ class Skill:
     path: Path
     body: str
     files: list
-    # Who is allowed to reach for it. A skill is offered to both by default;
-    # `disable-model-invocation: true` keeps it out of the skill tool's list,
-    # `disable-user-invocation: true` keeps it out of the frontend's /palette.
-    # Turning both off would leave a skill nothing can load, so that case is
-    # dropped at load time rather than kept as a skill nobody can have.
+    # Who may reach for it, both by default: disable-model-invocation keeps it out of the skill tool's list and
+    # disable-user-invocation out of the /palette. Both off leaves a skill nothing can load, so that case is dropped.
     model_ok: bool = True
     user_ok: bool = True
-    # In the system prompt from startup rather than loaded on demand. Set by
-    # `always: true` in the skill's own frontmatter, or by naming it in the
-    # config's always_skills, which is how a bundled skill is forced on without
-    # editing a file the next update overwrites.
+    # In the system prompt from startup, not loaded on demand: `always: true` in the skill's own frontmatter, or naming it in the config's always_skills.
+    # The config key forces on a bundled skill without editing a file that the next update overwrites.
     always: bool = False
 
 def _flag(meta: dict, *names) -> bool:
@@ -65,11 +42,8 @@ def _flag(meta: dict, *names) -> bool:
 def always_names() -> set:
     """Skill names the config forces on, whatever their frontmatter says.
 
-    Imported here rather than at module scope: config reaches into the provider
-    registry, and skills are loaded from inside it while /context is counting
-    them. A missing or malformed key is no skills forced, never an error -- this
-    is read on the way to building the system prompt.
-    """
+    The import is late because config reaches into the provider registry and skills are loaded from
+    inside it. A missing or malformed key means none forced, never an error."""
     try:
         from handler import config
         names = config.load().get("always_skills") or []
@@ -99,23 +73,16 @@ def _skill(folder: Path):
                  name=meta.get("name") or folder.name,
                  description=meta.get("description", ""),
                  path=folder, body=body,
-                 # Listed, not read. What is worth loading is the skill's own
-                 # decision, and it says so in the body.
+                 # Listed, not read: what is worth loading is the skill's own decision,
+                 # which it states in the body.
                  files=sorted(str(p.relative_to(folder)) for p in folder.rglob("*")
                               if p.is_file() and p.name != "SKILL.md"))
 
 def load_skills(refresh: bool = True, scope: str = None) -> dict:
     """Every installed skill, or only the ones `scope` is allowed to load.
 
-    scope is "model" (the skill tool), "user" (a frontend's slash palette), or
-    None for everything -- counting them for /context does not care who may
-    invoke what.
-
-    An always-on skill is in neither scope. Its body is already in the system
-    prompt, so offering it to the skill tool or the palette would only be a way
-    of paying for it twice; `load_skills()` with no scope still has it, which is
-    what the system prompt and the readout are built from.
-    """
+    scope is "model" (the skill tool), "user" (a frontend's slash palette), or None for everything, since counting for /context does not care who may invoke what.
+    An always-on skill is in neither scope: its body is already in the system prompt, so offering it would pay for it twice. A call with no scope still has it."""
     out = {}
     for d in (_BUNDLED, user_dir()):          # user second: it overwrites
         if not d.exists(): continue
@@ -150,21 +117,16 @@ def listing(scope: str = "user") -> list:
 def invocation(text: str) -> str:
     """The skill block(s) a user message asked for, or "" when none is named.
 
-    A skill is named with `$name` anywhere in the text -- "polish this with
-    $unslop" loads it mid-message -- or `/<name>` opening the message, which
-    is what older frontends wrote for you. Each body rides beside the message
-    the way recall and project docs do, and the user's own line is left alone
-    -- it is what they typed, and the records are what the conversation was.
-    """
+    A skill is named with `$name` anywhere in the text, or `/<name>` opening the message, which is what
+    older frontends wrote. Each body rides beside the message, and the user's own line is left alone."""
     names = []
     text = text or ""
     line = text.lstrip()
     if line.startswith("/") and len(line) > 1:
         if n := line[1:].split(None, 1)[0].strip():
             names.append(n)
-    # $skill anywhere in the message: a "$" that starts a word, then name
-    # characters. A dollar amount ("$5") looks up a skill called "5", finds
-    # none, and stays prose.
+    # $skill anywhere in the message: a "$" starting a word, then name characters. A
+    # dollar amount ("$5") looks up a skill called "5", finds none, and stays prose.
     for m in re.finditer(r"(?<!\S)\$([\w-]+)", text):
         names.append(m.group(1))
     # One block per unique skill that actually exists, in the order asked.
@@ -198,15 +160,8 @@ def always_on() -> list:
 def always_block() -> str:
     """Their bodies as one system segment, or "" when none is marked.
 
-    Built the same way on every turn from the same files, so a provider caching
-    the system prompt as a prefix keeps hitting it; an edit to a skill lands on
-    the next turn, which costs one cache miss and is worth it.
-
-    Whole bodies, not the index -- that is the entire point of the flag. The
-    budget is spent in name order and what does not fit is named rather than
-    silently dropped, because a skill that is quietly not in force is worse than
-    one that is obviously not.
-    """
+    Built the same way every turn from the same files, so a provider caching the system prompt as a prefix keeps hitting it.
+    Whole bodies, not the index, and what the budget does not fit is named rather than silently dropped."""
     loaded, dropped, used = [], [], 0
     for s in always_on():
         if used + len(s.body) > MAX_ALWAYS:

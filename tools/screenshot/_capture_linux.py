@@ -16,8 +16,8 @@ def capture():
         return Image.frombytes("RGB", shot.size, shot.rgb)
 
 def detect_scale(img_w: int, img_h: int) -> tuple[float, int, int]:
-    # X11 through mss grabs the same pixel grid xdotool moves the cursor on, so
-    # capture pixels and click coordinates are already the same unit.
+    # X11 through mss grabs the same pixel grid xdotool moves the cursor on, so capture
+    # pixels and click coordinates are already the same unit.
     return 1.0, img_w, img_h
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"

@@ -1,12 +1,7 @@
 """Search the web and hand back ranked results (title, url, snippet).
 
-Skeleton: the search call is real, the rest is the shape to fill in. Keep
-imports lazy so launching the worker never pays for ddgs unless this tool is
-actually called.
+The ddgs import is lazy, so launching the worker never pays for it.
 """
-
-# Keep a couple of results' worth of raw body so a short-form / summary branch
-# can decide later without re-searching. This is what caps the model's context.
 
 
 def _search(query: str, max_results: int) -> list[dict]:
@@ -33,12 +28,12 @@ def run(args: dict, ctx) -> dict:
     max_results = min(int(args.get("max_results", 5)), 35)
 
     try: results = _search(query, max_results)
-    except Exception as exc: return {"error": f"search failed: {exc}"} # if exception then go figure it out or some shit
+    except Exception as exc: return {"error": f"search failed: {exc}"}
 
     if not results:return {"results": [], "note": "no results for query"}
 
     return {
         "results": results,
         "count": len(results),
-        "truncated": len(results) >= 35, # not even required cause agent cant call more than 35 items max but whatever :shrug:
+        "truncated": len(results) >= 35,
     }

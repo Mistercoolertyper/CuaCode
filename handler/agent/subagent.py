@@ -1,35 +1,30 @@
 """Agents as functions: a prompt in, a validated dict out.
 
 There is no second agent loop here. generate() already drives a provider-
-agnostic round loop and takes its tools, system prompt and message list as
-arguments, so a subagent is that same loop pointed at a different system
-prompt with a narrower tool set and a message list nobody keeps. What this
-module adds is the part that makes the result callable code rather than prose:
-a schema the agent is made to fill, and a definite answer about whether it did.
+agnostic round loop taking its tools, system prompt and message list as
+arguments, so a subagent is that loop pointed at a different system prompt with
+a narrower tool set and a message list nobody keeps. What this module adds is a
+schema the agent is made to fill and a definite answer about whether it did.
 
-The forcing is done with a tool, not with a provider's JSON mode. Every
-dialect here already speaks tool calls -- they are normalized by
-CallAssembler, parse_calls and to_provider before anything reaches the loop --
-whereas native structured output is spelled differently by each of the three
-and not at all by most of the openai-compatible servers in PROVIDERS. One path
-that works everywhere beats three that each work once.
-
-A subagent starts cold: it never sees the parent's messages, only a rendered
-prompt string. That is what keeps run() a function -- same arguments, same
-work, no dependence on what the caller happened to be doing.
+The forcing is a tool, not a provider's JSON mode: every dialect here speaks
+tool calls already, whereas native structured output is spelled differently by
+each provider and not at all by most of the openai-compatible servers. A
+subagent starts cold, seeing only a rendered prompt string, which is what keeps
+run() a function of its arguments.
 """
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from tools.loader import Tool
 from tools._parser.Validate import check
+from handler import usage
 from handler.agent import providers
 
 SUBMIT = "submit_result"
 
-# Tools that start another agent. Stripped from a subagent's tool list once
-# the nesting limit is reached, so depth is bounded by what is offered rather
-# than by asking a model not to recurse.
+# Tools that start another agent. Stripped from a subagent's tool list once the
+# nesting limit is reached, so depth is bounded by what is offered rather than by
+# asking a model not to recurse.
 SPAWNERS = ("agent", "workflow")
 MAX_DEPTH = 1
 
@@ -41,9 +36,8 @@ def depth() -> int:
 
 @dataclass
 class AgentSpec:
-    """What an agent is. Built inline by a caller, or read off a file's
-    frontmatter -- the fields are the same either way, which is why a
-    file-backed agent registry needs nothing from this module but a parser."""
+    """What an agent is. Built inline by a caller or read off a file's
+    frontmatter; the fields are the same either way."""
     name: str = "subagent"
     description: str = ""
     system: str = ""
@@ -75,15 +69,13 @@ def _submit_tool(schema: dict, box: dict) -> Tool:
 
     Tool is a plain dataclass, so one built here is indistinguishable from one
     loaded off disk: to_provider() renders it into whatever dialect is in play
-    and dispatch() validates and runs it, both without knowing this is not a
-    real tool. Nothing downstream learns the word "schema".
+    and dispatch() validates and runs it without knowing this is not a real tool.
     """
     def handler(args: dict, ctx=None) -> dict:
         value, errs = check(args or {}, schema, defaults=True)
         if errs:
-            # Back to the model as an ordinary tool result, which makes the
-            # next round a correction. A retry loop for free, bounded by
-            # max_rounds like everything else.
+            # Back to the model as an ordinary tool result, which makes the next
+            # round a correction: a retry loop for free, bounded by max_rounds.
             return {"ok": False, "errors": errs, "hint": f"fix these and call {SUBMIT} again"}
         box["value"] = value
         return {"ok": True}
@@ -94,11 +86,10 @@ def _effort(spec: AgentSpec, ctx) -> str:
     """The rung this agent runs at.
 
     A spec that names one means it: a cheap helper that only has to summarize a
-    page should not start burning the conversation's thinking budget because
-    the user turned the dial up. Everything else inherits the conversation --
-    which is the level the user actually chose, and the one thing a subagent
-    that says nothing about effort should be doing. The account default is the
-    last resort, for a run with no conversation behind it at all.
+    page should not burn the conversation's thinking budget because the user
+    turned the dial up. Everything else inherits the conversation, the level the
+    user actually chose; the account default is the last resort for a run with no
+    conversation behind it.
     """
     from handler import config
     inherited = ctx.get("effort") if isinstance(ctx, dict) else ""
@@ -106,31 +97,29 @@ def _effort(spec: AgentSpec, ctx) -> str:
 
 def _settings(spec: AgentSpec, ctx=None):
     """This run's provider settings. Read fresh rather than taken from the
-    parent: an agent is allowed to name a provider the conversation is not
-    using, and then none of the conversation's model, params or vision flag
-    apply to it."""
+    parent, because an agent may name a provider the conversation is not using,
+    and then none of the conversation's model, params or vision flag apply."""
     from handler import config
     active = config.settings()
     provider = spec.provider or active["provider"]
     entry = config.entry(provider)
     out = {"provider": provider, "effort": _effort(spec, ctx)}
-    # Inherited only when it is the same provider -- the active model name is
-    # meaningless to a different endpoint.
+    # Inherited only for the same provider: the active model name is meaningless
+    # to a different endpoint.
     model = spec.model or (active.get("model") if provider == active["provider"] else entry.get("model"))
     if model: out["model"] = model
     if "vision" in entry: out["vision"] = entry["vision"]
     if entry.get("effort_map"): out["effort_map"] = entry["effort_map"]
     # Per-model params follow the model the agent asked for, not the one the
-    # conversation is on: a spec that names a small model gets that model's
-    # settings, which is the whole point of keying them by model.
+    # conversation is on: that is the point of keying them by model.
     params = {**config.params_for(provider, model or config.model_for(provider)),
               **(spec.params or {})}
     if params: out["params"] = params
     return out, config.api_key(provider), provider
 
 def _emit(ctx, name: str, chunk: dict):
-    """Progress out to whatever the caller wired up, if anything. A frontend
-    that raises in its own callback must not take the run down with it."""
+    """Progress out to whatever the caller wired up, if anything. A callback
+    that raises in its own code must not take the run down with it."""
     fn = ctx.get("emit") if isinstance(ctx, dict) else None
     if not callable(fn): return
     try: fn(name, chunk)
@@ -152,6 +141,11 @@ def _drive(spec, messages, settings, key, system, ctx, allow, extra, box, provid
         for chunk in gen:
             t = chunk.get("type")
             _emit(ctx, spec.name, chunk)
+            if t == "usage":
+                # A side round is billed like any other, and the loop is the only thing
+                # that writes meta.json, so it goes into the queue the loop drains rather
+                # than onto a session it may no longer be the live one.
+                usage.record(spec.name, chunk, provider)
             if t == "round":
                 # Yielded before the request is made, so closing here spends
                 # nothing. Budget is in rounds because that is what costs money.
@@ -163,18 +157,16 @@ def _drive(spec, messages, settings, key, system, ctx, allow, extra, box, provid
                 content = chunk.get("content") or content
             elif t == "tool_output" and chunk.get("name") == SUBMIT and "value" in box:
                 # generate() only ends a round loop when a round makes no calls,
-                # so an agent that has already answered would otherwise keep
-                # going and pay for another round to say goodbye.
+                # so an agent that already answered would pay to say goodbye.
                 stopped = "submitted"
                 break
             elif t == "cancelled":
                 stopped = "cancelled"
                 break
             elif t == "failed":
-                # The connection dropped mid-reply. Whatever had arrived is
-                # already in `content` and comes back with the agent -- half an
-                # answer plus a reason beats an empty one -- but it is labelled
-                # so the caller can tell it apart from an agent that finished.
+                # The connection dropped mid-reply. Whatever arrived is already in
+                # `content` and comes back with the agent, labelled so the caller
+                # can tell it apart from an agent that finished.
                 stopped = "connection_lost"
                 break
             elif t == "done":
@@ -188,11 +180,9 @@ def run(spec: AgentSpec, prompt: str, ctx=None, images: list = None) -> dict:
     """Run one agent to completion.
 
     Returns {output, rounds, stopped}. With a schema, output is the validated
-    dict and `stopped` is "submitted" when it is trustworthy; without one,
-    output is the agent's final text. An agent that finishes without answering
-    comes back as an error rather than as prose in a field the caller expected
-    to index -- a wrong shape is worse than a missing one, because only one of
-    them is noticed.
+    dict and `stopped` is "submitted" when it is trustworthy; without one, output
+    is the agent's final text. An agent that finishes without answering comes back
+    as an error rather than as prose in a field the caller expected to index.
     """
     d = _depth.get()
     if d >= MAX_DEPTH + 1:
@@ -203,9 +193,9 @@ def run(spec: AgentSpec, prompt: str, ctx=None, images: list = None) -> dict:
     box = {}
     extra = {SUBMIT: _submit_tool(spec.schema, box)} if spec.schema else None
     system = (spec.system or "") + (APPENDIX if spec.schema else "")
-    # Shaped by the provider that is about to receive it, because an image in a
-    # user turn is spelled three different ways. This is how a subagent can be
-    # handed something to look at when the model that called it cannot see.
+    # Shaped by the provider about to receive it, because an image in a user turn
+    # is spelled three different ways. This is how a blind parent can hand a
+    # subagent something to look at.
     messages = [providers.get(provider).user_message(prompt, images)]
 
     token = _depth.set(d + 1)
@@ -214,9 +204,8 @@ def run(spec: AgentSpec, prompt: str, ctx=None, images: list = None) -> dict:
     try:
         content, rounds, stopped = _drive(spec, messages, settings, key, system, ctx,
                                           allow, extra, box, provider, spec.max_rounds)
-        # One nudge, once. A model that ran out of tools to call and wrote its
-        # answer as text is a round away from being right, and re-running the
-        # whole agent to find that out again costs everything it already did.
+        # One nudge, once: a model that wrote its answer as text is a round away
+        # from being right, and re-running the whole agent costs what it did.
         if spec.schema and "value" not in box and stopped == "no_calls" and rounds < spec.max_rounds:
             messages.append({"role": "user", "content":
                              f"You did not call {SUBMIT}, so nothing was returned. "

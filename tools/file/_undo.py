@@ -12,9 +12,8 @@ def _dir(ctx) -> Path:
     """Where the snapshots live.
 
     The session's own directory when the frontend reports one, so a run's undo
-    history is thrown out with the run. A frontend that reports none still gets
-    undo, from a fixed directory under home, rather than the feature quietly
-    existing or not depending on who launched the app.
+    history is thrown out with the run; a frontend that reports none still gets undo,
+    from a fixed directory under home.
     """
     base = getattr(ctx, "session_dir", None) if ctx is not None else None
     d = Path(base) / "file_undo" if base else Path.home() / ".cuacode" / "file_undo"
@@ -33,9 +32,8 @@ def _entries(d: Path) -> list[dict]:
 def record(ctx, path: Path, kind: str, before: bytes | None = None, src: Path | None = None) -> None:
     """Remember what `path` was, just before it stops being that.
 
-    Every failure here is swallowed. Undo is a safety net stretched under the
-    edit, not a condition of it, and a full disk is no reason to refuse a write
-    the user asked for.
+    Every failure here is swallowed: undo is a safety net under the edit, not a
+    condition of it, and a full disk is no reason to refuse a write the user asked for.
     """
     if before is not None and len(before) > SNAP_MAX: return
     try:
@@ -55,9 +53,9 @@ def record(ctx, path: Path, kind: str, before: bytes | None = None, src: Path | 
 def undo(path: Path, args: dict, ctx=None) -> dict:
     """Put the file back the way it was before the last thing done to it.
 
-    One step, and only for the path named. An undo that walked backwards through
-    everything the agent touched would be a second way to change files nobody
-    asked it to change.
+    One step, and only for the path named: an undo that walked backwards through
+    everything the agent touched would be a second way to change files nobody asked
+    it to change.
     """
     d = _dir(ctx)
     entries = _entries(d)

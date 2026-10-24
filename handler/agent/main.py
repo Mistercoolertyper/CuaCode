@@ -1,71 +1,47 @@
-import itertools, os, re, socket, ssl, time
+import os, re, socket, ssl, time
 from tools.loader import load_tools, dispatch, refresh_dynamic
 from tools._parser.ToProvider import to_provider
-from handler.agent import effort, images, interrupt, providers
+from handler.agent import compact, effort, images, interrupt, providers
 from handler.agent.background import JOBS
+from handler import peers
 
 _tools_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'tools')
 _registry = None
 
 def registry():
-    """Loaded once. load_tools re-execs every tool's main.py, which is real
-    work to repeat on every turn.
-
-    Refreshed once per turn all the same, but only the self-describing tools:
-    an agent that writes a subagent, workflow or skill file has to be able to
-    use it in the same conversation, and everything else on disk is fixed for
-    the life of the process. When nothing has changed the strings come back
-    byte-identical, so the provider's prompt cache is untouched.
-    """
+    """Loaded once, since load_tools re-execs every tool's main.py. Refreshed
+    each turn for the self-describing tools only, so an agent can use a subagent
+    or skill file it just wrote. Unchanged entries come back byte-identical, so
+    the prompt cache survives."""
     global _registry
     if _registry is None: _registry = load_tools(tools_dir=_tools_dir)
     return refresh_dynamic(_registry)
 
 def _needs_vision(t) -> bool:
-    """Read off the tool's declared output rather than a hardcoded name list,
-    so a new image-returning tool is covered the day it lands."""
+    """Read off the tool's declared output, not a name list, so a new
+    image-returning tool is covered the day it lands."""
     return any("base64" in str(v) for v in (t.output_schema or {}).values())
 
 def _visible(reg: dict, vision: bool) -> dict:
-    """The toolbox this model can actually use.
-
-    Never hand a camera to a model that cannot see: offered the tool it will
-    call it, and the endpoint rejects the image with a 400 that costs the whole
-    turn. The reverse holds too -- a tool that exists to describe an image to a
-    model with no eyes is noise in front of a model that has them, and an
-    invitation to delegate something it could just look at.
-    """
+    """The toolbox this model can actually use. Offered a camera it will call
+    it, and a rejected image costs the whole turn."""
     if vision: return {k: t for k, t in reg.items() if not t.blind_only}
-    # Two reasons to withhold, and they are not the same reason. A tool that
-    # returns an image would fail the request outright. A tool that takes a
-    # coordinate would succeed -- at whatever it happened to land on, chosen by
-    # a model that could not look first. The second is the more dangerous of
-    # the two, because nothing reports it as an error.
+    # Withheld for two different reasons: an image-returning tool fails the request outright,
+    # a coordinate-taking one silently succeeds somewhere the model never looked, which is worse.
     return {k: t for k, t in reg.items() if not _needs_vision(t) and not t.needs_sight}
 
 def _open(p, provider: str, model: str, messages: list, tools: list, system: str, params: dict):
-    """The stream, plus its first Delta, with one retry for a rejected knob.
-
-    Priming matters: stream() is a generator function, so calling it runs none
-    of the body and the request -- along with any 400 it earns -- only happens
-    once something pulls. Pull one Delta here and a bad parameter is catchable
-    rather than exploding halfway down the consuming loop.
-
-    The retry is what makes the effort setting safe to point at a model nobody
-    has mapped: the rejected key is dropped, remembered on disk, and the turn
-    goes through anyway. Only keys this process added are ever stripped, so an
-    unrelated 400 still reaches the caller.
+    """The stream, plus its first Delta, with one retry for a rejected knob. stream() is a generator
+    function, so priming with one Delta catches a bad parameter here rather than halfway down the loop.
+    The retry drops only keys this process added, so an unrelated 400 still reaches the caller.
     """
     from handler import config           # imported late: config imports providers
     try:
         s = p.stream(model, messages, tools, system, params)
         return s, next(s, None)
     except Exception as e:
-        # A model refusing images is not a knob to drop and retry -- the image
-        # is already in the history and would be sent again. Record it instead,
-        # so this costs one failed turn ever: the next turn is built with vision
-        # off, which withholds the cameras and offers describe_image in their
-        # place. The turn still fails, with a sentence that says what happened.
+        # An image rejection is recorded, not retried: the image is already in the
+        # history, so a retry sends it again. One failed turn ever, then vision off.
         if config.is_image_rejection(str(e)):
             config.learn_blind(provider, model)
             raise RuntimeError(
@@ -78,62 +54,53 @@ def _open(p, provider: str, model: str, messages: list, tools: list, system: str
         s = p.stream(model, messages, tools, system, fixed)
         return s, next(s, None)
 
-def _opened(*a):
-    """_open with its exception carried back as a value instead of raised.
+# How many idle polls pass with nothing from the provider before the stream looks up from
+# it and asks whether a peer has spoken. A long round is frame after frame, so this is what
+# makes the mailbox noticed while a model is thinking, on the wait it was already sitting
+# in. Sixteen polls of 20ms is well under the tenth of a second it takes to notice.
+PEEK_EVERY = 16
 
-    It has to run on another thread to be interruptible, and a thread cannot
-    raise into its caller. The distinction _open draws between errors -- a
-    dropped knob it retries, an image rejection it records, anything else it
-    lets through -- all happens inside, so what escapes here is already final
-    and only needs putting back where the caller can see it.
-    """
+def _opened(*a):
+    """_open with its exception carried back as a value instead of raised. It has
+    to run on another thread to be interruptible, and a thread cannot raise into
+    its caller."""
     try: return "ok", _open(*a)
     except BaseException as e: return "err", e
 
-# Retries for a request that never arrived: 1, 2, 4, 8 seconds -- long enough
-# for a wifi handover to finish. Four, because a fifth try is sixteen more
-# seconds of spinner to learn nothing new.
+# Retries for a request that never arrived: 1, 2, 4, 8 seconds, long enough for
+# a wifi handover. Four, because a fifth is sixteen more seconds of spinner.
 RETRIES = 4
 RETRY_BASE = 1.0
 RETRY_CAP = 30.0
 
-# Failures worth trying again, by the name of the class raised. Providers share
-# no exception hierarchy -- anthropic, openai, ollama and httpx each raise their
-# own -- so the name is the only thing they have in common, and it is matched as
-# a substring so that "Timeout" covers APITimeoutError, ConnectTimeout and
-# ReadTimeout at once.
+# Matched as a substring of the exception class name: the providers share no
+# hierarchy, so the name is all they have in common ("Timeout" covers several).
 _TRANSIENT_TYPES = ("APIConnectionError", "Timeout", "ConnectError", "ReadError", "WriteError",
                     "RemoteProtocolError", "ProtocolError", "ChunkedEncodingError",
                     "IncompleteRead", "InternalServerError", "ServiceUnavailable",
                     "OverloadedError", "RateLimitError", "ResponseError")
 
-# ...and by what the message says, for the providers that raise a bare Exception
-# with the reason only in its text. Deliberately narrow: a failure matched here
-# by accident costs fifteen seconds of retrying before the user is told what
-# actually went wrong.
+# ...and by message text, for providers raising a bare Exception. Deliberately
+# narrow: a false match costs fifteen seconds before the user is told.
 _TRANSIENT_TEXT = ("connection", "connect error", "disconnected", "timed out",
                    "temporarily unavailable", "overloaded",
                    "network is unreachable", "name or service not known",
                    "nodename nor servname", "eof occurred", "bad gateway",
                    "service unavailable", "reset by peer", "broken pipe")
 
-# HTTP codes that mean "later" against the ones that mean "never". A 401 is not
-# going to fix itself, and four retries only delay saying so.
+# Codes that mean "later" against ones that mean "never". A 401 is not going to
+# fix itself, and four retries only delay saying so.
 _TRANSIENT_CODES = {408, 409, 425, 429, 500, 502, 503, 504, 522, 524, 529}
 _FINAL_CODES = {400, 401, 402, 403, 404, 405, 413, 422}
 
-# The OSError subclasses that mean the network, rather than the disk. Listed as
-# a tuple instead of checking OSError itself: a FileNotFoundError raised inside
-# a provider is a bug, and retrying it four times hides the traceback saying so.
+# The OSError subclasses that mean the network, not the disk: a FileNotFoundError
+# from a provider is a bug, and retrying it hides the traceback saying so.
 _NET_ERRORS = (ConnectionError, TimeoutError, socket.gaierror, socket.timeout, ssl.SSLError)
 
 
 def _status_of(e) -> int:
-    """The HTTP code behind an exception, or 0.
-
-    Every SDK spells it differently and some only have it in the text, which is
-    why the last resort is a regex over the message.
-    """
+    """The HTTP code behind an exception, or 0. Every SDK spells it differently
+    and some only have it in the text, hence the regex."""
     for attr in ("status_code", "status", "http_status"):
         v = getattr(e, attr, None)
         if isinstance(v, bool): continue
@@ -144,13 +111,9 @@ def _status_of(e) -> int:
 
 
 def _transient(e) -> bool:
-    """Whether the network is at fault rather than the request.
-
-    The distinction is the whole of the policy. A request that was never
-    delivered costs nothing to send again; one the provider read and refused
-    will be refused identically four more times, and each retry is time the
-    user spends not being told why.
-    """
+    """Whether the network is at fault rather than the request. A request never
+    delivered costs nothing to send again; one the provider read and refused will
+    be refused identically four more times."""
     code = _status_of(e)
     if code in _FINAL_CODES: return False
     if code in _TRANSIENT_CODES: return True
@@ -162,9 +125,8 @@ def _transient(e) -> bool:
 
 
 def _retry_after(e) -> float:
-    """What the provider asked to be waited, when it asked. Honouring a 429's
-    own number beats guessing over it, and it is the one case where the server
-    knows better than the backoff."""
+    """What the provider asked to be waited, when it asked: honouring a 429's own
+    number beats guessing over it."""
     for attr in ("retry_after", "retry_delay"):
         v = getattr(e, attr, None)
         try:
@@ -179,18 +141,14 @@ def _retry_after(e) -> float:
 
 
 def _backoff(attempt: int, e) -> float:
-    """How long before try number attempt+1: doubling, capped, and overridden by
-    whatever the provider itself asked for."""
+    """How long before try number attempt+1: doubling, capped, overridden by
+    whatever the provider asked for."""
     return _retry_after(e) or min(RETRY_BASE * (2 ** attempt), RETRY_CAP)
 
 
 def _wait(secs: float, stop) -> bool:
-    """Sleep, watching for a cancel. False if the wait was called off.
-
-    A backoff that cannot be stopped is a backoff that makes the app look hung
-    for exactly as long as it waits, and the key someone reaches for while a
-    connection is down is the one that gives up.
-    """
+    """Sleep, watching for a cancel. False if the wait was called off: a backoff
+    that cannot be stopped makes the app look hung for as long as it waits."""
     end = time.monotonic() + secs
     while True:
         if stop(): return False
@@ -200,34 +158,17 @@ def _wait(secs: float, stop) -> bool:
 
 def _preview(tool, args: dict, ctx) -> dict | None:
     """What the call about to be asked about would do, when the tool can say.
-
-    Never allowed to matter: a preview that raises would turn a question into a
-    failed call, and the dialog it feeds is perfectly readable without one. So
-    anything that goes wrong here comes back as nothing to show.
-    """
+    Nothing that goes wrong here may matter: a preview that raises would turn a
+    question into a failed call."""
     fn = getattr(tool, "preview", None)
     if not fn: return None
     try: return fn(args, ctx)
     except Exception: return None
 
 def _needs_ask(tool, args: dict, ctx) -> bool:
-    """Whether this call has to be put to the user, as opposed to this tool.
-
-    require_permissions is declared per tool, and per tool is too coarse for
-    most of the tools that declare it: `file` reads far more often than it
-    writes, and the overwhelming majority of shell commands only look at the
-    machine. Asking about every one of them teaches the user to approve without
-    reading, which costs more than it protects -- the prompt that matters is
-    the one that arrives rarely enough to still be read.
-
-    So a tool may define safe(args, ctx) and answer for the specific call. It
-    is a narrowing only: a tool without require_permissions is never asked
-    about either way, and safe() can only take away a prompt the tool itself
-    asked for.
-
-    Fails closed in every direction. No hook, an unreadable answer, an
-    exception -- all of them mean ask, because the cost of a needless prompt is
-    a click and the cost of a missed one is whatever the call did.
+    """Whether this call has to be put to the user, as opposed to this tool. require_permissions is
+    per tool, which is too coarse: `file` reads far more often than it writes. safe(args, ctx) may
+    narrow it, only downward. Fails closed: no hook, no answer and an exception all mean ask.
     """
     if not getattr(tool, "require_permissions", False): return False
     fn = getattr(tool, "safe", None)
@@ -236,13 +177,9 @@ def _needs_ask(tool, args: dict, ctx) -> bool:
     except Exception: return True
 
 def _tail(messages, limit: int = 6) -> str:
-    """The recent turns, rendered for a permission gate.
-
-    `messages` is provider-dialect: text is a string on some providers and a
-    list of blocks on others, so extract rather than assume. Tool calls
-    collapse to their name -- the gate wants to know why a call is happening,
-    not the megabytes an earlier one might have returned.
-    """
+    """The recent turns, rendered for a permission gate. Text is a string on some
+    providers and a list of blocks on others, so extract rather than assume; a
+    tool call collapses to its name."""
     def text_of(c):
         if isinstance(c, str): return c or ""
         if isinstance(c, list):
@@ -266,18 +203,13 @@ def _tail(messages, limit: int = 6) -> str:
 
 def _call_fn(reg: dict, name: str, args: dict, ctx, token: interrupt.Token):
     """The dispatch, with everything bound now rather than when the thread gets
-    around to it.
-
-    A detached call outlives the loop iteration that started it, so free
-    variables read at run time would be the *next* call's name and arguments.
-    """
+    to it: a detached call outlives the loop iteration that started it, so free
+    variables read at run time would be the next call's."""
     cctx = interrupt.ctx_with(ctx, token)
     return lambda: dispatch(reg, name, args, ctx=cctx)
 
-# How often a round reports the rate it is generating at. Often enough to read
-# as live, rarely enough that the readout is not itself a stream: the number is
-# derived from characters, and a figure recomputed every token would jitter far
-# more than the thing it is measuring.
+# How often a round reports the rate it is generating at: often enough to read
+# as live, rarely enough that the readout is not itself a stream.
 RATE_EVERY = 0.35
 
 _BG_NOTE = ("running in the background -- this is not the result. Read it with "
@@ -289,13 +221,9 @@ def _bg_result(job) -> dict:
     return {"result": {**b, "note": _BG_NOTE.format(job=job.id)}}
 
 def _finished_note() -> str:
-    """One line per job that ended since anyone last looked, or "".
-
-    Injected as a user message so the model finds out at all: it has no reason
-    to poll a registry it cannot see, and a job whose result is never read was
-    never worth backgrounding. The result itself is deliberately not inlined --
-    a finished build dropped into the middle of a round is the interruption
-    backgrounding was meant to avoid.
+    """One line per job that ended since anyone last looked, or ""; injected as a
+    user message so the model finds out at all. The result is not inlined: a
+    finished build dropped into a round is the interruption backgrounding avoids.
     """
     done = JOBS.newly_finished()
     if not done: return ""
@@ -307,21 +235,82 @@ def _finished_note() -> str:
             "doing; ignore it if it is not.\n"
             + "\n".join(lines) + "\n</background_jobs>")
 
-# How many rounds a plan may sit untouched before the loop mentions it. Low
-# enough that a forgotten list is caught inside a single detour, high enough that
-# an agent working steadily through one step never sees it: every `todo` call
-# resets the count, so the note only ever reaches an agent that has stopped
-# talking to its own plan.
+# How many rounds a plan may sit untouched before the loop mentions it. Every
+# `todo` call resets the count, so only a stalled plan is mentioned.
 TODO_STALE = 4
 
-def _todo_note(ctx) -> str:
-    """One line about a plan nobody has touched in a while, or "".
 
-    The list is worth nothing if the agent forgets it exists, and it has no way
-    to be reminded on its own -- the file is not in the prompt and the tool
-    result that last held it has scrolled past. So the runtime says so, in the
-    same place and the same voice it reports a finished background job: a note
-    about state, not an instruction, and never a reason to fail a round.
+def _compact_now(messages: list, used: int, limit: int, ctx=None) -> str:
+    """Fold this conversation down to its target, in place. "" when nothing was folded.
+
+    Two lists have to move together and only one of them is here. `messages` is the
+    provider-shaped history generate() is about to send, and the caller holds a
+    reference to it -- rebinding it would leave main.py sending the old one next
+    turn. So it is rewritten in place with a slice assignment, and the records the
+    session keeps are told separately, because the records are what the next reload
+    is built from and they still hold the full original.
+
+    The session is reached through ctx, not imported: this module is also the
+    subagent loop, which runs for a caller with no session at all, and a subagent
+    folding a conversation nobody owns would be writing to disk on behalf of a
+    parent it cannot see.
+    """
+    from handler.agent import compact as c
+    # Read off ctx, where the worker puts it, and fall back to the live session for
+    # a call made outside a turn. Not the other way round: a test, a subagent or a
+    # future frontend that starts its own loop has no global to inherit, and a fold
+    # that quietly did nothing because of that would look like a fold that failed.
+    sess = ctx.get("session") if hasattr(ctx, "get") else None
+    if sess is None:
+        try:
+            from handler.session import naming
+            sess = naming.live()
+        except Exception:
+            pass
+    if sess is None: return ""
+    records = sess.records()
+    steps = c.plan(records, used=used, limit=limit)
+    if not steps: return ""
+    # A fold is a model call, and one takes as long as it takes: seconds on a long
+    # middle. The frontend is told before the wait starts, because a screen that
+    # just stops for no stated reason reads as a hang, and this is the one pause in
+    # a turn where the worker is blocked on something the person cannot see.
+    emit = ctx.get("emit") if hasattr(ctx, "get") else None
+    if callable(emit):
+        try: emit({"type": "compacting", "stage": "start", "folded": steps["folded"],
+                   "freed": steps["freed"]})
+        except Exception: pass
+    try:
+        got = c.summarize(records[steps["start"]:steps["end"]], steps["words"], ctx=ctx)
+    finally:
+        # Whatever happened, and especially if it raised: the frontend's state is not
+        # allowed to be left saying "compacting" because a provider went away.
+        if callable(emit):
+            try: emit({"type": "compacting", "stage": "done"})
+            except Exception: pass
+    if "error" in got:
+        # Reported, not raised: the conversation still works, it is just still long,
+        # and the next round will try again with a slightly different figure.
+        return f"could not compress: {got['error']}"
+    steps["summary"] = got["summary"]
+    # Rebuild the provider messages from the folded records rather than editing the
+    # list: the fold removes assistant/tool groups, and the only thing that knows
+    # how to turn a record list back into this dialect is replay.
+    sess.rewrite(c.fold(records, steps), fold=steps)
+    messages[:] = sess.messages()
+    # The transcript's mark. Says what it did, how much it saved, and -- because it
+    # is the thing a person will want when a summary reads wrong -- that the
+    # original is still on disk.
+    saved = f"{steps['freed']:,} chars freed"
+    before = len(records)
+    after = len(records) - steps["folded"] + 1
+    return (f"compacted {before} records to {after} \u00b7 {saved} \u00b7 "
+            f"the original is in folds/ on this session")
+
+def _todo_note(ctx) -> str:
+    """One line about a plan nobody has touched in a while, or "". The file is not in the prompt
+    and the result that last held it has scrolled past, so the runtime says so. Never a reason
+    to fail a round.
     """
     try:
         from tools.todo import state
@@ -337,15 +326,13 @@ def _todo_note(ctx) -> str:
             "moved on, or clear it if it no longer describes what you are doing.\n"
             "</todo_status>")
 
-# A cancel closes the round off instead of deleting it: every unanswered call
-# gets a result saying why, which is what makes keeping it legal, and the note
-# rides on the user's next message -- two user messages in a row is a 400.
+# A cancel closes the round off, not deletes it: every unanswered call gets a
+# result saying why, which makes keeping it legal. The note rides the next message.
 _INTERRUPTED = "the user interrupted the turn before this call ran"
 _STOPPED = "the user interrupted the turn while this call was running"
 
-# <tagged> like every runtime note (<recall>, <environment>, ...): the tag is
-# the boundary between runtime and conversation. The first line is the sentence
-# frontends draw.
+# <tagged> like every runtime note: the tag is the boundary between runtime and
+# conversation, and the first line is the sentence frontends draw.
 INTERRUPT_NOTE = ("stopped -- the partial turn above was kept\n\n"
                   "<interrupted>\n"
                   "The user stopped you here. Everything above is what you had produced when they\n"
@@ -354,9 +341,8 @@ INTERRUPT_NOTE = ("stopped -- the partial turn above was kept\n\n"
                   "and read what they say next as a correction to it.\n"
                   "</interrupted>")
 
-# Shaped like INTERRUPT_NOTE, round closed off rather than deleted: half a
-# reply still carries on. Nobody chose this stop, so the model is told to
-# continue, not to expect an instruction.
+# Shaped like INTERRUPT_NOTE, round closed off rather than deleted: half a reply
+# still carries on. Nobody chose this stop, so the model is told to continue.
 LOST_NOTE = ("connection lost -- the partial turn above was kept\n\n"
              "<connection_lost>\n"
              "The connection to the provider dropped part-way through this turn. Everything\n"
@@ -364,17 +350,21 @@ LOST_NOTE = ("connection lost -- the partial turn above was kept\n\n"
              "Carry on from there rather than starting the turn over.\n"
              "</connection_lost>")
 
+def _peer_note(mail: list[dict]) -> str:
+    """Another agent's words, marked as coming from one.
+
+    Its own block rather than folded in with the notes a person wrote: the tag is
+    the only thing telling the model these words are a peer's and not the
+    operator's, and it has to survive being read back later.
+    """
+    if not mail: return ""
+    return "\n\n".join("agent %s sent this while you were working\n\n%s"
+                        % (r.get("from_name", "?"), peers.render(r)) for r in mail)
+
 def _steer_note(typed: list[dict]) -> str:
-    """The user's own words, arriving mid-turn.
-
-    Tagged for the same reason the others are, and tagged *differently* for one
-    that matters more: this is the only injected block that is not the runtime
-    speaking. Untagged it reads as an answer to the tool result above it, which
-    is exactly what it is not.
-
-    An attachment is named in the text and carried beside it: the pictures ride
-    on the same message (see the caller), and a model reading a bare tag with
-    two images under it has no way to tell which of them the words are about.
+    """The user's own words, arriving mid-turn. Tagged differently from the runtime notes: this
+    is the only injected block a person wrote, and untagged it reads as an answer to the tool
+    result above it. An attachment is named in the text and carried beside it.
     """
     parts = []
     for m in typed:
@@ -387,14 +377,9 @@ def _steer_note(typed: list[dict]) -> str:
             "<user_message>\n" + "\n\n".join(parts) + "\n</user_message>")
 
 def _closing_pairs(parsed: list, results: list, running=None) -> list:
-    """The round's (call, result) pairs, with one invented for every call that
-    never got a real one.
-
-    Results are appended in call order, so everything from len(results) on is
-    unanswered: the call that was running when the key was pressed, if there was
-    one, and behind it the calls that had not been reached yet. They are told
-    apart because they are different facts -- one may have changed something on
-    the machine before it was cut off, and the others certainly did not.
+    """The round's (call, result) pairs, with one invented for every call that never got a real
+    one. Results are appended in call order, so from len(results) on is unanswered, and the
+    running call is told apart from those never reached: it may have changed the machine.
     """
     return [(c, {"error": _STOPPED if c is running else _INTERRUPTED})
             for c in parsed[len(results):]]
@@ -406,12 +391,8 @@ def _span(start: float, end: float) -> float:
 def _rate(phase: str, think_chars: int, reply_chars: int,
           began: float, think_end: float, reply_end: float) -> dict:
     """The rate of the phase currently running, estimated from its characters.
-
-    A live figure cannot be anything else: the provider bills the round when the
-    round is over, and a spinner that says nothing until then is exactly the
-    minute nobody can account for. It is flagged as an estimate the whole way to
-    the screen, and the measured number takes its place as soon as it lands.
-    """
+    A live figure cannot be anything else, since the provider bills the round
+    when it is over. Flagged as an estimate until the measured number lands."""
     from handler import context
     if phase == "thinking":
         chars, secs = think_chars, _span(began, think_end)
@@ -423,116 +404,113 @@ def _rate(phase: str, think_chars: int, reply_chars: int,
 
 def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, settings: dict = None,
              system="", cancelled=None, ask=None, auto=None, allow: list = None, extra: dict = None,
-             provider_obj=None, detach=None, steer=None):
-    """The agent loop. Also the subagent loop -- the last three arguments are
-    the whole difference.
-
-    system is one string or a list of them. A list stays a list all the way to
-    the provider, which decides what a segment is: a separate system message on
-    ollama and openai, a separate system block on anthropic, which has no
-    system role to put a message in.
-
-    allow  names the tools this run may call, or None for everything the model
-           can see. An empty list is a real answer, not a missing one: it means
-           no tools at all, which turns the loop into a single completion.
-    extra  is tools built at call time rather than loaded from disk, merged in
-           after the filter so they cannot be filtered out. A schema-forcing
-           submit_result is one; nothing about it needs to be special-cased,
-           because a Tool assembled in memory is a Tool.
-    provider_obj takes a provider instance instead of the shared singleton.
-           Those singletons carry per-turn state -- Anthropic._thinking is
-           handed from stream() to assistant_message() on the instance -- so
-           two runs sharing one would trade thinking blocks. Nothing runs
-           concurrently yet; the seam is here so that when it does, this is
-           already the place it plugs into.
-    detach is a threading.Event the frontend sets to push the call currently
-           running into the background. An Event rather than a predicate
-           because it is consumed: interrupt.run clears it, so one press moves
-           one call. Subagents pass None -- there is no user watching a nested
-           run to press anything.
-    steer  is asked for whatever the user typed while this run was going, and
-           is asked at one place only: after a round's tool results, which is
-           the single point a user message is legal for every provider. It
-           returns a list and clears itself, so a message is spoken once. None
-           for subagents, for the same reason detach is.
-
-    cancelled is read everywhere something is in flight, not only between
-    steps: the request while it is opening, each streamed chunk, between tool
-    calls, and -- through a thread -- during one. A stop that only lands at
-    boundaries is not a stop, because the thing anyone wants to stop is the
-    ninety-second call, and that is precisely the part with no boundaries in
-    it.
+             provider_obj=None, detach=None, steer=None, peer_sid=None):
+    """The agent loop for a whole turn, and the subagent loop. Yields typed chunks: round, thinking,
+    content, tool_calls, model, usage, rate, assistant, tool_output, done, background, retry, cancelled,
+    failed, notice, peer_waiting. mark is the round's rollback point; steer is asked once per round,
+    after the results. peer_sid is the session whose mailbox the round seam drains, so a message from
+    another agent is handed over as soon as a round ends rather than when the turn does.
     """
     from handler import config           # imported late: config imports providers
     settings = settings or {}
-    # Defaults live here, not in the signature: this list is appended to and
-    # truncated in place, and a mutable default is shared across every call.
+    # Default here, not in the signature: the list is appended to and truncated
+    # in place, and a mutable default is shared across every call.
     if messages is None: messages = [{"role": "user", "content": "hey"}]
     provider = settings.get("provider", "ollama")
     p = provider_obj or providers.get(provider)
     model = settings.get("model") or p.default_model
     p.setup(API_KEY)
-    # One canonical rung in, whatever this model actually understands out. Read
-    # per turn rather than per run so a knob learned to be unsupported mid-run
-    # stays dropped, and so hand-written params keep winning over the table.
+    # One canonical rung in, whatever this model understands out. Read per turn, so a
+    # knob learned unsupported mid-run stays dropped and hand-written params win.
     params = effort.resolve(provider, p.name, model, settings.get("effort", ""),
                             settings.get("params"), drop=config.quirks(provider, model),
                             override=settings.get("effort_map"),
-                            # What the endpoint says about this model, where it
-                            # says anything: a model that has told us it cannot
-                            # think is sent no thinking parameter at all, rather
-                            # than the one the table guessed its family takes.
+                            # What the endpoint says about this model: one that said
+                            # it cannot think is sent no thinking parameter at all.
                             thinks=config.can_think(provider, model))
-    # Default sighted when a provider does not declare it: an unexpected 400
-    # is obvious, whereas silently withholding the cameras from a capable
-    # model just looks like the agent got stupid.
+    # Default sighted when a provider does not declare it: an unexpected 400 is
+    # obvious, whereas withheld cameras silently look like a stupid agent.
     vision = settings.get("vision", getattr(p, "vision", True))
     reg = _visible(registry(), vision)
     if allow is not None: reg = {k: t for k, t in reg.items() if k in allow}
     if extra: reg = {**reg, **extra}
     tools = to_provider(tools=reg, provider=p.name)
     stop = cancelled or (lambda: False)
-    # Rounds since the plan was last spoken to. Counted here rather than in the
-    # tool because the tool only hears about the calls it receives, and the
-    # interesting number is how many rounds went by without one.
+    # Chunks a helper wanted sent but cannot yield itself: a function called from
+    # inside this loop is not this generator, so it appends here and the loop drains
+    # it. A fold is the only producer, because it is the only thing in a round that
+    # blocks on a model the caller cannot see.
+    outbox: list[dict] = []
+    ctx = ctx if isinstance(ctx, dict) else {}
+    ctx["emit"] = outbox.append
+    # Rounds since the plan was last spoken to. Counted here, not in the tool: the
+    # interesting number is how many rounds went by without a todo call.
     since_todo = 0
-    # Rounds lost to a connection that dropped before producing anything: the
-    # one failure that retries invisibly, and the one a per-round counter would
-    # retry forever.
+    # Rounds lost to a connection that dropped before producing anything: the one
+    # failure that retries invisibly, so a per-round counter would retry forever.
     stream_retries = 0
+    # Whether a peer message is waiting. Asked on the idle poll for the whole round, because
+    # a worker sits through a long tool call with nothing on stdout and the main loop that
+    # would drain the mailbox is parked in here for all of it. Answered at the round seam
+    # below, which is where a message is legal for every provider: waiting here only means the
+    # person is told now rather than when the round happened to end.
+    waiting = []
+    def peek():
+        nonlocal waiting
+        if peer_sid and not waiting: waiting = peers.drain(peer_sid)
 
     while True:
-        # Rollback point for this round. A cancel has to rewind to here: an
-        # assistant message whose tool_calls have no matching results is
-        # rejected on the next request. Completed earlier rounds are kept.
+        # Rollback point for this round. A cancel rewinds to here: an assistant
+        # message whose tool_calls have no results is rejected. Earlier rounds stay.
         mark = len(messages)
         yield {"type": "round"}
         thinking, content, calls, last = "", "", [], None
-        # Per round, not per run: the prompt count reported on the next request
-        # already includes everything this one added, so keeping the old numbers
-        # around would only ever mean reporting a stale round's.
+        # Per round, not per run: the count on the next request already includes
+        # everything this one added, so old numbers would only be a stale round's.
         usage = {}
-        # From asking to the last chunk, tool calls excluded -- a round that
-        # spent four minutes in a shell was not generating slowly, so the rate
-        # covers the model's time, not the tools'. The pre-token wait is inside
-        # it on purpose: that is time the user watched.
+        # From asking to the last chunk, tool calls excluded: a round that spent four
+        # minutes in a shell was not generating slowly. Pre-token wait is included.
         began = time.monotonic()
-        # Old screenshots out before the request is built, not after the reply.
-        # This is the single biggest thing between a tool finishing and the next
-        # token arriving: the whole transcript goes back up every round, and a
-        # computer-use transcript is mostly base64. See handler/agent/images.py.
+        # Told, not shown: the words go in at the round seam below, where a user message is
+        # legal for every provider, and this is only the round that is still running saying
+        # there is something to carry into the one after it.
+        got_mail = []
+        if waiting:
+            got_mail, waiting = waiting, []
+            for rec in got_mail:
+                yield {"type": "peer_waiting", "from_peer": rec.get("from"),
+                       "peer_name": rec.get("from_name"), "n": len(got_mail)}
+        # Old screenshots out before the request is built: the whole history goes back up
+        # every round, and a computer-use one is mostly base64.
         images.evict(messages, keep=int(settings.get("keep_images", images.DEFAULT_KEEP)))
-        # Opening the request is itself a wait, and cancelling abandons the
-        # socket rather than waiting on a read nobody reads. A never-delivered
-        # request is retried: sending it twice costs nothing, a lost turn does.
+        # Before the request, and only once per round: a conversation over its trigger
+        # folds now rather than waiting for the provider to refuse it. The figure is
+        # the last measured prompt when there is one, because a character count over
+        # a conversation full of tool results is the least reliable number here.
+        limit = compact.trigger(settings)
+        if limit:
+            used = int((usage or {}).get("in") or 0) or compact.tokens(messages)
+            folded = _compact_now(messages, used, limit, ctx=ctx)
+            # Both halves of the fold go out before the notice: start, then done,
+            # then what it bought.
+            for ev in outbox: yield ev
+            outbox.clear()
+            if folded and "could not" not in folded:
+                yield {"type": "notice", "text": folded, "compacted": True}
+        # Opening the request is itself a wait, and cancelling abandons the socket
+        # rather than waiting on a read nobody reads.
         attempt, stream, first = 0, None, None
+        # Folds spent answering 413s this round. A conversation refused more times
+        # than this is not going to fit, and folding further only destroys context
+        # to prove it.
+        MAX_FOLDS = 4
+        folds = 0
         while True:
             state, opened = interrupt.run(lambda: _opened(p, provider, model, messages, tools, system, params),
                                           stop=stop)
             if state != "done":
-                # Nothing was produced -- the request had not even been answered
-                # -- so there is nothing to keep and nothing to tell the model
-                # about. The delete is a no-op here and stands as the guarantee.
+                # Nothing was produced, so nothing to keep and nothing to tell the
+                # model about. The delete is a no-op here and stands as the guarantee.
                 del messages[mark:]
                 yield {"type": "cancelled", "messages": messages}
                 return
@@ -540,43 +518,76 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
             if kind != "err":
                 stream, first = payload
                 break
-            # Anything the provider actually read and refused is final: it will
-            # be refused identically next time, and the user is owed the reason
-            # now rather than after four backoffs. See _transient.
+            # The window ran out. This is the one refusal a fold can answer, so it is
+            # answered rather than raised: before this, 413 was final and a long
+            # conversation was simply over.
+            #
+            # Not gated on a configured window. A provider that refuses has just told
+            # us the conversation is too long, which is better information than any
+            # figure in config, and the point is that a model whose size nobody wrote
+            # down still recovers.
+            #
+            # Repeated, not once. One fold cuts to a target derived from what is in
+            # hand, and a provider's real window is not always that big: a conversation
+            # refused at 90k that folds to 73k is still refused. So it folds again, as
+            # long as each fold is still freeing something. MAX_FOLDS is the backstop
+            # against a fold that frees nothing looping forever.
+            if _status_of(payload) == 413 and folds < MAX_FOLDS:
+                before = compact.tokens(messages)
+                if folds == 0:
+                    yield {"type": "notice", "text": "over the window: compressing before retrying",
+                           "compacted": True}
+                # Half of what is in hand: this request was refused at this size, so a
+                # fold that halves it is the smallest one that can plausibly clear the
+                # window it was refused by.
+                said = _compact_now(messages, used=before, limit=max(before // 2, 1), ctx=ctx)
+                for ev in outbox: yield ev
+                outbox.clear()
+                folds += 1
+                after = compact.tokens(messages)
+                # Progress is the only reason to go round again. A fold that frees
+                # nothing would ask the same provider the same question forever.
+                if after < before:
+                    attempt = 0
+                    continue
+                # Nothing left to fold: fall through and let it be final.
+            # What the provider read and refused is final: identical next time, and
+            # the user is owed the reason now rather than after four backoffs.
             if attempt >= RETRIES or not _transient(payload): raise payload
             secs = _backoff(attempt, payload)
             attempt += 1
-            # Said out loud. A silent retry and a hung app look identical from
-            # the outside, and the one thing the person watching wants to know
-            # is whether anything is still going to happen.
+            # Said out loud: a silent retry and a hung app look identical from the
+            # outside, and the watcher wants to know whether anything will happen.
             yield {"type": "retry", "attempt": attempt, "of": RETRIES,
                    "secs": round(secs, 1), "error": str(payload)}
             if not _wait(secs, stop):
                 del messages[mark:]
                 yield {"type": "cancelled", "messages": messages}
                 return
-        # Thinking and reply are clocked apart -- thinking's clock starts at
-        # request-open, the silence before the first thought is real stall -- so
+        # Thinking and reply are clocked apart, thinking from request-open, so
         # together they answer where the round's seconds went.
         think_chars, reply_chars = 0, 0
         think_end, reply_end = 0.0, 0.0
         phase, tick = "", began + RATE_EVERY
 
-        # The primed Delta is put back in front. stream itself stays the
-        # generator, so a cancel below still has something to close().
-        # Wrapped, because the connection can go here too -- and here it has
-        # already put words on the screen. What that costs is decided below;
-        # what matters at this line is that a read error is not a traceback.
+        # The stream goes on its own thread and the caller polls it, so a cancel lands here
+        # mid-read the way it lands on a tool, not only when the next chunk turns up. Stopped
+        # is this turn being called off; anything else is still the link's problem, and
+        # _transient decides whether it is one that is worth sending again.
         lost = None
+        source = interrupt.stream(stream, stop=stop, first=first, peek=peek, every=PEEK_EVERY)
         try:
-            for d in itertools.chain([first] if first is not None else [], stream):
-                if stop():
-                    stream.close()
-                    break
+            for d in source:
+                # Not a provider frame: something said while the loop waited, which is a peer
+                # having spoken. Passed on and nothing else, since it is not part of the
+                # round -- the round is what the model sent, and this is what somebody else
+                # did while it was sending it.
+                if isinstance(d, interrupt.Notice):
+                    yield d.what
+                    continue
                 last = d.raw
-                # Merged rather than replaced: the two halves of the count arrive on
-                # different frames, and on anthropic they arrive at opposite ends of
-                # the stream.
+                # Merged, not replaced: the two halves of the count arrive on
+                # different frames, on anthropic at opposite ends of the stream.
                 usage.update(providers.usage_of(d.raw))
                 now = time.monotonic()
                 if d.thinking:
@@ -588,32 +599,34 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
                     content += d.content
                     reply_chars, reply_end, phase = reply_chars + len(d.content), now, "content"
                 if d.tool_calls:
-                    # Complete calls by contract: providers whose arguments arrive
-                    # as JSON fragments assemble them before emitting a Delta.
+                    # Complete calls by contract: a provider whose arguments arrive
+                    # as fragments assembles them before emitting a Delta.
                     yield {"type": "tool_calls", "text": d.tool_calls}
                     calls.extend(d.tool_calls)
                     reply_end, phase = now, "content"
                 # A rate while it is still happening, estimated from characters
                 # because that is all anyone has until the provider bills the round.
-                # Marked as an estimate all the way out, and replaced by the measured
-                # figure the moment there is one.
                 if phase and now >= tick:
                     tick = now + RATE_EVERY
                     yield _rate(phase, think_chars, reply_chars, began, think_end, reply_end)
+        except interrupt.Stopped:
+            # The read was still waiting when the cancel arrived, and the socket shutdown
+            # is what ended it. A cancelled round, not a lost one.
+            lost = None
         except Exception as e:
-            # Only a network failure is caught. Anything else is a bug in a
-            # provider or in the loop, and swallowing it into a friendly
-            # "connection lost" would hide it behind the one explanation nobody
-            # investigates.
+            # Only a network failure is caught: a provider or loop bug swallowed into
+            # "connection lost" hides behind the one explanation nobody investigates.
             if not _transient(e): raise
             lost = e
             try: stream.close()
             except Exception: pass
-        # How long the generating took, split the same way the live rate splits
-        # it, and reported with the counts rather than derived from them later:
-        # the text is in hand here, and nowhere downstream sees the clock.
-        # Measured before the cancel is acted on, because a stopped round still
-        # cost what it cost and the numbers are only in hand here.
+        finally:
+            # Closed rather than left to the collector: the generator's cleanup is what shuts
+            # the socket and reaps the producer thread, and an exception on the way out must
+            # not be what decides whether that happens.
+            source.close()
+        # How long generating took, reported with the counts since the text is in hand
+        # here. Measured before the cancel is acted on: a stopped round still cost.
         spent = {"secs": round(time.monotonic() - began, 3),
                  "thinking_chars": think_chars, "reply_chars": reply_chars,
                  "thinking_secs": round(_span(began, think_end), 3),
@@ -621,19 +634,16 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
 
         if lost is not None:
             if thinking or content:
-                # Kept, like an interrupted round: half a reply is still a reply.
-                # The calls go -- none of them ran -- and anthropic additionally
-                # rejects a tool_use turn without the signed thinking behind it.
+                # Kept, like an interrupted round: half a reply is still a reply. The calls
+                # go, none ran, and anthropic rejects a tool_use turn without its thinking.
                 if usage: yield {"type": "usage", "usage": dict(usage), "model": model, **spent}
                 messages.append(p.assistant_message(thinking, content, []))
                 yield {"type": "assistant", "thinking": thinking, "content": content, "tool_calls": []}
                 yield {"type": "failed", "messages": messages, "note": LOST_NOTE,
                        "error": str(lost), "kept": True}
                 return
-            # Not a word arrived before it dropped, so there is nothing on
-            # screen to preserve and nothing for a note to point at. That makes
-            # it the same failure as a request that never opened, and it is
-            # retried like one.
+            # Not a word arrived, so there is nothing to preserve and nothing for a
+            # note to point at: the same failure as a request that never opened.
             del messages[mark:]
             if stream_retries >= RETRIES: raise lost
             secs = _backoff(stream_retries, lost)
@@ -649,27 +659,23 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
         stream_retries = 0
 
         if stop():
-            # Stopped mid-reply: what streamed is kept, half a plan is still the
-            # plan the user is about to talk about. The calls are dropped, the
-            # one thing that cannot be kept -- none ran, and anthropic wants the
-            # signed thinking behind any tool_use it replays.
+            # Stopped mid-reply: what streamed is kept, half a plan is still the plan.
+            # Calls drop, none ran, and anthropic needs the signed thinking behind them.
             if thinking or content:
                 if usage: yield {"type": "usage", "usage": dict(usage), "model": model, **spent}
                 messages.append(p.assistant_message(thinking, content, []))
                 yield {"type": "assistant", "thinking": thinking, "content": content, "tool_calls": []}
                 yield {"type": "cancelled", "messages": messages, "note": INTERRUPT_NOTE}
             else:
-                # Not a word out of it yet. Nothing worth keeping, and a note
-                # saying "you were stopped here" with nothing above it to point
-                # at is worse than silence.
+                # Not a word out of it yet, so nothing worth keeping: a note saying
+                # "you were stopped here" with nothing above it is worse than silence.
                 del messages[mark:]
                 yield {"type": "cancelled", "messages": messages}
             return
 
         yield {"type": "model", "text": str(last)}
-        # What the round cost, as soon as it is known rather than at the end of
-        # the run: a tool loop can go on for minutes, and a context readout that
-        # only moves when the agent stops answering is not a gauge.
+        # What the round cost, as soon as it is known rather than at the end of the
+        # run: a tool loop can go on for minutes, and a stalled gauge is no gauge.
         if usage: yield {"type": "usage", "usage": dict(usage), "model": model, **spent}
         messages.append(p.assistant_message(thinking, content, calls))
         yield {"type": "assistant", "thinking": thinking, "content": content, "tool_calls": calls}
@@ -683,15 +689,9 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
         results = []
 
         def close_out(running=None):
-            """End the turn here without leaving the round unusable.
-
-            The assistant message holding these tool_calls is already in the
-            list and cannot be taken back -- it carries the signed thinking that
-            produced the calls, and on anthropic that is not reconstructible.
-            What makes keeping it legal is that every tool_use gets an answer,
-            so the invented results go in beside the real ones and the round is
-            as complete as any other. The calls that already ran were reported
-            as they finished; only the invented ones are announced here.
+            """End the turn here without leaving the round unusable. The assistant message holding
+            these tool_calls cannot be taken back: it carries the signed thinking that produced
+            the calls. Every tool_use gets an answer, so invented results go in beside the real ones.
             """
             extra = _closing_pairs(parsed, results, running)
             messages.extend(p.result_messages(results + extra))
@@ -700,33 +700,22 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
             yield {"type": "cancelled", "messages": messages, "note": INTERRUPT_NOTE}
 
         for call in parsed:
-            # Cheap pre-check. The call itself is watched too, from the thread
-            # below, but a cancel that arrived between calls should not pay for
-            # starting one first.
+            # Cheap pre-check: a cancel that arrived between calls should not pay for
+            # starting one first. The call itself is watched from the thread below.
             if stop():
                 yield from close_out()
                 return
-            # Whether to ask is the tool's own (require_permissions, narrowed per
-            # call by its safe(); see _needs_ask). Between calls is the last moment
-            # anything can be stopped. A refusal is reported as a failed call:
-            # the assistant message already holds these tool_calls.
+            # Whether to ask is the tool's own; a refusal reports as a failed call.
             # reg, not registry(): what was offered is what may be dispatched.
             tool = reg.get(call.name)
-            # `background` rides in as an ordinary argument and comes back out
-            # before the handler, which knows nothing of it. Guessed onto a tool
-            # that never declared it, it is dropped: a guess gets the click,
-            # not a job id.
+            # `background` rides in as an ordinary argument and comes back out before
+            # the handler. Guessed onto a tool that never declared it, it is dropped.
             args = dict(call.args or {})
             wants_bg = bool(args.pop("background", False)) and getattr(tool, "backgroundable", False)
             token = interrupt.Token()
             fn = _call_fn(reg, call.name, args, ctx, token)
-            # A call can be gated three ways: the user (ask), a model that
-            # screens it first (auto), or not at all. Auto is a net, not a
-            # verdict: a call the gate flags still goes to the user, with the
-            # reason riding the prompt -- the gate's job is catching what
-            # deserves a look, not having the last word. Only when nobody can
-            # be asked does the flag refuse. A refusal is reported as a failed
-            # call -- the assistant message already holds these calls.
+            # Gated three ways: the user (ask), a model that screens first (auto), or not
+            # at all. Auto is a net, not a verdict: a flagged call still goes to the user.
             needed = tool is not None and _needs_ask(tool, args, ctx)
             denied = None
             if needed and auto is not None:
@@ -742,10 +731,8 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
             if denied:
                 result = {"error": denied}
             elif wants_bg:
-                # Never asked, never waited on: the job starts and the round
-                # moves on. Permission is still asked above first, because a
-                # call the user would have refused is no more acceptable for
-                # being out of sight.
+                # Never waited on: the job starts and the round moves on. Permission
+                # was still asked above, since out of sight is not out of scope.
                 job = JOBS.start(call.name, args, fn)
                 yield {"type": "background", "job": job.brief()}
                 result = _bg_result(job)
@@ -754,51 +741,76 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
                 if state == "done":
                     result = value
                 elif state == "cancelled":
-                    # Stopped mid-flight: the result says so -- it may have
-                    # landed, a half-finished click cannot be taken back -- and
+                    # Stopped mid-flight: the result says so, it may have landed, and
                     # the token is already set, so watching tools stop.
                     yield from close_out(running=call)
                     return
                 else:
-                    # Detached. The same thread keeps running under a job id,
-                    # and the model is told what it got instead of the answer.
+                    # Detached: the same thread keeps running under a job id, and the
+                    # model is told what it got instead of the answer.
                     job = JOBS.adopt(call.name, args, value)
                     yield {"type": "background", "job": job.brief()}
                     result = _bg_result(job)
             yield {"type": "tool_output", "name": call.name, "result": result}
+            # Something sent to a peer is drawn like something received from one: the
+            # buddy row, and a head saying who to whom. Without this a sent message
+            # leaves no mark in the conversation it came from, and the only evidence it
+            # happened is a tool result nobody reads twice.
+            if call.name == "roster" and isinstance(result.get("result"), dict):
+                for sent in (result["result"].get("sent") or []):
+                    # No peer_in: this one went out, so the main loop must not record it
+                    # as a message that arrived. The head says which way it went.
+                    yield {"type": "peer", "text": "you to %s\n%s" % (sent.get("name", "?"), args.get("body", ""))}
             results.append((call, result))
             if call is not parsed[-1]: time.sleep(0.15)
-        # Handed over as a round, not per call: anthropic and gemini require
-        # every result from one round batched into a single message.
+        # Handed over as a round, not per call: anthropic and gemini require every
+        # result from one round batched into a single message.
         messages.extend(p.result_messages(results))
-        # Runtime notes land after the results -- the only place a user message
-        # is legal for every provider -- and both in one message, not two: two
-        # user messages in a row is a 400, and they are one kind of thing to the
-        # model anyway (the runtime saying what changed while it was busy).
+        # Runtime notes land after the results, the only place a user message is legal
+        # for every provider, and both in one message: two in a row is a 400.
         stale = _todo_note(ctx) if since_todo >= TODO_STALE else ""
         if stale: since_todo = 0
-        # Anything typed while this round was running goes in first and in the
-        # same message. First because it is the only part of it a person wrote
-        # and the runtime's housekeeping should not be read before them; same
-        # message because it is a user message either way, and two in a row is
-        # the 400 this seam exists to avoid.
+        # Anything typed while this round ran goes in first and in the same message: a
+        # person wrote it, and two user messages in a row is the 400 this seam avoids.
         typed = (steer() or []) if steer else []
         said = _steer_note(typed) if typed else ""
+        # Peer mail rides the same seam and the same message, for the same reason. The
+        # collect has to happen here and not on the main loop: that loop is parked in
+        # this function for the whole turn, so a message that arrives while a tool is
+        # running waits for the turn to end unless the seam reads the mailbox itself.
+        # Any round that ends hands the model what it got, so the words are not spoken
+        # into this turn by force: this is a message read when the round is already over,
+        # which is the same point a person's own typed words arrive at. Nothing is cut
+        # short for it and nothing is re-run because of it.
+        # Acked here and only here, once the mail is in the message above the ack, so a
+        # turn that ends before that line hands it back rather than swallowing it. Its
+        # own block, so a peer's words never read back as the person's.
+        mail = got_mail or (peers.drain(peer_sid) if peer_sid else [])
+        if mail: peers.ack([r.get("id") for r in mail])
+        told = _peer_note(mail) if mail else ""
         runtime = "\n\n".join(n for n in (_finished_note(), stale) if n)
-        note = "\n\n".join(n for n in (said, runtime) if n)
-        # Steered attachments ride the same message, through the adapter (three
-        # dialects, three shapes), and are dropped for a model that cannot see:
-        # the names stay in the note, which beats a 400 that ends the run.
+        note = "\n\n".join(n for n in (said, told, runtime) if n)
+        # Steered attachments ride the same message through the adapter, and are
+        # dropped for a blind model: the names stay in the note, beating a 400.
         steer_images = [a["b64"] for m in typed for a in (m.get("images") or [])] if vision else []
         if note:
             messages.append(p.user_message(note, steer_images) if steer_images
                             else {"role": "user", "content": note})
-            # text is what the conversation gets and what the record keeps.
-            # show is what the frontend draws, and it is deliberately only the
-            # runtime half: the frontend printed the user's own line the moment
-            # they typed it, and sending it back would print it twice.
-            yield {"type": "notice", "text": note, "show": runtime, "from_user": bool(said),
-                   # Named on the record for the same reason they are named in
-                   # the note: a reopened conversation has to say a picture was
-                   # sent here, and the record is the only thing that can.
+            # text is the conversation and the record; show is what the frontend draws,
+            # only the runtime half, since it already printed the user's own line.
+            # A peer's message is neither: its head goes to the frontend as its own
+            # notice, so another agent's words are not drawn as the person's.
+            yield {"type": "notice", "text": note,
+                   "show": "\n\n".join(n for n in (runtime, told) if n),
+                   "from_user": bool(said),
+                   # Named on the record for the same reason as in the note: a reopened
+                   # conversation has to say a picture was sent here.
                    "images": [a for m in typed for a in (m.get("images") or [])] if steer_images else []}
+            for rec in mail:
+                # Its own state, not `notice`: the frontend gives it the buddy mark and
+                # the peer colour, so a peer's message is not read as a note about this
+                # machine. Head first, body after a newline, which is the shape the
+                # transcript folds into a row that opens.
+                yield {"type": "peer", "text": f"{peers.head(rec)}\n{rec.get('body', '')}",
+                       "show": peers.head(rec), "peer_in": True,
+                       "from_peer": rec.get("from"), "peer_name": rec.get("from_name")}

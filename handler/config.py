@@ -4,37 +4,17 @@ from pathlib import Path
 from handler.agent import effort, providers
 from handler.session import store
 
-# always_skills: names of skills whose bodies go into the system prompt at
-# startup instead of waiting behind the skill tool. Seeded empty so the key is
-# in the file to fill in, and so a bundled skill can be forced on without
-# editing a file the next update overwrites. A skill can also ask for this
-# itself with `always: true` in its own frontmatter.
+# always_skills: skills forced into the system prompt at startup rather than behind the
+# skill tool, so an update cannot overwrite the choice. `always: true` also works.
 DEFAULTS = {"active": "ollama", "vision": "", "providers": {}, "always_skills": [],
             "effort": ""}
 
 def path() -> Path: return store.home() / "config.json"
 
 def _seed() -> dict:
-    """The file written on first run.
-
-    Every registered provider gets a blank entry, so the config reads as a
-    fill-in-the-blank template instead of a two-line stub. Blank is not the
-    same as absent for the two keys seeded here -- settings() skips an empty
-    model and api_key() falls through an empty key -- so a seeded entry
-    behaves exactly like no entry until something is typed into it. vision is
-    deliberately not seeded: it is the one field where a written value would
-    override the provider's own, and openrouter's False has to survive.
-    quirks and effort_map are not seeded either -- both are written only when
-    something is learned or overridden, and absent means neither has happened.
-
-    The reasoning effort level a conversation is *running* at is not here: it
-    belongs to that conversation, so it lives in the session's meta.json next
-    to provider and model. What is here is the level the next conversation
-    starts on -- otherwise the setting dies with every restart and the answer
-    to "what effort am I on" is "whatever the provider does by default", which
-    is not a setting anyone chose. Per provider there are two more: effort_map,
-    your correction to where a rung sits, and quirks, what this endpoint has
-    already refused.
+    """The file written on first run: every registered provider as a blank entry, so it reads as a
+    fill-in-the-blank template. Blank is not absent: settings() skips an empty model and api_key()
+    falls through an empty key. vision is not seeded, and quirks and effort_map are learned.
     """
     return {"active": DEFAULTS["active"], "vision": "", "always_skills": [], "effort": "",
             "providers": {name: {"model": "", "api_key": "", "params": {}}
@@ -42,15 +22,14 @@ def _seed() -> dict:
 
 def load() -> dict:
     """A missing or unparseable config seeds itself on disk rather than living
-    only in memory, so the file is there to hand-edit from first boot instead
-    of appearing once some setting happens to be changed through the UI."""
+    only in memory, so the file is there to hand-edit from first boot."""
     cfg = store.read_json(path())
     return {**DEFAULTS, **cfg} if cfg else save(_seed())
 
 def save(cfg: dict) -> dict:
     store.write_json(path(), cfg)
-    # The file holds API keys in plaintext. 0600 is the whole protection, so
-    # it is reapplied on every write rather than trusted to stick.
+    # The file holds API keys in plaintext, so 0600 is reapplied on every write
+    # rather than trusted to stick.
     os.chmod(path(), 0o600)
     return cfg
 
@@ -59,7 +38,7 @@ def entry(name: str, cfg: dict = None) -> dict:
 
 def settings(cfg: dict = None) -> dict:
     """The settings dict generate() takes. Model is omitted when unset so the
-    provider's own default applies rather than an empty string."""
+    provider's own default applies."""
     cfg = cfg or load()
     name = cfg.get("active") or "ollama"
     e = entry(name, cfg)
@@ -75,18 +54,13 @@ def settings(cfg: dict = None) -> dict:
 
 def default_effort(cfg: dict = None) -> str:
     """The rung a new conversation starts on. Blank means the provider's own
-    default, which is what an account that has never set one gets."""
+    default, which is what an account that never set one gets."""
     level = ((cfg or load()).get("effort") or "").strip()
     return level if level in effort.LADDER else ""
 
 def set_default_effort(level: str) -> dict:
-    """Remember the rung, so the next session opens on it instead of on
-    whatever the provider does when told nothing.
-
-    Written whenever a level is chosen, rather than through a setting of its
-    own: the choice has already been made by then, and a default that has to be
-    set twice is a default nobody has set.
-    """
+    """Remember the rung, so the next session opens on it. Written whenever a level is
+    chosen: a default that has to be set twice is a default nobody set."""
     level = (level or "").strip()
     if level and level not in effort.LADDER:
         raise ValueError(f"unknown effort: {level!r} (have {list(effort.LADDER)})")
@@ -95,27 +69,37 @@ def set_default_effort(level: str) -> dict:
     cfg["effort"] = level
     return save(cfg)
 
-def permission_mode(cfg: dict = None) -> str:
-    """Which of ask | auto | off governs tool permission prompts.
 
-    ask is default: the user decides each call that needs one. auto hands the
-    calls that would prompt to a small model (see permission_decider); off
-    never asks anything. Unknown values land on ask, the safe read.
+def set_compact(value) -> dict:
+    """Where the conversation folds: None for the automatic ratio, a number over 1
+    for a token count, under 1 for a share of the window, 0 to never fold.
+
+    One key for all three on purpose. A token limit is the thing a person actually
+    knows ("keep it under 200k"); a share is the thing that survives a model swap.
+    Storing whichever was said and reading it by size means /compress takes both
+    without a second setting to keep in step with the first.
+    """
+    cfg = load()
+    if value is None: cfg.pop("compact", None)
+    else: cfg["compact"] = value
+    return save(cfg)
+
+
+def permission_mode(cfg: dict = None) -> str:
+    """Which of ask | auto | bypass | off governs tool permission prompts. ask (the default) puts each
+    call to the user; auto hands them to a small model; bypass asks nothing either but keeps the
+    irreversible calls and puts those to the user; off never asks. Unknown values land on ask.
     """
     p = (cfg or load()).get("permission")
     if isinstance(p, dict):
         mode = (p.get("mode") or "ask").strip().lower()
     else:
         mode = (p or "ask").strip().lower()
-    return mode if mode in ("ask", "auto", "off") else "ask"
+    return mode if mode in ("ask", "auto", "bypass", "off") else "ask"
 
 def permission_decider(cfg: dict = None) -> tuple:
-    """(provider, model) named to decide tool calls in auto mode.
-
-    ("", "") to inherit the active provider's own model. Same shape as
-    vision_helper, and for the same reason: the conversation may run on one
-    model while a small one does the deciding.
-
+    """(provider, model) named to decide tool calls in auto mode. ("", "") inherits the active
+    provider's own model.
         "permission": {"mode": "auto", "provider": "ollama", "model": "gemma4:31b"}
     """
     p = (cfg or load()).get("permission")
@@ -123,22 +107,17 @@ def permission_decider(cfg: dict = None) -> tuple:
     return (p.get("provider") or "").strip(), (p.get("model") or "").strip()
 
 def api_key(name: str, cfg: dict = None) -> str:
-    """Environment wins over the file, so a shell can override a stored key
-    without editing anything.
-
-    Last comes whatever the provider can find on this machine by itself: ollama
-    is signed into through its desktop app, which leaves a usable key in
-    ~/.ollama and means a working account can be configured nowhere at all.
-    Lowest precedence, so pasting a key still overrides the machine's.
+    """Environment wins over the file, so a shell can override a stored key without editing anything.
+    Last is whatever the provider finds on this machine: ollama is signed into through its desktop
+    app, which leaves a usable key in ~/.ollama, so a working account can be configured nowhere at all.
     """
     p = providers.get(name)
     key_env = getattr(p, "key_env", "")
     return ((os.environ.get(key_env) if key_env else "") or entry(name, cfg).get("api_key")
             or getattr(p, "stored_key", lambda: "")() or "")
 
-# Substrings that mean "this model will not take a picture", as opposed to any
-# of the other things a 400 can mean. Matched loosely because every endpoint
-# words it differently and none of them use a machine-readable code for it.
+# Substrings that mean "this model will not take a picture", not any of the other things
+# a 400 can mean. Matched loosely: every endpoint words it differently, none use a code.
 _NO_IMAGE = ("does not support image", "not support image input", "no support for image",
              "image input is not", "does not support vision", "invalid_image",
              "image_url is not supported", "images are not supported")
@@ -152,14 +131,9 @@ def blind_models(name: str, cfg: dict = None) -> list[str]:
     return list(entry(name, cfg).get("blind_models") or [])
 
 def learn_blind(name: str, model: str) -> dict:
-    """Remember that this model cannot see.
-
-    The `vision` flag is per provider, but vision is a property of the model:
-    one ollama entry points at a vision model today and a text-only one
-    tomorrow, and the registry default cannot know which. So it is learned the
-    same way a rejected parameter is -- one failed request, once, ever -- and
-    keyed by model so switching to a model that can see is not blocked by what
-    the last one could not do.
+    """Remember that this model cannot see. The `vision` flag is per provider, but vision is a property
+    of the model: one entry points at a vision model today and a text-only one tomorrow. Learned like
+    a rejected parameter, keyed by model, so a sighted one is not blocked by the last.
     """
     if not model: return load()
     cfg = load()
@@ -172,8 +146,8 @@ def model_for(name: str, cfg: dict = None) -> str:
     """The model this provider would actually use."""
     return entry(name, cfg).get("model") or getattr(providers.get(name), "default_model", "")
 
-# Params that configure how this pairing is *described*, not what is sent. Read
-# by name where they are needed and stripped from everything bound for the wire.
+# Params that describe how this pairing is *described*, not what is sent. Read
+# by name where needed, stripped from everything bound for the wire.
 LOCAL_KEYS = frozenset({"context_window"})
 
 def local_param(name: str, model: str, key: str, cfg: dict = None):
@@ -184,37 +158,22 @@ def local_param(name: str, model: str, key: str, cfg: dict = None):
     return None
 
 def params_for(name: str, model: str, cfg: dict = None) -> dict:
-    """The native params this provider/model pair should be sent.
-
-    Two layers, because a provider entry has one model but a machine has
-    several: `params` is everything this endpoint always wants (num_ctx for a
-    local server, a base temperature), and `model_params[<model>]` is what only
-    that one model wants, merged over it. Per-model wins on a key both set, and
-    a model with no entry gets the provider's params unchanged -- so adding one
-    model's quirk never changes what any other model is sent.
-
-    Keyed by model rather than folded into `params` for the same reason quirks
-    and blind_models are: switching models must not carry the last one's
-    settings with it, and must not lose them either.
-
-    LOCAL_KEYS are dropped on the way out. They live in the same two dicts
-    because that is where a per-model setting belongs, but they describe the
-    pairing rather than the request -- the openai dialect forwards params
-    verbatim, and a key the API has never heard of costs a 400.
+    """The native params this provider/model pair should be sent. `params` is what the endpoint always wants,
+    `model_params[<model>]` what only that model wants, merged over it, so per-model wins. LOCAL_KEYS are dropped
+    because they describe the pairing, and the openai dialect forwards params verbatim, where an unknown key 400s.
     """
     e = entry(name, cfg)
     merged = {**(e.get("params") or {}), **((e.get("model_params") or {}).get(model) or {})}
     return {k: v for k, v in merged.items() if k not in LOCAL_KEYS}
 
 
-# Bumped whenever capabilities() learns to report something new: an older
-# recorded answer is short, not wrong, and reading "absent" as "refused" is
-# how a model permanently lost its thinking knob.
+# Bumped whenever capabilities() learns to report something new: an older recorded answer
+# is short, not wrong, and reading "absent" as "refused" once lost a thinking knob.
 CAPS_REV = 2
 
 def model_caps(name: str, model: str, cfg: dict = None) -> list | None:
-    """What a provider said this model can do, if it was ever asked -- and
-    asked by a version of this code that looked for everything we read now."""
+    """What a provider said this model can do, if it was ever asked by a version of this
+    code that looked for everything we read now."""
     e = entry(name, cfg)
     if (e.get("caps_rev") or {}).get(model, 0) < CAPS_REV: return None
     caps = (e.get("model_caps") or {}).get(model)
@@ -230,16 +189,13 @@ def learn_caps(name: str, model: str, caps: list) -> dict:
     return save(cfg)
 
 # Providers already asked this process. The answer is on disk too; this only
-# keeps a second process-lifetime call from happening before it gets there.
+# keeps a second per-lifetime call from happening before it gets there.
 _asked = set()
 
 def _ask_caps(name: str, model: str, cfg: dict = None) -> list | None:
-    """Ask the provider what the model can do, once, if it can answer at all.
-
-    Only ollama can. Everywhere else the answer comes the expensive way, from a
-    rejected image, which is what learn_blind records. Failures are swallowed
-    and nothing is written: a daemon that is down or a name that does not
-    resolve must leave the question open rather than answer it wrongly.
+    """Ask the provider what the model can do, once, if it can answer at all. Only ollama can; everywhere
+    else the answer comes from a rejected image, which is what learn_blind records. Failures are swallowed
+    and nothing is written: a daemon that is down must leave the question open rather than answer it wrongly.
     """
     p = providers.get(name)
     if not model or not hasattr(p, "capabilities"): return None
@@ -252,18 +208,9 @@ def _ask_caps(name: str, model: str, cfg: dict = None) -> list | None:
     return caps
 
 def can_see(name: str, cfg: dict = None, model: str = "") -> bool:
-    """Whether this provider is expected to accept images.
-
-    Four answers, in the order they deserve to be believed: what the user
-    wrote, what the provider says about this exact model, what the model has
-    already refused, and finally the registry default -- which is a guess about
-    an endpoint, made before anyone knew which model it would be pointed at.
-
-    model asks about one other than the configured one, which is what a vision
-    helper with an override needs: the question is whether *that* model can see,
-    not whether the one running the conversation can. The written flag is
-    skipped in that case for the same reason -- it describes the entry, and this
-    is a different model on it.
+    """Whether this provider is expected to accept images. Four answers, in the order they deserve to be
+    believed: what the user wrote, what the provider says about this exact model, what the model has refused,
+    and the registry default. When another model is asked, the written flag is skipped: it describes the entry.
     """
     e = entry(name, cfg)
     if "vision" in e and not model: return bool(e["vision"])
@@ -275,13 +222,9 @@ def can_see(name: str, cfg: dict = None, model: str = "") -> bool:
     return getattr(providers.get(name), "vision", True)
 
 def can_think(name: str, model: str = "", cfg: dict = None) -> bool | None:
-    """Whether this model has a thinking knob at all, or None if nobody knows.
-
-    Three states, not two, and the third is the useful one: the effort table
-    only defers to this when it is a definite no. An unasked provider -- which
-    is most of them, since only ollama and openrouter publish the answer --
-    leaves the table's own guess standing rather than having the ladder wiped
-    by a question nobody answered.
+    """Whether this model has a thinking knob at all, or None if nobody knows. Three states, and the third
+    matters: the effort table only defers to this when it is a definite no, so an unasked provider leaves
+    the table's own guess standing.
     """
     model = model or model_for(name, cfg)
     caps = model_caps(name, model, cfg)
@@ -289,11 +232,9 @@ def can_think(name: str, model: str = "", cfg: dict = None) -> bool | None:
     return None if caps is None else "thinking" in caps
 
 def effort_block(level: str, name: str = None, model: str = None, cfg: dict = None) -> str:
-    """Why this rung cannot be set on the model in use, or "" if it can.
-
-    Only "off" ever answers with a reason. The alternative -- accepting it and
-    sending the lowest rung the model has -- makes the one setting whose whole
-    promise is "do not think" the one setting that silently does not keep it.
+    """Why this rung cannot be set on the model in use, or "" if it can. Only "off" ever answers with a
+    reason: accepting it and sending the lowest rung the model has would make the one setting that
+    promises "do not think" the one that silently does not keep its promise.
     """
     cfg = cfg or load()
     name = name or cfg.get("active") or "ollama"
@@ -305,19 +246,14 @@ def effort_block(level: str, name: str = None, model: str = None, cfg: dict = No
     return (f"{model or name} cannot stop thinking, so \"off\" would quietly mean its "
             f"lowest rung - pick that, or override effort_map[\"off\"] for {name}")
 
-# Local-server probes, cached for the life of the process. Asking is cheap but
-# not free, and this is read on every turn to build the environment block.
+# Local-server probes, cached for the life of the process: this is read every
+# turn to build the environment block.
 _probed = {}
 
 def _reachable(name: str, cfg: dict = None) -> bool:
-    """Whether a request to this provider could get anywhere.
-
-    A key settles it, and for ollama that includes the one its desktop app
-    leaves behind. Otherwise the only providers left are the local ones, and
-    for those "installed" is not "running" -- a base_url pointing at localhost
-    with nothing listening behind it would otherwise be offered as the thing
-    that can see, and named as such in the prompt, while every call to it fails
-    on connect.
+    """Whether a request to this provider could get anywhere. A key settles it, and for ollama that includes the
+    one its desktop app leaves behind. Otherwise only local providers are left, where "installed" is not "running":
+    a base_url with nothing listening would be offered as the thing that can see, while every call fails to connect.
     """
     if api_key(name, cfg): return True
     url = getattr(providers.get(name), "base_url", "") or ""
@@ -328,19 +264,9 @@ def _reachable(name: str, cfg: dict = None) -> bool:
     return _probed[name]
 
 def vision_helper(cfg: dict = None) -> tuple:
-    """(provider, model) named to do the looking. ("", "") for auto.
-
-    Two spellings, because the simple case should stay simple:
-
-        "vision": "anthropic"
-        "vision": {"provider": "ollama", "model": "minimax-m3:cloud"}
-
-    The model override exists because the chat model and the model that looks
-    at images are often the same provider and necessarily different models --
-    running the conversation on a small text-only ollama model while a vision
-    model on that same account does the looking is the normal case, not an
-    exotic one. Without the override, naming that provider is impossible: its
-    configured model is the blind one.
+    """(provider, model) named to do the looking, or ("", "") for auto. Two spellings, a bare provider name or
+    {"provider": ..., "model": ...}. The model override matters because the model that looks is often not the one
+    holding the conversation; without it naming that provider is impossible, its configured model being blind.
     """
     v = (cfg or load()).get("vision")
     if isinstance(v, dict):
@@ -348,12 +274,9 @@ def vision_helper(cfg: dict = None) -> tuple:
     return (v or "").strip(), ""
 
 def set_vision_helper(name: str, model: str = None) -> dict:
-    """Name the provider that looks at images, or "" to go back to auto.
-
-    Checked here rather than at use time: a helper that cannot see or cannot be
-    reached fails inside a tool call, hours later, as a puzzling error. Refusing
-    it while someone is looking at the setting is the same information at a
-    moment it is useful.
+    """Name the provider that looks at images, or "" to go back to auto. Checked here rather than at use
+    time: a helper that cannot see or cannot be reached would otherwise fail hours later, inside a tool
+    call, and refusing it while someone is looking at the setting is the same information at a useful moment.
     """
     name, model = (name or "").strip(), (model or "").strip()
     if name:
@@ -366,11 +289,9 @@ def set_vision_helper(name: str, model: str = None) -> dict:
     return save(cfg)
 
 def lookers(cfg: dict = None) -> list[tuple]:
-    """Every (provider, model) that could do the looking, best first.
-
-    A pair rather than a name, because the named helper may carry a model
-    override and the rest use whatever they are configured with. An empty model
-    means "the one this provider already uses".
+    """Every (provider, model) that could do the looking, best first. A pair rather than a name, because
+    the named helper may carry a model override and the rest use whatever they are configured with. An
+    empty model means "the one this provider already uses".
     """
     cfg = cfg or load()
     named, named_model = vision_helper(cfg)
@@ -389,16 +310,9 @@ def sighted_all(cfg: dict = None) -> list[str]:
     return [n for n, _ in lookers(cfg)]
 
 def sighted(cfg: dict = None) -> str:
-    """A provider that can see and could be reached, or "".
-
-    The point is running the agent on a model with no eyes: something still has
-    to be able to look at a screenshot, and it does not have to be the model
-    holding the conversation.
-
-    A named helper wins, but only while it still holds up -- a key removed or a
-    provider switched to vision:false must not leave the setting silently
-    pointing at something that will fail. Otherwise the active provider is tried
-    first, so a sighted setup never quietly farms the work out somewhere else.
+    """A provider that can see and could be reached, or "". A named helper wins while it still holds up: a key
+    removed or a provider switched to vision:false must not leave the setting pointing at something that will
+    fail. Otherwise the active provider is tried first, so a sighted setup never farms the work out.
     """
     found = lookers(cfg)
     return found[0][0] if found else ""
@@ -410,42 +324,28 @@ def use(name: str) -> dict:
     _WINDOWS.clear()             # the next turn asks the new provider its own size
     return save(cfg)
 
-# Windows already established this process, keyed by provider and model -- the
-# endpoint is asked over the network once per request, and the table clears on
-# any switch so a new pairing is asked, not reported.
+# Windows already established this process, keyed by provider and model. The endpoint is
+# asked once per request, and the table clears on any switch so a new pairing is asked.
 _WINDOWS: dict[tuple, int] = {}
 
 def context_window(name: str, model: str, cfg: dict = None) -> int:
-    """How many tokens this model's window holds, or 0 if nobody knows.
-
-    Asked, never guessed. In order: what you wrote in config.json, the num_ctx
-    the request itself sets, and then the provider's own answer -- ollama reads
-    it off the daemon, the openai dialect reads it off /v1/models where the
-    server publishes one, and anthropic does not publish it at all.
-
-    0 is a real answer and not a failure. It means nothing authoritative was
-    available, and a frontend showing "24k used" with no denominator is telling
-    the truth, where one drawn against an invented total is not. Write
-    context_window into the provider's entry to supply what the API will not --
-    into `model_params[<model>]` when one entry gets pointed at several models,
-    since the window belongs to the model and not to the endpoint.
+    """How many tokens this model's window holds, or 0 if nobody knows. Asked, never guessed: config.json,
+    then the num_ctx the request sets, then the provider's own answer. 0 is a real answer, not a failure.
+    Write context_window into the provider's `model_params[<model>]` to supply what the API will not.
     """
     # Resolved here rather than trusted from the caller: settings() omits the
     # model when it is unset, and a per-model window keyed by "" matches nothing.
     model = model or model_for(name, cfg)
-    # local_param, not e["context_window"]: per-model first, then the entry-wide
-    # value, so switching models does not report the last one's window.
-    # params_for, not e["params"]: a num_ctx set for this model alone is the
-    # window of the request that will actually be made.
+    # local_param first: per-model over entry-wide, so switching models does not report the
+    # last one's window. Then params_for: a num_ctx for this model is the request's window.
     for n in (local_param(name, model, "context_window", cfg),
               params_for(name, model, cfg).get("num_ctx")):
         if isinstance(n, int) and n > 0: return n
 
     key = (name, model)
     if key in _WINDOWS: return _WINDOWS[key]
-    # Cached either way, including the zero: this runs on the path that reports
-    # a round's token cost, and a provider that is slow to answer -- or not
-    # answering at all -- must not be asked again on every turn.
+    # Cached either way, including the zero: this runs on the path that reports a round's
+    # token cost, and a slow provider must not be asked again every turn.
     try:
         p = providers.get(name)
         p.setup(api_key(name, cfg))
@@ -456,19 +356,15 @@ def context_window(name: str, model: str, cfg: dict = None) -> int:
     return _WINDOWS[key]
 
 def quirks(name: str, model: str, cfg: dict = None) -> list[str]:
-    """Request keys this provider/model pair has already had rejected once.
-
-    Keyed by model rather than by provider: one registry entry gets pointed at
-    a reasoning model today and a plain one tomorrow, and a rejection by the
-    latter must not permanently mute the former.
+    """Request keys this provider/model pair has already had rejected once. Keyed by model: one registry entry
+    gets pointed at a reasoning model today and a plain one tomorrow, and a rejection by the latter must not
+    permanently mute the former.
     """
     return list(((entry(name, cfg).get("quirks") or {}).get(model) or []))
 
 def learn_quirk(name: str, model: str, keys: list[str]) -> dict:
-    """Record a rejection so no later turn sends that key to this model again.
-
-    On disk rather than in memory, because the point is that an unrecognized
-    model costs exactly one failed request ever, not one per boot.
+    """Record a rejection so no later turn sends that key to this model again. On disk, not in memory: an
+    unrecognized model costs exactly one failed request ever, not one per boot.
     """
     if not keys: return load()
     cfg = load()
@@ -488,8 +384,8 @@ def update(name: str, model: str = None, key: str = None, vision=None, params: d
     if model is not None: e["model"] = model
     if key is not None: e["api_key"] = key
     if vision is not None: e["vision"] = bool(vision)
-    # Per-level remap, merged so fixing "high" does not wipe a "max" you set
-    # last week. Keyed by canonical level; the value is native params, verbatim.
+    # Per-level remap, merged so fixing "high" does not wipe a "max" set last
+    # week. Keyed by canonical level; the value is native params, verbatim.
     if effort_map is not None:
         bad = [k for k in effort_map if k not in effort.LADDER]
         if bad: raise ValueError(f"unknown effort: {bad} (have {list(effort.LADDER)})")
@@ -501,9 +397,8 @@ def update(name: str, model: str = None, key: str = None, vision=None, params: d
         e.pop("blind_models", None)
     # Merged, not replaced: setting num_ctx should not drop temperature.
     if params is not None: e["params"] = {**(e.get("params") or {}), **params}
-    # Same merge, one model deep. A null override removes, which is the only
-    # way to let the provider-wide value through again; emptied models drop
-    # out, so no empty rows collect in the file.
+    # Same merge, one model deep. A null override removes, the only way to let the
+    # provider-wide value through again; emptied models drop out of the file.
     if model_params is not None:
         mp = dict(e.get("model_params") or {})
         for mname, vals in model_params.items():
@@ -515,14 +410,14 @@ def update(name: str, model: str = None, key: str = None, vision=None, params: d
             else: mp.pop(mname, None)
         if mp: e["model_params"] = mp
         else: e.pop("model_params", None)
-    # Model, num_ctx and key all change what the window is or who would be
-    # asked about it, so nothing learned about the old pairing survives.
+    # Model, num_ctx and key all change what the window is or who would be asked
+    # about it, so nothing learned about the old pairing survives.
     _WINDOWS.clear()
     cfg.setdefault("providers", {})[name] = e
     return save(cfg)
 
 def listing(cfg: dict = None) -> list[dict]:
-    """Everything the frontend needs to render a picker. Never the key itself:
+    """Everything a frontend needs to render a picker. Never the key itself:
     this crosses the IPC wire and ends up in logs."""
     cfg = cfg or load()
     active = cfg.get("active") or "ollama"
@@ -531,33 +426,28 @@ def listing(cfg: dict = None) -> list[dict]:
         p, e = providers.get(name), entry(name, cfg)
         model = e.get("model") or p.default_model
         drop, override = quirks(name, model, cfg), e.get("effort_map")
-        # Stored caps only: listing walks every provider, and a picker opening
-        # is no reason to go and ask each of them a question over the network.
+        # Stored caps only: listing walks every provider, and a picker opening is
+        # no reason to ask each of them a question over the network.
         caps = model_caps(name, model, cfg)
         thinks = None if caps is None else "thinking" in caps
         out.append({"name": name, "dialect": p.name, "active": name == active,
                     "model": model,
                     "base_url": getattr(p, "base_url", None),
                     "vision": e.get("vision", getattr(p, "vision", True)),
-                    # One rung list for every provider, plus what each rung
-                    # would actually send to this model: a slider whose effect
-                    # is invisible is not trusted, and it shows a rung quirks
-                    # have emptied out.
+                    # One rung list for every provider, plus what each rung would send
+                    # to this model: a slider whose effect is invisible is not trusted.
                     "effort_rungs": list(effort.LADDER),
                     "effort_map": override or {},
                     "effort_preview": {lvl: effort.resolve(name, p.name, model, lvl,
                                                            drop=drop, override=override, thinks=thinks)
                                        for lvl in effort.LADDER},
-                    # Whether the bottom rung means what it says here. It is
-                    # the one rung that can be a lie rather than an
-                    # approximation, so the frontend is told rather than left
-                    # to read it out of the preview.
+                    # Whether the bottom rung means what it says here: the one rung that
+                    # can be a lie rather than an approximation, so it is told.
                     "effort_off": effort.reachable(name, p.name, model, "off",
                                                    thinks=thinks, override=override),
                     "params": e.get("params") or {},
-                    # What this entry's own model is sent on top of `params`.
-                    # The whole map, not just the active model's row: a picker
-                    # that hides the other rows makes them look unset.
+                    # What this entry's own model is sent on top of `params`. The whole map,
+                    # not just the active row: a picker that hides rows makes them look unset.
                     "model_params": e.get("model_params") or {},
                     "has_key": bool(api_key(name, cfg))})
     return out

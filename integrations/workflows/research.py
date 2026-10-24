@@ -1,9 +1,8 @@
-# This is more or less an example workflow, this workflow works perfectly, but is more of a 'test' workflow or an example workflow.
+# This is an example workflow: the reference for what a workflow file looks like.
 """Answer one question from several pages at once, then reconcile the answers.
 
-Also the reference for what a workflow file looks like. There is no import
-block: agent, parallel, pipeline, log and AgentSpec are already in scope, and
-run(args) is the entry point.
+There is no import block: agent, parallel, pipeline, log and AgentSpec are already
+in scope, and run(args) is the entry point.
 """
 NAME = "research"
 DESCRIPTION = ("Reads several URLs concurrently to answer one question, then reconciles "
@@ -37,8 +36,8 @@ def run(args):
         return {"error": "research needs {question: str, urls: [str]}"}
 
     log(f"reading {len(urls)} page(s) for: {question}")
-    # pipeline, not parallel: one stage here, but each url is independent and
-    # nothing waits on the slowest read to start working on its own result.
+    # pipeline, not parallel: each url is independent, so nothing waits on the
+    # slowest one to start working on its own result.
     reads = pipeline(urls, lambda url, _item, i: agent(
         "researcher",
         f"Question: {question}\n\nStart from this page: {url}\n"
@@ -49,8 +48,8 @@ def run(args):
     if not got:
         return {"error": "every read failed", "urls": urls}
     if len(got) == 1:
-        # Nothing to reconcile against. Paying for a second model call to
-        # rephrase one answer is the kind of thing a workflow should not do.
+        # Nothing to reconcile against. A second model call to rephrase one
+        # answer is not worth paying for.
         return {**got[0], "sources": got[0].get("sources") or urls}
 
     bundle = "\n\n".join(

@@ -105,12 +105,10 @@ def _repair(text: str, old: str) -> dict:
     """What the model probably meant, when the exact string is not in the file.
 
     Nearly every failed edit is whitespace: the block was retyped from memory
-    instead of copied, and lost an indent level on the way. Finding it again with
-    indentation ignored, and handing back the file's own bytes for it, turns a
-    guess-and-retry loop into one more call.
-
-    Never applied on its own. Looking alike is not being the same, and an edit is
-    the last place to start guessing.
+    instead of copied and lost an indent level. Finding it again with indentation
+    ignored, and handing back the file's own bytes for it, turns a guess-and-retry
+    loop into one more call. Never applied on its own: looking alike is not being
+    the same, and an edit is the last place to start guessing.
     """
     want = [l.strip() for l in old.split("\n")]
     while want and not want[-1]: want.pop()

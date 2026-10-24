@@ -1,22 +1,16 @@
 """What the user just said, matched against what is already known.
 
-Pointers, never bodies. A hit puts one line in front of the model -- a name and
-the sentence that says what it is -- and the model decides whether to spend a
-tool call opening it. That asymmetry is the whole design: a wrong pointer costs
-a line, a wrong injected body costs the context and, worse, gets acted on.
+Pointers, never bodies. A hit puts one line in front of the model and the model
+decides whether to spend a tool call opening it: a wrong pointer costs a line, a
+wrong injected body costs the context and gets acted on.
 
-A pointer only earns its line if it names something the model does not already
-have. The memory tool's own description lists every in-scope memory every turn,
-so pointing at one of those is a line spent restating the tool list -- and a
-block that is mostly restatement teaches the model to skim the whole thing.
-Memories here are therefore drawn from what the index leaves out: another
-project's, or an app's that is not on screen.
+A pointer only earns its line if it names something the model does not already have.
+The memory tool's description lists every in-scope memory every turn, so pointing at
+one of those restates the tool list, which teaches the model to skim the whole block.
+Memories here are therefore drawn from what the index leaves out.
 
-Runs on every user message, so it is lexical and structural only. No model
-call, no network, no embedding: this sits between the user pressing enter and
-the request going out, and anything that takes a second there is felt on every
-single turn. The signals that pay for themselves are the cheap ones anyway --
-which directory this is, which files were touched, which words came back.
+Runs on every user message, so it is lexical and structural only: no model call, no
+network, no embedding, because anything taking a second here is felt on every turn.
 """
 import os, re, time
 from datetime import datetime, timezone
@@ -27,10 +21,10 @@ from integrations.memory import loader
 MAX_MEMORIES = 3
 MAX_SESSIONS = 2
 MIN_TURNS = 2             # a one-turn session is a question and an answer, not a thing to reopen
-# Two bars, because the two corpora are not alike. A memory's description is a
-# sentence someone wrote to be recognised by, and there are tens of them, so one
-# solid word is real evidence. Session titles are generated, there are hundreds,
-# and one shared word between two of them means nothing at all.
+# Two bars, because the corpora differ. A memory's description is a sentence written
+# to be recognised by and there are tens of them, so one solid word is evidence;
+# session titles are generated and there are hundreds, so one shared word between two
+# of them means nothing.
 MIN_MEMORY = 1.0
 MIN_SESSION = 1.6
 SESSION_POOL = 60         # newest sessions considered; older than that, search finds them by hand
@@ -46,19 +40,17 @@ STOP = {
     "up","out","about","into","over","after","before","more","most","some","any","all","one","two",
 }
 
-# Words that point at something the sentence never named. When one of these
-# turns up, the thing being pointed at is almost always the last thing that
-# happened here rather than whatever shares a keyword with it -- so recency
-# stops being a tiebreak and starts being the signal.
+# Words that point at something the sentence never named. When one turns up, the thing
+# meant is usually the last thing that happened here rather than whatever shares a
+# keyword, so recency becomes the signal rather than a tiebreak.
 DEIXIS = re.compile(r"\b(that|those|it|again|earlier|before|last time|yesterday|the other day|"
                     r"we were|we did|you did|like we|same as|continue|resume|pick up|back to)\b", re.I)
 
 def tokens(text: str) -> list[str]:
     """Words, plus the pieces of any path or identifier in them.
 
-    `handler/session/store.py` has to match a session that touched
-    `store.py`, and splitting on non-alphanumerics is what makes that happen
-    without a special case for paths.
+    Splitting on non-alphanumerics is what lets `handler/session/store.py` match a
+    session that touched `store.py`, with no special case for paths.
     """
     out = []
     for raw in re.split(r"[^A-Za-z0-9_./\\-]+", (text or "").lower()):
@@ -91,9 +83,9 @@ def _ago(iso: str) -> str:
     if d < 30: return f"{int(d)}d ago"
     return f"{int(d / 30)}mo ago"
 
-# Suggested-already, per session. In memory on purpose: the point is not to
-# repeat a pointer the model has already declined once, and that judgement does
-# not survive a restart in any useful form.
+# Suggested-already, per session, in memory on purpose: the point is not to repeat a
+# pointer the model declined once, and that judgement does not usefully survive a
+# restart.
 _shown: dict[str, set] = {}
 
 def _fresh(sid: str, key: str) -> bool:
@@ -106,23 +98,20 @@ def forget(sid: str):
     _shown.pop(sid or "-", None)
 
 def _memory_hits(q: set, path: str, apps: list) -> list:
-    # Out of scope on purpose -- see the module docstring. Everything in scope is
-    # already listed in the memory tool's description on this very request.
+    # Out of scope on purpose: everything in scope is already listed in the memory
+    # tool's description on this very request.
     mems = loader.out_of_scope(path, apps)
     if not mems: return []
     docs = [tokens(f"{m.name} {m.description} {m.type}") for m in mems]
     w = _weights(docs)
     out = []
     for m, d in zip(mems, docs):
-        # The name is the fact's identity -- someone chose those words to be the
-        # handle for exactly this -- so matching one counts for more than
-        # matching the same word somewhere in the sentence.
+        # The name is the fact's identity, chosen as the handle for exactly this, so
+        # matching one counts for more than matching a word in the sentence.
         named = len(q & set(tokens(m.name)))
-        # One shared word is not a match, it is a coincidence -- the same reason
-        # session titles need a higher bar. It reads as evidence here only
-        # because rarity weight is measured against this handful of memories, so
-        # any word occurring once scores as if it were decisive. A hit on the
-        # name is the exception: those words were chosen to be searched for.
+        # One shared word is a coincidence, not a match (the same reason session titles
+        # need a higher bar); any word occurring once reads as decisive only because
+        # rarity is measured against this handful. The name is the exception.
         if not named and len(q & set(d)) < 2: continue
         s = _score(q, d, w) + 0.5 * named
         if s >= MIN_MEMORY: out.append((s, m))
@@ -131,9 +120,9 @@ def _memory_hits(q: set, path: str, apps: list) -> list:
 def _session_hits(q: set, path: str, sid: str, deictic: bool) -> list:
     """Past conversations worth reopening.
 
-    Reads meta only. list_sessions() refuses to open messages.jsonl on purpose
-    and this must not be the thing that makes it -- scoring a hundred sessions
-    would otherwise mean reading a hundred conversations' worth of screenshots.
+    Reads meta only: list_sessions() refuses to open messages.jsonl on purpose, and
+    scoring a hundred sessions would otherwise mean reading a hundred conversations'
+    worth of screenshots.
     """
     here = os.path.abspath(os.path.expanduser(path)) if path else ""
     metas = [m for m in store.list_sessions()[:SESSION_POOL]
@@ -148,13 +137,12 @@ def _session_hits(q: set, path: str, sid: str, deictic: bool) -> list:
     for m, d in zip(metas, docs):
         same_dir = bool(here and m.get("cwd") and os.path.abspath(m["cwd"]) == here)
         s = _score(q, d, w)
-        # Same directory is the strongest signal available and it costs nothing
-        # to compute, so it stands on its own: "what did we do here" needs to
-        # find this session even when the words share nothing.
+        # Same directory is the strongest free signal, so it stands on its own: "what
+        # did we do here" has to find this session even when the words share nothing.
         if same_dir: s += 1.4
         if not s: continue
-        # Recency decays a match rather than making one. A deictic prompt names
-        # nothing, so there it is allowed to carry the whole score.
+        # Recency decays a match rather than making one. A deictic prompt names nothing,
+        # so there it may carry the whole score.
         recency = 0.5 ** (_age_days(m.get("updated", "")) / HALF_LIFE_DAYS)
         s = s * (0.6 + 0.4 * recency) + (1.5 * recency if deictic and same_dir else 0)
         if s >= MIN_SESSION: out.append((s, m))
@@ -163,15 +151,12 @@ def _session_hits(q: set, path: str, sid: str, deictic: bool) -> list:
 def block(text: str, sid: str = "", path: str = None, apps: list = None) -> list[str]:
     """The recall notes for one user message. Empty list when nothing matched.
 
-    Empty is the expected answer most turns. A block that appears every time is
-    a block that gets read as furniture, and then the one that mattered is
-    furniture too.
+    Empty is the expected answer most turns: a block that appears every time gets read
+    as furniture, and then the one that mattered is furniture too.
 
-    Two notes rather than one, because a memory and a past conversation are not
-    the same kind of thing: one is a fact someone wrote down to be reused, the
-    other is a place to go looking. Under one heading the reader has to sort
-    them apart before deciding anything, and the frontend draws each note on its
-    own row anyway.
+    Two notes rather than one, because a memory and a past conversation are not the
+    same kind of thing: a fact written down to be reused against a place to go
+    looking. Under one heading the reader has to sort them apart first.
     """
     q = set(tokens(text))
     if not q and not DEIXIS.search(text or ""): return []
@@ -195,9 +180,8 @@ def block(text: str, sid: str = "", path: str = None, apps: list = None) -> list
             ses.append(f"- `{meta['id']}` \"{title}\" - {tail}")
     except Exception: pass
 
-    # The first paragraph is a sentence for the human -- frontends draw a
-    # notice's opening paragraph and drop the rest, because the rest is
-    # addressed to the model and reads on screen like the agent muttering.
+    # The first paragraph is for the human: frontends draw a notice's opening paragraph
+    # and drop the rest, which is addressed to the model.
     out = []
     if mem:
         out.append(f"recall: {len(mem)} {'memory' if len(mem) == 1 else 'memories'} outside this scope\n\n"
