@@ -82,7 +82,9 @@ Fill in `model` and `api_key` for the one you want and set `active` to its name,
 or pick both from inside a frontend with `/provider` - the file is written either
 way. `vision` picks the provider that looks at images (see Vision), `effort`
 sets the level a new conversation starts on, `always_skills` is the short list
-of skills held in the system prompt. It is re-read every turn, so an edit lands
+of skills held in the system prompt. `steps` names the model that labels a step
+of work for a compact frontend, spelled like `vision`; unset, it borrows the
+`vision` model rather than the conversation's own. It is re-read every turn, so an edit lands
 on the next message without a restart. It holds API keys in plaintext and is
 chmod 0600 on every write (a no-op on Windows, where the file's protection is
 the profile directory's).
@@ -185,6 +187,7 @@ rust/src/worker.rs            finds python and main.py, spawns, reads, reaps
 rust/src/session.rs           frontend-agnostic state, folded from events
 rust/src/transcript.rs        events folded into rows: the model a UI draws
 rust/fastrs/                  the terminal frontend
+rust/quik/                    the compact terminal frontend
 rust/app/                     the GUI frontend (GPUI)
 rust/target/release/          build output, one binary per frontend
 ```
@@ -209,9 +212,10 @@ The pointer-and-keyboard ones (`click`, `key`, `scroll`, `type_text`,
 | Name | What it is |
 | --- | --- |
 | `fastrs` | Terminal. One conversation as an action tape rather than a chat log: the model's prose is the unmarked baseline, and what you asked, what it thought and what it did to the machine are what catch the eye. Tool calls fold into one row per run - `5 calls · read, edit` - which opens on a press. `/` opens the worker's own command table (with `help` and `permissions` in front), `$` the skill menu, `@` a file picker. `Ctrl+O` opens the call under the cursor in full, `Ctrl+V` attaches a picture, `Esc` stops the run, `Shift+Enter` (or `Alt+Enter`, or `Ctrl+J`) puts a newline in the message. `/help` lists every key; there is no key row drawn in the corner of the frame. |
+| `quik` | Terminal, compact. Fastrs's code with the design still to be settled: thoughts and calls compressed, the header and the frame cut down. |
 | `cuacode` | GUI window. A rail of promoted projects and the sessions standing in each, the conversation, and a composer that sets provider, model, permissions and location. It reads the state root directly, so the rail draws with no worker up. A run is one row, the same fold fastrs uses. `rust/app/app.sh` builds it as a real macOS bundle so it owns a Dock identity and a menu bar. |
 
-Both are documented at length in `rust/README.md`, which is the page for the
+All three are documented at length in `rust/README.md`, which is the page for the
 frontend half.
 
 ### Adding a frontend

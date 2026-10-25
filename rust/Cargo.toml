@@ -13,7 +13,7 @@ path = "src/lib.rs"
 # and neither is built into it -- the terminal one must not link a GUI
 # framework, and a GUI must not link a terminal library.
 [workspace]
-members = ["fastrs", "app"]
+members = ["fastrs", "quik", "app"]
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }

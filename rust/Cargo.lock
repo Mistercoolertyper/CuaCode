@@ -1489,6 +1489,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cuacode-quik"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "cuacode-rs",
+ "ratatui",
+ "serde_json",
+ "unicode-width",
+]
+
+[[package]]
 name = "cuacode-rs"
 version = "0.1.0"
 dependencies = [

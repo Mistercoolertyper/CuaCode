@@ -1,0 +1,3997 @@
+//! quik: CuaCode's terminal frontend, built to the Figma page 2 design.
+//!
+//! One screen: three lines of header, the conversation, the turn's own readout,
+//! and an input field between two rules. The conversation is the same
+//! `cuacode::session` and `cuacode::transcript` the app reads, so there is one
+//! model of what a conversation is and two drawings of it.
+//!
+//!   quik                       talk to the worker
+//!   quik <message>             open the conversation with it, sent the
+//!                                moment the worker is up
+//!   quik prompt.txt            the same, with the message read from a file:
+//!                                one argument that names one is its contents
+//!   quik --resume [id]         carry on with an earlier conversation: ask
+//!                                which one, or take the one named. Escape at
+//!                                that question starts a new conversation
+//!                                instead (--continue and -r are the same flag)
+//!   quik --fixture f.jsonl     replay a recorded stream, no worker at all
+//!   quik --print --fixture f   fold a stream and print it, no terminal
+//!   quik --version             the build id alone: <commits>.<short sha>
+//!
+//! The header carries that id, and one line under it in yellow when the remote
+//! has commits this tree does not. `cuacode doctor` is where the whole answer
+//! lives, including the upgrade.
+//!
+//! The terminal's own background is set to the design's page, so the screen is
+//! the design's colour rather than whatever the profile happens to use.
+
+mod menu;
+mod view;
+
+use std::collections::HashMap;
+use std::io::{self, Read};
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
+
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event as CEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use crossterm::execute;
+use crossterm::style::{Color as TermColor, Print, SetBackgroundColor};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use ratatui::backend::{CrosstermBackend, TestBackend};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::{Frame, Terminal};
+
+use cuacode::attach;
+use cuacode::session::{self, Session, Snapshot};
+use cuacode::transcript::{Row, Transcript};
+use cuacode::version;
+use cuacode::wire::{self, Event, State};
+
+use menu::{Item, Kind, Menu};
+use view::{ink, Drawn, PROMPT};
+
+/// How long two clicks on the same row must be apart to be a fold rather than
+/// two clicks.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// An agent has stopped to ask. `fleet` runs this frontend in a pty and draws its
+/// screen, but a permission question is raised and answered *inside* here, so
+/// without this the control plane never learns the one thing it exists to show:
+/// that a pane is blocked on a person.
+///
+/// OSC 9 is "set the window title" to a terminal that has never heard of us, so a
+/// terminal that does not know the sequence does nothing with it, rather than
+/// printing a stray string over the screen. It is written to the tty between
+/// frames and never through ratatui, so it cannot land in a cell.
+///
+/// The bytes are a contract with `fleet/src/term.rs`, which reads them back off
+/// the emulator's stream: they are written here once, and
+/// `the_permission_mark_is_the_bytes_fleet_reads` is what holds both sides to
+/// them.
+fn needs_you() -> &'static str {
+    "\u{1b}]9;cua-code-needs-you\u{7}"
+}
+
+/// The question has been answered, whichever way: allowed or refused. It goes
+/// out on every exit from the prompt, so a pane that is asked twice ends its mark
+/// the same way both times.
+fn answered() -> &'static str {
+    "\u{1b}]9;cua-code-needs-you-answer\u{7}"
+}
+
+/// The tallest the box grows. A message of twenty lines is a document, and the
+/// conversation behind it is what the screen is for; past this the box scrolls
+/// to the caret instead of taking the pane.
+const FIELD_MAX: usize = 8;
+
+/// What the launch asked for before the first frame.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Start {
+    /// A new conversation, straight away. What no flag at all means.
+    Fresh,
+    /// Come up and ask which conversation to carry on with.
+    Ask,
+    /// Carry on with the one that was named.
+    This(String),
+}
+
+fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // The build stamp, and nothing else: a flag that answers instantly is worth
+    // more in a bug report than one that waits on a network to say the same
+    // thing the header would. `cuacode doctor` is where the update is asked for.
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("quik {}", version::ID);
+        return Ok(());
+    }
+    let fixture = flag(&args, "--fixture");
+    let home = flag(&args, "--home").map(PathBuf::from);
+    let start = start_of(&args);
+    let opening = opening_message(&args);
+
+    // A bare --resume asks which conversation to open, and a message has nowhere
+    // to be sent until that question is answered. Refused rather than guessed at:
+    // the alternatives are a message quietly running in a conversation nobody
+    // chose, or one silently not sent at all.
+    if start == Start::Ask && opening.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--resume with no id asks which conversation, and a message has nowhere to go until it is \
+             answered; name the id (--resume <id>) or drop the message",
+        ));
+    }
+
+    if args.iter().any(|a| a == "--keys") {
+        return probe_keys();
+    }
+
+    if args.iter().any(|a| a == "--print") {
+        let path = fixture.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "--print needs --fixture <path>")
+        })?;
+        // Folded is what the screen opens as; `--open` prints it the way ctrl-t
+        // leaves it.
+        return print_fixture(&path, args.iter().any(|a| a == "--open"));
+    }
+
+    // One whole frame, drawn into a buffer and written out: the screen as text,
+    // with the header, the rules, the field and the colours' shapes. The only way
+    // to see the layout without a terminal, and the way a design is checked.
+    if args.iter().any(|a| a == "--frame") {
+        let path = fixture.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "--frame needs --fixture <path>")
+        })?;
+        let (w, h) = frame_size(&args);
+        return print_frame(&path, w, h, args.iter().any(|a| a == "--open"));
+    }
+
+    match fixture {
+        Some(path) => run(App::replaying(&path)),
+        None => run(App::live(home.as_deref(), start, opening)?),
+    }
+}
+
+/// Print what this terminal sends, byte by byte, until ctrl-c.
+///
+/// The one thing a key that does not work needs is the bytes the terminal
+/// actually sent, and they cannot be guessed: shift-enter is its own sequence in
+/// the kitty protocol, a different one in xterm's modifyOtherKeys, and plain
+/// enter's single byte in a terminal that has neither. One that has the key
+/// mapped to a sequence sends whatever the mapping says, which is how VS Code
+/// comes to send `1b 0d` (escape, carriage return) for shift-enter.
+fn probe_keys() -> io::Result<()> {
+    // What the terminal claims, printed first because the wait for an answer is
+    // where a keypress would otherwise be eaten: the query reads the terminal
+    // itself and drops what it does not recognise. It is a different question
+    // from the one this tool answers, and a terminal that claims yes can still
+    // send something else for shift-enter. The bytes below are the truth.
+    let claims = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    println!("claims keyboard enhancement: {claims}");
+    println!("press keys, ctrl-c to stop\n");
+    enable_raw_mode()?;
+    let result = loop {
+        let mut buf = [0u8; 64];
+        match io::stdin().read(&mut buf) {
+            Ok(0) => break Ok(()),
+            Ok(n) => {
+                let got = &buf[..n];
+                if got.contains(&3) {
+                    break Ok(());
+                }
+                let hex: Vec<String> = got.iter().map(|b| format!("{b:02x}")).collect();
+                let shown: String = got
+                    .iter()
+                    .map(|b| match b {
+                        27 => "\\e".to_string(),
+                        32..=126 => (*b as char).to_string(),
+                        _ => ".".to_string(),
+                    })
+                    .collect();
+                println!("{:<32} {shown}", hex.join(" "));
+            }
+            Err(e) => break Err(e),
+        }
+    };
+    disable_raw_mode()?;
+    result
+}
+
+fn flag(args: &[String], name: &str) -> Option<String> {
+    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+}
+
+/// Every flag whose value is the word after it, so the message walk can step
+/// over that word rather than reading it as words to send. Bare switches are
+/// not here: they take nothing, and skipping a word that follows one would eat
+/// the first word of the message.
+///
+/// `--resume` and its aliases are values because when one follows it is the id,
+/// and a launch that resumes must not also send the id as a message. A bare
+/// `-r` with a message right after it is the one combination this reads wrong,
+/// and it reads wrong in the flag parsing itself.
+const WITH_VALUE: &[&str] = &["--fixture", "--home", "--resume", "-r", "--continue", "-c"];
+
+/// The message to open the conversation with, from the launch itself, so a
+/// session can be handed something to do without a person typing it.
+///
+/// The first argument that is not a flag starts it, and the words after it are
+/// part of it: the message is a sentence, not a word. When it is one word and
+/// that word names a file, it is the file's contents -- which is what makes
+/// `quik prompt.txt` mean what it reads like. A word that names no file is a
+/// word, and nothing says so: `quik why is this failing` is a sentence.
+fn opening_message(args: &[String]) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--" {
+            i += 1;
+            break;
+        }
+        if arg.starts_with('-') {
+            i += if WITH_VALUE.contains(&arg) { 2 } else { 1 };
+            continue;
+        }
+        break;
+    }
+    let rest = &args[i.min(args.len())..];
+    if rest.len() == 1 {
+        if let Ok(text) = std::fs::read_to_string(&rest[0]) {
+            return nonempty(text);
+        }
+    }
+    nonempty(rest.join(" "))
+}
+
+/// A message that carries nothing is not one: a blank prompt.txt would send a
+/// turn the model cannot answer.
+fn nonempty(text: String) -> Option<String> {
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Read the command line for the one flag that changes what the launch does.
+///
+/// A bare `--resume` is "show me the list"; an id after it, or `--resume=<id>`,
+/// is that conversation. `--continue` and `-c` are the same question under the
+/// name people reach for first. Both frontends read it the same way, because
+/// they are one program as far as the person typing at them is concerned.
+fn start_of(args: &[String]) -> Start {
+    let (mut resume, mut id) = (false, None);
+    for (i, arg) in args.iter().enumerate() {
+        if matches!(arg.as_str(), "--resume" | "-r" | "--continue" | "-c") {
+            resume = true;
+            // A following flag is not an id.
+            if let Some(next) = args.get(i + 1) {
+                if !next.starts_with('-') {
+                    id = Some(next.clone());
+                }
+            }
+        } else if let Some(rest) = arg.strip_prefix("--resume=") {
+            resume = true;
+            id = Some(rest.to_string());
+        }
+    }
+    match (resume, id) {
+        (false, _) => Start::Fresh,
+        (true, Some(id)) => Start::This(id),
+        (true, None) => Start::Ask,
+    }
+}
+
+/// Fold a recorded stream and print it as text. The one way to see what the
+/// screen would draw with no terminal, no worker, no model and no network.
+fn print_fixture(path: &str, open: bool) -> io::Result<()> {
+    let raw = std::fs::read_to_string(path)?;
+    let mut log = Transcript::default();
+    let mut drawn = 0;
+    for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+        if let Ok(ev) = wire::parse(line) {
+            if log.apply(&ev) {
+                drawn += 1;
+            }
+        }
+    }
+    // The same pieces the screen wraps, unwrapped for a pipe. Folded by default
+    // because that is what the screen opens as: a preview of the screen, not a
+    // dump of the conversation.
+    let expanded = |_: usize, _: &Row| open;
+    for piece in view::pieces(&log.rows, &expanded, &|_| None, None, true, 100, None) {
+        println!("{}{}", piece.lead, piece.text());
+    }
+    println!("\n{} rows from {drawn} events", log.rows.len());
+    Ok(())
+}
+
+/// The size a `--frame` draws at: `--frame 120x40`, or 100 by 30.
+fn frame_size(args: &[String]) -> (u16, u16) {
+    let given = args
+        .iter()
+        .position(|a| a == "--frame")
+        .and_then(|at| args.get(at + 1))
+        .and_then(|s| s.split_once('x'))
+        .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
+    given.unwrap_or((100, 30))
+}
+
+/// One frame of the conversation, drawn into a test buffer and printed.
+///
+/// No terminal, no raw mode, no worker: the same `draw` the screen runs, onto a
+/// grid that is then written out a line at a time. Styles are not in the text --
+/// what this shows is the layout and the characters -- so a colour is checked in a
+/// real terminal and a shape is checked here.
+fn print_frame(path: &str, w: u16, h: u16, open: bool) -> io::Result<()> {
+    let mut app = App::new(None);
+    if let Ok(raw) = std::fs::read_to_string(path) {
+        for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+            if let Ok(ev) = wire::parse(line) {
+                app.log.apply(&ev);
+            }
+        }
+    }
+    // The frame is of the end of the conversation, which is what the screen
+    // follows to when it opens, and a replay has no worker to say anything.
+    app.follow = true;
+    app.open = open;
+    let mut term = Terminal::new(TestBackend::new(w, h)).map_err(io::Error::other)?;
+    term.draw(|f| draw(f, &mut app)).map_err(io::Error::other)?;
+    print!("{}", term.backend());
+    Ok(())
+}
+
+/// What this screen measured about the round in flight, or the last one.
+///
+/// The wire carries no clock: no event says when a round started, how long it
+/// took, or when it ended. This is the frontend's own stopwatch, started the
+/// first time the worker says it is running and stopped when it stops being
+/// that. It is a measurement rather than something the worker reported, which is
+/// why the readout is in seconds and not dressed up as a figure the worker sent.
+pub struct Turn {
+    started: Instant,
+    ended: Option<Instant>,
+    pub tokens: Option<i64>,
+    pub estimated: bool,
+}
+
+impl Turn {
+    fn starting() -> Turn {
+        Turn { started: Instant::now(), ended: None, tokens: None, estimated: false }
+    }
+
+    pub fn secs(&self) -> f64 {
+        self.ended.unwrap_or_else(Instant::now).duration_since(self.started).as_secs_f64()
+    }
+}
+
+/// A question the worker is blocked on.
+///
+/// One shape for both kinds: a permission, and a question the model asked with
+/// `ask_user`. They arrive on the same envelope, so they are held the same way,
+/// and the difference is whether `options` carries anything.
+#[derive(Clone)]
+struct Ask {
+    /// The id to answer back under.
+    id: String,
+    /// "question" or "permission", as the worker said. Never inferred here.
+    kind: String,
+    /// What the worker says it wants: `ask_user` for a question, a tool's name
+    /// for a permission.
+    name: String,
+    /// What is being asked. For a permission this is the model's own sentence
+    /// about why, and empty when there is none.
+    question: String,
+    /// Context the answer needs: the two diffs, the file list, the error.
+    detail: String,
+    /// The answers to pick between. Empty means the binary prompt: y or n.
+    options: Vec<String>,
+    /// Which option the arrows are on. `options.len()` means the free-text row.
+    picked: usize,
+    /// What the person is typing instead of picking. Non-empty means the caret is
+    /// here and the arrows do nothing: typing an answer is the point of not
+    /// wanting any of the options.
+    typed: String,
+    /// Which question this is, and how many there are: "2 of 3". Zero when the
+    /// worker did not say, which is the case for a permission.
+    n: usize,
+    of: usize,
+}
+
+impl Ask {
+    /// Whether this is a question the model asked rather than a permission.
+    ///
+    /// From the envelope's own `kind`, which the worker sets. Nothing is inferred:
+    /// keying this off the tool name was wrong, because a permission can be raised
+    /// for a tool called anything, and keying it off "are there options" was worse,
+    /// because the question with no options is exactly the one that needs a text
+    /// box. An envelope from an older worker carries no kind, and the fallback is
+    /// the question mark being present, which only a question sets.
+    fn is_question(&self) -> bool { self.kind == "question" }
+
+    /// The row under the cursor, counting the free-text row after the options.
+    fn rows(&self) -> usize { self.options.len() + 1 }
+
+    fn on_custom(&self) -> bool { self.picked >= self.options.len() }
+
+    /// What the panel is called. A person asked a question is looking at a
+    /// question, not at a tool: naming the box `ask_user` put our word for the
+    /// mechanism where their word for what is happening belongs. The count is
+    /// there because "am I nearly done" is the first thing anyone wants to know.
+    fn title(&self) -> String {
+        if !self.is_question() { return format!(" allow {}? ", self.name); }
+        if self.of > 1 { format!(" question {} of {} ", self.n, self.of) }
+        else { " question ".to_string() }
+    }
+
+    /// Whether there is a list to move around in. With no options there is only
+    /// the text row, and up/down have nothing to do -- so they must not eat the
+    /// keys a text field wants.
+    fn has_choices(&self) -> bool { !self.options.is_empty() }
+}
+
+/// A call opened in full.
+///
+/// The row says what a call cost and one line of what came back; this is the
+/// document the worker keeps of it, on the records rather than on the wire, which
+/// is why opening one is a round trip.
+struct Opened {
+    title: String,
+    lines: Vec<Line<'static>>,
+    scroll: u16,
+}
+
+/// Everything the screen holds. `sess` is `None` when replaying a file: there is
+/// no worker to talk to, and the transcript is the whole story.
+struct App {
+    sess: Option<Session>,
+    log: Transcript,
+    input: String,
+    /// The pictures attached to this message. Their bytes live here and nowhere
+    /// else -- the message holds only the characters a chip covers -- so removing
+    /// the chip is what removes the picture.
+    shots: Vec<Shot>,
+    /// The field's own mouse position, for a chip that is lit because the pointer
+    /// is on it. Only the field tracks this: a row of the transcript has nothing
+    /// to light.
+    hover: Option<(u16, u16)>,
+    /// What each drawn row of the field is, put there by the last frame: the row
+    /// on screen, the first column of its window, and which chip each column
+    /// belongs to. A click needs exactly what the draw used, so it is kept rather
+    /// than recomputed -- two derivations of where `[image 1]` landed is one
+    /// chance to be wrong about which picture a click takes off.
+    field_rows: Vec<(u16, usize, Vec<u8>)>,
+    /// Where the field's first row is on screen, put there by the last frame with
+    /// `field_rows` and read by the same click.
+    field_top: u16,
+    /// Where the caret sits, in characters from the start of the message. The
+    /// field is a small editor rather than a line: a message can be several
+    /// lines long and a typo in the middle of one has to be reachable.
+    caret: usize,
+    /// Whether the thoughts show their text. Off, so a screen opened on a long
+    /// session is heads rather than a wall of reasoning. ctrl-t flips them all at
+    /// once, and a double click beats it for one row. A call is not folded: what a
+    /// call shows, it always shows.
+    open: bool,
+    /// The rows the reader unfolded or folded by hand, by index.
+    overrides: HashMap<usize, bool>,
+    /// Rows of the transcript the view is scrolled past, and whether the newest
+    /// row is what it is showing. Scrolling up leaves the end behind.
+    scroll: u16,
+    follow: bool,
+    /// What the screen lines of each piece are, and where the transcript starts,
+    /// which is what a click has to be turned into a row. `anchors` is the other
+    /// half of that: the row a piece was drawn from, and the row its step folds
+    /// against, in the same order as `spans`.
+    spans: Vec<(usize, usize)>,
+    anchors: Vec<(usize, usize)>,
+    body_top: u16,
+    /// How wide the conversation pane is, put there by the last frame. A panel is
+    /// built by a keystroke rather than by a draw, and a code block inside one has
+    /// to be sized before it is drawn, so the width it will land in is kept.
+    body_width: u16,
+    /// The round in flight, or the last one this screen sent.
+    turn: Option<Turn>,
+    /// What the worker reported for a reasoning row's round, by row. Filed per row
+    /// rather than kept once, because the row is the record: the round moves on to
+    /// a tool call or an answer and the row keeps saying what its thinking cost.
+    figures: HashMap<usize, view::Round>,
+    /// A call the reader has opened, drawn over the transcript. The keyboard is
+    /// its while it is up, and escape is what closes it.
+    opened: Option<Opened>,
+    /// A call the worker is blocked on, waiting for a yes or a no: the id to
+    /// answer under, and what it wants to run.
+    prompt: Option<Ask>,
+    /// The permission mark to write to the tty before the next frame, set where a
+    /// question is raised and where it is answered. The loop around the draw
+    /// takes it and writes it, rather than this writing to the terminal itself:
+    /// the escape goes between frames and not into one, and an App with no
+    /// terminal -- a `--print`, a test -- never writes to a tty at all.
+    mark: Option<&'static str>,
+    /// The `/`, `$` or `@` menu over the field, filtered by whatever the
+    /// trigger has been followed by.
+    menu: Option<Menu>,
+    /// The `/` and `$` rows as the worker gave them. Held because neither list
+    /// changes while a session is open, and a menu that had to wait a round
+    /// trip would come up empty every time it was opened.
+    commands: Vec<Item>,
+    skills: Vec<Item>,
+    /// Something said in the conversation's own voice: a send that failed, a
+    /// permission that was refused. Drawn as the transcript's notice row, which
+    /// is the vocabulary it already has.
+    /// The last click, for telling one from two.
+    clicked: Option<(u16, u16, Instant)>,
+    /// Whether the launch asked for an older conversation to carry on with and
+    /// the question is not up yet. Cleared the moment the rows arrive.
+    resume: bool,
+    /// When this screen opened. The blink and the spinner are spaced off it rather
+    /// than off a loop counter: any event at all makes the loop come round early,
+    /// and a dot that blinks once per loop strobes as soon as the mouse moves.
+    born: Instant,
+    /// What the launch asked to open with, held until the worker says it is
+    /// ready: a message typed for the user is drawn by them, and drawing it
+    /// means sending it.
+    opening: Option<String>,
+    /// When the last peer message landed. The row it drew is swept once, right
+    /// after it arrives, so the eye is caught by the row rather than by a bell.
+    /// Nothing after the sweep, which is what keeps a still screen still.
+    peer_at: Option<Instant>,
+    /// Whether origin has moved past this tree, once the check that runs beside
+    /// the screen has answered. Nothing is drawn from a question still in
+    /// flight, and a check that could not be made draws nothing at all: a screen
+    /// with one line for news says the news or says nothing.
+    news: Option<version::News>,
+    /// The answer's door. A fetch is a network round trip and the frame is
+    /// thirty a second, so `App::live` asks on a thread that outlives the frame
+    /// and the loop collects it here.
+    news_rx: Option<Receiver<version::News>>,
+}
+
+impl App {
+    fn live(home: Option<&std::path::Path>, start: Start, opening: Option<String>) -> io::Result<App> {
+        let cwd = std::env::current_dir().ok();
+        let sess = Session::start(home, cwd.as_deref())
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let mut app = App::new(Some(sess));
+        app.opening = opening;
+        // Asked now, answered whenever origin gets round to it. A live screen is
+        // the only one that asks: a replay and a `--print` have no tree to keep
+        // current and no reader waiting on an update.
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(version::check());
+        });
+        app.news_rx = Some(rx);
+        match start {
+            Start::Fresh => {}
+            // Asked now, answered on the worker's own time: the question is up as
+            // soon as the list comes back, and until then the screen is just the
+            // screen. Nothing is loaded until a row is chosen, so escape at the
+            // question is the new conversation already sitting behind it.
+            Start::Ask => {
+                app.resume = true;
+                app.act("session.list", serde_json::json!({}));
+            }
+            // Named, so there is nothing to ask: the conversation replays under
+            // the first frame.
+            Start::This(id) => app.act("session.load", serde_json::json!({ "id": id })),
+        }
+        Ok(app)
+    }
+
+    fn replaying(path: &str) -> App {
+        let mut app = App::new(None);
+        app.log.rows.push(Row::Notice {
+            head: format!("replay of {path}: there is no worker to send to"),
+            hidden: 0,
+        });
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+                if let Ok(ev) = wire::parse(line) {
+                    app.log.apply(&ev);
+                }
+            }
+        }
+        app.follow = true;
+        app
+    }
+
+    fn new(sess: Option<Session>) -> App {
+        App {
+            sess,
+            log: Transcript::default(),
+            input: String::new(),
+            shots: Vec::new(),
+            hover: None,
+            field_rows: Vec::new(),
+            field_top: 0,
+            caret: 0,
+            open: false,
+            overrides: HashMap::new(),
+            scroll: 0,
+            follow: true,
+            spans: Vec::new(),
+            anchors: Vec::new(),
+            body_top: 0,
+            body_width: 0,
+            turn: None,
+            figures: HashMap::new(),
+            opened: None,
+            prompt: None,
+            mark: None,
+            menu: None,
+            commands: Vec::new(),
+            skills: Vec::new(),
+            clicked: None,
+            resume: false,
+            born: Instant::now(),
+            opening: None,
+            peer_at: None,
+            news: None,
+            news_rx: None,
+        }
+    }
+
+    /// Take whatever the worker has said since the last look, and keep the turn's
+    /// stopwatch in step with it.
+    fn pump(&mut self) {
+        // An answer that has landed, taken before anything else so a screen with
+        // no worker - never mind why - still hears it.
+        if let Some(rx) = &self.news_rx {
+            if let Ok(news) = rx.try_recv() {
+                self.news = Some(news);
+                self.news_rx = None;
+            }
+        }
+        let events = match &mut self.sess {
+            Some(sess) => sess.drain(),
+            None => return,
+        };
+        for ev in events {
+            self.feed(ev);
+        }
+        let (state, tokens, estimated, think) = match &self.sess {
+            Some(sess) => (
+                sess.snap.state.clone(),
+                (sess.snap.out_tokens > 0).then_some(sess.snap.out_tokens),
+                sess.snap.tps_est,
+                view::Round {
+                    tokens: sess.snap.think_tokens,
+                    tps: sess.snap.think_tps,
+                    estimated: sess.snap.think_est,
+                },
+            ),
+            None => return,
+        };
+        self.track(&state, tokens, estimated);
+        // File the round's figures against the reasoning row they belong to. That
+        // row keeps them: what they say is what its round cost, and the row being
+        // written moves on to a tool call or an answer without carrying them off.
+        if think.tokens > 0 || think.tps > 0.0 {
+            let mine = self.log.rows.iter().rposition(|r| matches!(r, Row::Thinking { .. }));
+            if let Some(i) = mine {
+                self.figures.insert(i, think);
+            }
+        }
+    }
+
+    fn feed(&mut self, ev: Event) {
+        // A permission question blocks the worker until it is answered, so it is
+        // held for the keyboard rather than folded into the transcript. The panel
+        // carries what answering needs: the reason, the call, what it would do.
+        if ev.env.kind == "permission" {
+            let name = ev.env.data.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+            // A question the model asked arrives on this same envelope, carrying
+            // the question and the answers to pick between. A permission carries
+            // neither, so this is the whole of the difference the screen needs.
+            let question = ev.env.data.get("question").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let options: Vec<String> = ev
+                .env
+                .data
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|rows| rows.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            let kind = ev.env.data.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            // No kind means an older worker; the question mark is the one field only
+            // a question carries, so it is the honest fallback.
+            let kind = if kind.is_empty() {
+                if ev.env.data.get("question").is_some() { "question".to_string() }
+                else { "permission".to_string() }
+            } else { kind };
+            self.prompt = Some(Ask { id: ev.env.id.clone(), kind, name, question,
+                                     detail: ev.env.data.get("detail").and_then(|v| v.as_str())
+                                         .unwrap_or("").to_string(),
+                                     // Zero is the first option when there is one, and the
+                                     // text row when there is not: rows() is options+1, so
+                                     // picked 0 with no options is already past the list.
+                                     options, picked: 0, typed: String::new(),
+                                     n: ev.env.data.get("n").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                                     of: ev.env.data.get("of").and_then(|v| v.as_u64()).unwrap_or(0) as usize });
+            // The one moment the mark goes up: from here on the worker is blocked
+            // on a person, and the worker's own stream says nothing about it.
+            self.mark = Some(needs_you());
+            let asked = self.prompt.as_ref().expect("just set");
+            // A question draws its own panel and needs no second one behind it; a
+            // permission wants the full document, since refusing on a clipped line
+            // is refusing blind.
+            self.opened = (!asked.is_question()).then(|| view::ask_detail(&asked.name, &ev.env.data));
+            // The question has the keyboard, so a menu open under it would be a
+            // list of things that cannot be chosen.
+            self.menu = None;
+            return;
+        }
+        // A menu's own rows. They are not the conversation, so they reach
+        // neither the transcript nor the status line: this is the whole of what
+        // becomes of them.
+        if let Some(reply) = menu::from_reply(&ev.env.kind, &ev.env.data) {
+            // What the launch asked for: which conversation to carry on with.
+            // The question goes up as its rows arrive, and escape at it is the
+            // new session already sitting behind it.
+            if reply.kind == Kind::Sessions && self.resume {
+                self.resume = false;
+                self.menu = Some(Menu::open_apart(Kind::Sessions));
+            }
+            if let Some(open) = self.menu.as_mut().filter(|open| open.kind == reply.kind) {
+                // Which provider a catalog belongs to travels with it, rather
+                // than being guessed from what the frontend last heard.
+                open.provider = reply.provider.clone();
+                // A `/` menu is filled twice: from the rows in hand when it
+                // opens, and again from the list that lands under it. The
+                // second fill must carry this frontend's own verbs too, or the
+                // row being filtered for goes out from under the keystrokes.
+                open.fill(match reply.kind {
+                    Kind::Commands => menu::with_local(reply.items.clone()),
+                    _ => reply.items.clone(),
+                });
+            }
+            // The two lists that cannot change while a session is open are held;
+            // a picker asks every time, because what it marks is what changed.
+            match reply.kind {
+                Kind::Commands => self.commands = reply.items,
+                Kind::Skills => self.skills = reply.items,
+                _ => {}
+            }
+            return;
+        }
+        // The answer to opening a call: the arguments and the result the worker
+        // keeps on the records, which the wire only carried a summary of. The
+        // title stays the row's own -- the panel should not rename itself out
+        // from under the reader the moment the record lands.
+        if ev.env.kind == "detail" {
+            let mut panel = view::call_detail(&ev.env.data, self.detail_room());
+            if let Some(open) = &self.opened {
+                panel.title = open.title.clone();
+            }
+            self.opened = Some(panel);
+            return;
+        }
+        if let Some(sess) = &mut self.sess {
+            sess.on_event(&ev);
+        }
+        // The launch's own message goes the moment the worker says it is up.
+        // Ready rather than boot: this frontend's terminal envelope has to be in
+        // first, or the worker stamps the turn with the directory this process
+        // happens to stand in instead of the one the user was standing in.
+        if ev.state() == "ready"
+            && let Some(text) = self.opening.take()
+        {
+            self.input = text;
+            self.caret = self.input.chars().count();
+            self.send();
+        }
+        if self.log.apply(&ev) {
+            if ev.state() == "peer" {
+                self.peer_at = Some(Instant::now());
+            }
+            if self.follow {
+                // A new row while the view is at the end: stay at the end.
+                self.scroll = u16::MAX;
+            }
+        }
+    }
+
+    /// Start, run and stop the clock on a round.
+    fn track(&mut self, state: &State, tokens: Option<i64>, estimated: bool) {
+        // A round that never happened leaves nothing behind. `idle` is the worker
+        // saying the message started no loop at all, which is what a command
+        // does: the clock was started optimistically the moment the message was
+        // sent, and this is where it comes back down. Only this state clears a
+        // round -- one that ran keeps its figures after it ends, because they are
+        // what it cost.
+        if matches!(state, State::Idle) {
+            self.turn = None;
+            return;
+        }
+        let running = state.busy();
+        // A round that starts once the last one has ended is a new round: the
+        // clock, the count and the dot all start over.
+        let fresh = match &self.turn {
+            Some(t) => running && t.ended.is_some(),
+            None => running,
+        };
+        if fresh {
+            self.turn = Some(Turn::starting());
+        }
+        if let Some(t) = &mut self.turn {
+            t.tokens = tokens.or(t.tokens);
+            t.estimated = estimated;
+            if !running && t.ended.is_none() {
+                t.ended = Some(Instant::now());
+            }
+        }
+    }
+
+    /// The row the worker is writing right now.
+    ///
+    /// The row being streamed into, when there is one: a message typed mid-turn
+    /// pushes a row under it, so "the newest row" stops being the worker's own the
+    /// moment the person says anything. With nothing streaming -- a call in flight --
+    /// the newest row is the one.
+    fn writing(&self) -> Option<usize> {
+        match &self.sess {
+            Some(sess) if sess.snap.state.busy() => {
+                self.log.open_row().or_else(|| self.log.rows.len().checked_sub(1))
+            }
+            _ => None,
+        }
+    }
+
+    /// Which half of the live row's blink is on. Half a second either way: fast
+    /// enough to read as alive, slow enough to read at all.
+    fn flash(&self) -> bool {
+        (self.ms() / 500) % 2 == 0
+    }
+
+    /// How far the highlight travelling over a row has got, or None when nothing on
+    /// the screen is moving. Read off this screen's own clock and the session it has.
+    fn shimmer(&self) -> Option<usize> {
+        shimmer_phase(self.sess.as_ref().map(|s| &s.snap), self.peer_at.map(|t| t.elapsed()), self.ms())
+    }
+
+    /// What the screen knows about the round: where the worker is writing right
+    /// now, and the figures filed against a row.
+    fn figures(&self, i: usize) -> Option<view::Round> {
+        self.figures.get(&i).copied()
+    }
+
+    /// How long this screen has been up, which is what the blink, the spinner and
+    /// the turn's stopwatch are all spaced off.
+    fn ms(&self) -> u128 {
+        self.born.elapsed().as_millis()
+    }
+
+    /// The design's header: what this is, what is answering, and where.
+    ///
+    /// Only the first line is read as a title; the two under it are the model and
+    /// the directory, so they are the muted tone rather than the bright one. The
+    /// name is `text()` now instead of the terminal's default foreground: in a
+    /// pane that default is fleet's own, and a row of the transcript landing on
+    /// the pane's rim has to look the same as this one.
+    fn header(&self) -> Vec<Line<'static>> {
+        let mut out = vec![Line::from(vec![
+            Span::styled(" Cuacode-RS", Style::new().fg(ink::text()).add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            Span::styled(format!("v{}", version::ID), Style::new().fg(ink::dim())),
+        ])];
+        // A replay has no worker and so no model to name; saying that beats an
+        // empty line where the model should be.
+        let answering = match &self.sess {
+            Some(sess) => model_line(&sess.snap),
+            None => "replay".to_string(),
+        };
+        for line in [answering, session::working_dir()] {
+            if !line.is_empty() {
+                out.push(Line::from(Span::styled(format!(" {line}"), Style::new().fg(ink::dim()))));
+            }
+        }
+        // The one thing this screen says on its own account, and only when origin
+        // has a commit the tree does not. Yellow, since it is neither a failure
+        // nor a finished thing, with the two commands that answer it beside it in
+        // the quiet tone so the fact is what is read first.
+        if let Some(n) = self.news.as_ref().and_then(|n| n.behind()) {
+            out.push(Line::from(vec![
+                Span::styled(
+                    format!(" you are behind {n} {}", if n == 1 { "update" } else { "updates" }),
+                    Style::new().fg(ink::warn()),
+                ),
+                Span::styled(
+                    "  \u{b7}  cuacode doctor, or cuacode doctor --upgrade",
+                    Style::new().fg(ink::dim()),
+                ),
+            ]));
+        }
+        out
+    }
+
+    /// Whether the worker is running calls rather than thinking, which is which
+    /// set of words the readout draws from.
+    fn tooling(&self) -> bool {
+        matches!(self.sess.as_ref().map(|s| &s.snap.state), Some(State::Tools))
+    }
+
+    /// The line under the box: what the round is doing, how much of the window
+    /// the conversation has filled, how fast it is coming, and which permission
+    /// mode is on. Every figure is one the worker sent, so nothing is invented to
+    /// fill the line, and it says nothing at all rather than sitting there empty:
+    /// a line that is only there to be there is what this screen keeps off.
+    fn status_text(&self) -> Option<String> {
+        let sess = self.sess.as_ref()?;
+        let snap = &sess.snap;
+        let mut said: Vec<String> = Vec::new();
+        // A fold replaces what the line would otherwise say, because it is the only
+        // thing happening: a turn waiting on a summarizer is not thinking, and
+        // "running" beside a quiet screen is the wrong thing to be told. Said in
+        // one clause, without a percentage or a spinner, since the honest amount
+        // known about it is that it is happening.
+        if !snap.compacting.is_empty() && snap.compacting != "done" {
+            // Loud on purpose. A fold is the one pause where the worker is blocked
+            // on a model the person cannot see, so the line has to be unmistakable:
+            // the word, the size, and what it is about to cost in time. Nothing
+            // else on the line, because nothing else is happening.
+            let freed = snap.compact_freed;
+            return Some(match (freed, snap.compact_folded) {
+                (f, n) if f > 0 && n > 0 =>
+                    format!("\u{25c6} compacting: {n} records into a summary, {}k chars freed", f / 1000),
+                (f, _) if f > 0 =>
+                    format!("\u{25c6} compacting: {}k chars freed", f / 1000),
+                _ => "\u{25c6} compacting the conversation into a summary".to_string(),
+            });
+        }
+        if snap.context_max > 0 {
+            said.push(format!("ctx {}/{}", plenty(snap.context_used), plenty(snap.context_max)));
+        } else if snap.context_used > 0 {
+            said.push(format!("ctx {} (window unknown)", plenty(snap.context_used)));
+        }
+        // Another agent's message is in the mailbox and the round in flight has not
+        // carried it into the model yet. It is not the message and nothing about the
+        // conversation changes here; the line says the wait, with the name the worker
+        // put on the knock, and a knock from nobody in particular still says a peer is
+        // waiting rather than inventing a name for it.
+        if let Some(name) = &snap.peer_waiting {
+            said.push(waiting_words(name));
+        }
+        if snap.tps > 0.0 {
+            said.push(format!("{:.0} tok/s{}", snap.tps, if snap.tps_est { " est" } else { "" }));
+        }
+        if snap.turns > 0 {
+            said.push(format!("{} turns", snap.turns));
+        }
+        if !snap.mode.is_empty() {
+            said.push(format!("perms {}", snap.mode));
+        }
+        (!said.is_empty()).then(|| said.join("  \u{b7}  "))
+    }
+
+    /// The box: the message as the rows it wraps to, with the caret somewhere in
+    /// it, and at the right end of the first row the turn's readout, or the yes or
+    /// no the worker is blocked on. The only place the keyboard types, which is
+    /// also where the thing that is running has to be.
+    ///
+    /// `height` is what the frame gave the box, which is one row per row the
+    /// message wraps to, up to `FIELD_MAX`. Past that the window follows the caret
+    /// rather than the end of the message: the caret is where the next character
+    /// lands, so it is what has to be on screen.
+    ///
+    /// `top` is the field's first row on screen, which is only needed by a chip:
+    /// it is the row comparison that says whether the pointer is on this one.
+    fn field_lines(&self, width: usize, height: usize, top: u16) -> Vec<Line<'static>> {
+        if let Some(asked) = &self.prompt {
+            // A question is drawn as its own panel, not as a line in this box: it
+            // has a list in it, and a one-row field is where a yes/no goes. This
+            // line is only what remains of the box while one is up.
+            if asked.is_question() {
+                // The question is in its own panel with the caret in it; repeating
+                // it down here would be saying the same thing twice, and the field
+                // is not where it is answered.
+                return vec![Line::from("")];
+            }
+            return vec![Line::from(vec![
+                Span::styled(
+                    format!("allow {}?  ", asked.name),
+                    Style::new().fg(ink::code()).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("y / n", Style::new().fg(ink::code())),
+            ])];
+        }
+        let (cols, rows, caret_col, caret_row) = self.drawn(width, self.keep());
+        let n = rows.len();
+        let shown = height.clamp(1, n.max(1));
+        let first_shown = (caret_row + 1).saturating_sub(shown).min(n - shown.min(n));
+        let status = self.turn.as_ref().map(|t| view::turn(t, self.ms(), self.shimmer(), self.tooling()));
+        let mut out = Vec::new();
+        for li in first_shown..first_shown + shown {
+            let first = li == 0;
+            let lead = if first { format!("{PROMPT} ") } else { "  ".to_string() };
+            let (line, tags): (Vec<char>, Vec<u8>) = cols[rows[li].0..rows[li].1]
+                .iter()
+                .map(|(c, t)| (*c, *t))
+                .unzip();
+            let text: String = line.into_iter().collect();
+            let caret_at = caret_col.saturating_sub(rows[li].0);
+            let mine = li == caret_row && (!self.input.is_empty() || !self.shots.is_empty());
+            // Which chip the pointer is on, if the pointer is on this row: the
+            // column it is over is a column of the row, since a row is now as wide
+            // as the box and never wider.
+            let pointer = self.hover.and_then(|(x, y)| {
+                let row = y == top + (li - first_shown) as u16;
+                (row && x >= 2).then(|| x.saturating_sub(2) as usize)
+            });
+            let mut spans = vec![Span::styled(lead, Style::new().fg(ink::rule()))];
+            let cs: Vec<char> = text.chars().collect();
+            // Which chip the pointer is over, if it is over one of them at all.
+            let under_pointer = pointer.and_then(|p| tags.get(p).copied()).filter(|t| *t != 0);
+            let mut run = String::new();
+            let mut run_tag = 0u8;
+            let flush = |spans: &mut Vec<Span<'static>>, run: &mut String, tag: u8| {
+                if run.is_empty() {
+                    return;
+                }
+                spans.push(Span::styled(std::mem::take(run), chip_style(tag, under_pointer)));
+            };
+            for (k, (c, tag)) in cs.iter().zip(tags.iter()).enumerate() {
+                let tag = *tag;
+                if c == &'\n' {
+                    continue;
+                }
+                if k == caret_at && mine {
+                    flush(&mut spans, &mut run, run_tag);
+                    let style = chip_style(tag, under_pointer).add_modifier(Modifier::REVERSED);
+                    spans.push(Span::styled(c.to_string(), style));
+                    run_tag = tag;
+                    continue;
+                }
+                if tag != run_tag {
+                    flush(&mut spans, &mut run, run_tag);
+                    run_tag = tag;
+                }
+                run.push(*c);
+            }
+            flush(&mut spans, &mut run, run_tag);
+            // The caret past the last character of the line, and an empty field:
+            // the thin bar it would land beside.
+            if mine && caret_at >= cs.len() {
+                spans.push(Span::styled("\u{258f}", Style::new().add_modifier(Modifier::REVERSED)));
+            }
+            if let Some(s) = &status {
+                if first {
+                    let used = 2 + cs.len() + usize::from(mine && caret_at >= cs.len());
+                    spans.push(Span::raw(" ".repeat(width.saturating_sub(used + s.width()))));
+                    spans.extend(s.spans.iter().cloned());
+                }
+            }
+            out.push(Line::from(spans));
+        }
+        out
+    }
+
+    /// The message as the columns it is drawn in, the rows those columns wrap to,
+    /// and where the caret sits among them.
+    ///
+    /// A chip is drawn as its label rather than as the characters it covers, so
+    /// this is the one place the two get reconciled: `cols` is what goes on the
+    /// screen, and `rows` slices it into what fits `width`. Wrapping happens here
+    /// and not in the widget, because a chip has to be moved whole to the next row
+    /// and a widget would break `[image 1]` in half.
+    ///
+    /// `keep` is what the first row owes the turn's readout: the readout rides at
+    /// the right end of it, so the first row wraps narrower than the rest and the
+    /// readout is never typed over.
+    fn drawn(&self, width: usize, keep: usize) -> (Vec<(char, u8)>, Vec<(usize, usize)>, usize, usize) {
+        let cs: Vec<char> = self.input.chars().collect();
+        let mut tags = vec![0u8; cs.len()];
+        for (n, shot) in self.shots.iter().enumerate() {
+            for i in shot.at..(shot.at + shot.len).min(cs.len()) {
+                tags[i] = (n + 1) as u8;
+            }
+        }
+        let mut cols: Vec<(char, u8)> = Vec::new();
+        let mut col_of = vec![0usize; cs.len() + 1];
+        let mut i = 0;
+        while i < cs.len() {
+            col_of[i] = cols.len();
+            let tag = tags[i];
+            if tag == 0 {
+                cols.push((cs[i], 0));
+                i += 1;
+                continue;
+            }
+            for ch in format!("[image {tag}]").chars() {
+                cols.push((ch, tag));
+            }
+            while i < cs.len() && tags[i] == tag {
+                i += 1;
+            }
+        }
+        col_of[cs.len()] = cols.len();
+        let caret = col_of[self.caret.min(cs.len())];
+        // A newline is a row of its own wherever it falls, and the first row's
+        // budget is the box less what it owes the readout. The budget is measured
+        // in drawn columns, so a chip counts as the label it is drawn as.
+        let mut rows: Vec<(usize, usize)> = Vec::new();
+        let mut start = 0usize;
+        let mut used = 0usize;
+        // The last space inside the row, which is where the wrap breaks if it can:
+        // a word goes whole to the next row rather than being cut at the edge.
+        let mut space: Option<usize> = None;
+        let mut k = 0usize;
+        while k < cols.len() {
+            let room = if rows.is_empty() { field_room(width, keep) } else { field_room(width, 0) };
+            let (c, tag) = cols[k];
+            if c == '\n' {
+                rows.push((start, k));
+                start = k + 1;
+                used = 0;
+                space = None;
+                k += 1;
+                continue;
+            }
+            // A chip is one thing on the row or it is not on the row: it moves
+            // whole rather than being cut at the edge of the box. A chip with a
+            // space in it is a chip, so a chip is never a break point either.
+            let mut run = 1usize;
+            if tag != 0 {
+                while k + run < cols.len() && cols[k + run].1 == tag {
+                    run += 1;
+                }
+            }
+            if used + run > room && k > start {
+                match space.filter(|sp| *sp >= start) {
+                    // Break after the space, and the space itself is the one thing
+                    // the wrap eats: it was a separator, not part of the line.
+                    Some(sp) => {
+                        rows.push((start, sp));
+                        start = sp + 1;
+                        used = k - start;
+                    }
+                    // A word longer than a whole row: it is split rather than
+                    // allowed to run off the edge, which is the only way to draw
+                    // it at all.
+                    None => {
+                        rows.push((start, k));
+                        start = k;
+                        used = 0;
+                    }
+                }
+                space = None;
+                continue;
+            }
+            if c == ' ' {
+                space = Some(k);
+            }
+            used += run;
+            k += run;
+        }
+        rows.push((start, cols.len()));
+        // The row the caret is on is the row its own drawn column falls in, and
+        // the last row takes a caret that sits past everything else.
+        let caret_row = rows.iter().rposition(|(s, _)| *s <= caret).unwrap_or(0);
+        (cols, rows, caret, caret_row)
+    }
+
+    /// What the first row of the box owes the turn's readout, in columns: the
+    /// readout, the space before it and a space after the text. Zero when no round
+    /// is showing, which is when the box has the full width.
+    fn keep(&self) -> usize {
+        match &self.turn {
+            Some(t) => view::turn_room(t, self.tooling()) + 3,
+            None => 0,
+        }
+    }
+
+    /// The message as its own lines: a newline in the field is a line, the way
+    /// it is in the message it becomes. The drawing does not use this -- a chip
+    /// is drawn as its label, so the lines come from `drawn()` -- but a test that
+    /// is about the message rather than about the picture reads better this way.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn lines(&self) -> Vec<String> {
+        self.input.split('\n').map(str::to_string).collect()
+    }
+
+    /// Whether the message is more than one line, which is what decides whether
+    /// the editing keys belong to it or to the conversation. A hard newline, not a
+    /// wrap: a row the box made for itself is still the same line to the keys.
+    fn multiline(&self) -> bool {
+        self.input.contains('\n')
+    }
+
+    /// How tall the box wants to be, before the frame decides how much it can
+    /// spare: one row per row the message wraps to at this width, up to the
+    /// ceiling.
+    fn field_height(&self, width: usize) -> u16 {
+        (self.drawn(width, self.keep()).1.len()).clamp(1, FIELD_MAX) as u16
+    }
+
+    /// How many characters are in the message.
+    fn chars(&self) -> usize {
+        self.input.chars().count()
+    }
+
+    /// Where the caret sits, as a byte offset.
+    fn caret_byte(&self) -> usize {
+        self.input
+            .char_indices()
+            .nth(self.caret)
+            .map(|(at, _)| at)
+            .unwrap_or(self.input.len())
+    }
+
+    /// Where the caret's own line starts, in characters.
+    fn line_start(&self) -> usize {
+        let cs: Vec<char> = self.input.chars().collect();
+        let mut at = self.caret.min(cs.len());
+        while at > 0 && cs[at - 1] != '\n' {
+            at -= 1;
+        }
+        at
+    }
+
+    /// Where it ends, in characters.
+    fn line_end(&self) -> usize {
+        let cs: Vec<char> = self.input.chars().collect();
+        let mut at = self.caret.min(cs.len());
+        while at < cs.len() && cs[at] != '\n' {
+            at += 1;
+        }
+        at
+    }
+
+    /// A picture onto the message, as a chip at the caret.
+    ///
+    /// The characters the chip covers are ordinary text -- `at` and `len` are
+    /// where they are in the message -- and a space goes on either side so the
+    /// next word is a word of its own: `abc [image 1] and` rather than
+    /// `abc[image 1]and`. The whole insertion is one step of the caret.
+    fn attach(&mut self, image: attach::Image) {
+        let label = format!(" [image {}] ", self.shots.len() + 1);
+        let at = self.caret.min(self.chars());
+        let cs: Vec<char> = self.input.chars().collect();
+        let head: String = cs[..at].iter().collect();
+        let tail: String = cs[at..].iter().collect();
+        self.input = format!("{head}{label}{tail}");
+        self.shots.push(Shot { image, at, len: label.chars().count() });
+        let last = self.shots.len() - 1;
+        let width = label.chars().count();
+        for shot in &mut self.shots[..last] {
+            if shot.at >= at {
+                shot.at += width;
+            }
+        }
+        self.caret = at + width;
+    }
+
+    /// Take one picture off the message, chip and bytes together.
+    ///
+    /// The message loses the characters the chip covered and every shot after it
+    /// moves back by that many, which is what keeps the chips and the text in
+    /// step. The bytes go with the shot: the message never held more than the
+    /// characters, so removing the chip is what removes the picture.
+    fn detach(&mut self, n: usize) {
+        let Some(shot) = self.shots.get(n) else { return };
+        let (at, len) = (shot.at, shot.len);
+        let cs: Vec<char> = self.input.chars().collect();
+        let head: String = cs[..at.min(cs.len())].iter().collect();
+        let tail: String = cs[(at + len).min(cs.len())..].iter().collect();
+        self.input = format!("{head}{tail}");
+        self.shots.remove(n);
+        self.shift_shots_from(at, -(len as i32));
+        self.caret = self.caret.min(at).min(self.chars());
+        self.relabel();
+    }
+
+    /// Every chip's own text rewritten as its place in the message.
+    ///
+    /// The message carries the label, and the label carries the number, so taking
+    /// a middle picture off leaves the ones after it wearing their old numbers:
+    /// the text would say `[image 3]` while the model was handed two pictures.
+    /// The number is the one thing this cannot get wrong, so the text is rebuilt
+    /// from the shots rather than patched.
+    fn relabel(&mut self) {
+        let cs: Vec<char> = self.input.chars().collect();
+        let mut order: Vec<usize> = (0..self.shots.len()).collect();
+        order.sort_by_key(|i| self.shots[*i].at);
+        let mut out = String::new();
+        let mut shots = Vec::with_capacity(order.len());
+        let mut at = 0usize;
+        let mut caret = None;
+        for (position, i) in order.iter().enumerate() {
+            let shot = self.shots[*i].clone();
+            let start = shot.at.min(cs.len());
+            let end = (shot.at + shot.len).min(cs.len());
+            let before: String = cs[at..start].iter().collect();
+            // Where the caret was, counted into the message being rebuilt.
+            if caret.is_none() && self.caret <= start {
+                caret = Some(out.chars().count() + before.chars().count());
+            }
+            out.push_str(&before);
+            let label = format!(" [image {}] ", position + 1);
+            let label_at = out.chars().count();
+            if caret.is_none() && self.caret < end {
+                caret = Some(label_at + (self.caret - start));
+            }
+            out.push_str(&label);
+            shots.push(Shot { image: shot.image, at: label_at, len: label.chars().count() });
+            at = end;
+        }
+        let tail: String = cs[at.min(cs.len())..].iter().collect();
+        if caret.is_none() {
+            caret = Some(out.chars().count() + (self.caret.saturating_sub(at)));
+        }
+        out.push_str(&tail);
+        self.input = out;
+        self.shots = shots;
+        // A caret that no longer exists in a shorter message goes to its end.
+        self.caret = caret.unwrap_or(self.caret).min(self.chars());
+    }
+
+    /// Every shot at or after `from` moves by `by` characters.
+    fn shift_shots_from(&mut self, from: usize, by: i32) {
+        for shot in &mut self.shots {
+            if shot.at >= from {
+                shot.at = (shot.at as i32 + by).max(0) as usize;
+            }
+        }
+    }
+
+    /// The caret never rests strictly inside a chip: it belongs to one of its
+    /// edges. Backwards lands on the left one, forwards on the right.
+    fn snap_caret_out(&mut self, backwards: bool) {
+        if let Some(shot) = self.shots.iter().find(|s| self.caret > s.at && self.caret < s.at + s.len) {
+            self.caret = if backwards { shot.at } else { shot.at + shot.len };
+        }
+    }
+
+    /// The shot that ends exactly where the caret is, which is what a backspace
+    /// finds just behind it.
+    fn shot_ending_at(&self, at: usize) -> Option<usize> {
+        self.shots.iter().position(|s| s.at + s.len == at)
+    }
+
+    /// Cut the message between two characters, taking any chip that fell inside
+    /// the cut and moving the ones after it back.
+    fn cut(&mut self, start: usize, end: usize) {
+        let cs: Vec<char> = self.input.chars().collect();
+        let (start, end) = (start.min(cs.len()), end.min(cs.len()));
+        if start >= end {
+            return;
+        }
+        let head: String = cs[..start].iter().collect();
+        let tail: String = cs[end..].iter().collect();
+        self.input = format!("{head}{tail}");
+        self.shots.retain(|s| s.at >= end || s.at + s.len <= start);
+        self.shift_shots_from(end, -((end - start) as i32));
+        self.caret = start;
+        self.relabel();
+    }
+
+    /// The start of the word behind the caret, in the same sense the word jumps
+    /// mean: over the spaces, then over the word.
+    fn word_start(&self) -> usize {
+        let cs: Vec<char> = self.input.chars().collect();
+        let mut at = self.caret.min(cs.len());
+        while at > 0 && cs[at - 1].is_whitespace() {
+            at -= 1;
+        }
+        while at > 0 && !cs[at - 1].is_whitespace() {
+            at -= 1;
+        }
+        at
+    }
+
+    /// The far side of the next word boundary: over the rest of this word, then
+    /// over the spaces that follow. The same distance the word jumps travel, so a
+    /// word delete and a word jump agree about where a word ends.
+    fn word_end(&self) -> usize {
+        let cs: Vec<char> = self.input.chars().collect();
+        let mut at = self.caret.min(cs.len());
+        while at < cs.len() && !cs[at].is_whitespace() {
+            at += 1;
+        }
+        while at < cs.len() && cs[at].is_whitespace() {
+            at += 1;
+        }
+        at
+    }
+
+    fn insert(&mut self, c: char) {
+        self.snap_caret_out(true);
+        let at = self.caret.min(self.chars());
+        // A chip starting at the caret is pushed back by the character; one the
+        // caret is standing on has already been stepped out of.
+        for shot in &mut self.shots {
+            if shot.at >= at {
+                shot.at += 1;
+            }
+        }
+        let byte = self.caret_byte();
+        self.input.insert(byte, c);
+        self.caret += 1;
+    }
+
+    fn backspace(&mut self) {
+        if self.caret == 0 {
+            return;
+        }
+        // A chip behind the caret goes whole, which is the one press that undoes
+        // the one gesture that put it there.
+        if let Some(n) = self.shot_ending_at(self.caret) {
+            self.detach(n);
+            return;
+        }
+        let end = self.caret_byte();
+        let start = self.input[..end].char_indices().last().map(|(at, _)| at).unwrap_or(0);
+        self.input.replace_range(start..end, "");
+        self.caret -= 1;
+        self.shift_shots_from(self.caret + 1, -1);
+    }
+
+    /// ctrl+backspace, and its mac spelling, which is the same cut.
+    fn word_backspace(&mut self) {
+        let start = self.word_start();
+        self.cut(start, self.caret);
+    }
+
+    fn delete(&mut self) {
+        // The same as backspace, looking forward.
+        if let Some(n) = shot_at(&self.shots, self.caret) {
+            self.detach(n);
+            return;
+        }
+        let at = self.caret_byte();
+        let Some(c) = self.input[at..].chars().next() else { return };
+        self.input.replace_range(at..at + c.len_utf8(), "");
+        self.shift_shots_from(self.caret + 1, -1);
+    }
+
+    fn word_delete(&mut self) {
+        let end = self.word_end();
+        self.cut(self.caret, end);
+    }
+
+    /// From the caret back to the start of its line: cmd+backspace on a mac,
+    /// which is ctrl-u in the terminal that reports it.
+    fn kill_to_line_start(&mut self) {
+        let start = self.line_start();
+        self.cut(start, self.caret);
+    }
+
+    /// From the caret to the end of its line: cmd+delete on a mac, ctrl+k in
+    /// readline, and the same cut wherever a terminal sends it.
+    fn kill_to_line_end(&mut self) {
+        let end = self.line_end();
+        self.cut(self.caret, end);
+    }
+
+    fn left(&mut self) {
+        self.caret = self.caret.saturating_sub(1);
+        self.snap_caret_out(true);
+    }
+
+    fn right(&mut self) {
+        self.caret = (self.caret + 1).min(self.chars());
+        self.snap_caret_out(false);
+    }
+
+    /// A word at a time, in the sense every terminal means it: over the spaces,
+    /// then over the word.
+    fn word_left(&mut self) {
+        self.caret = self.word_start();
+        self.snap_caret_out(true);
+    }
+
+    fn word_right(&mut self) {
+        self.caret = self.word_end();
+        self.snap_caret_out(false);
+    }
+
+    /// A line up or down, keeping the column where it can: a shorter line takes
+    /// the caret to its end rather than wrapping it somewhere it did not ask for.
+    fn up_line(&mut self) {
+        let column = self.caret - self.line_start();
+        if self.line_start() == 0 {
+            return;
+        }
+        self.caret = self.line_start() - 1;
+        self.caret = (self.line_start() + column).min(self.line_end());
+        self.snap_caret_out(true);
+    }
+
+    fn down_line(&mut self) {
+        let column = self.caret - self.line_start();
+        if self.line_end() == self.chars() {
+            return;
+        }
+        self.caret = self.line_end() + 1;
+        self.caret = (self.line_start() + column).min(self.line_end());
+        self.snap_caret_out(false);
+    }
+
+    fn line_home(&mut self) {
+        self.caret = self.line_start();
+        self.snap_caret_out(false);
+    }
+
+    fn to_line_end(&mut self) {
+        self.caret = self.line_end();
+        self.snap_caret_out(true);
+    }
+
+    /// Send what has been typed.
+    fn send(&mut self) {
+        let text = self.input.trim().to_string();
+        // A message of nothing but a picture is a message: the worker asks the
+        // model what it makes of it, which is the whole reason to paste one.
+        if text.is_empty() && self.shots.is_empty() {
+            return;
+        }
+        if self.shots.is_empty() {
+            // The two verbs this frontend answers itself, read before anything
+            // goes down the pipe. The worker has a command for neither, so sent
+            // as prose they would reach the model: `/help` a question about keys,
+            // and `/permissions` a request in a conversation that has no such
+            // thing. Both are read only when nothing is attached: `/help` with a
+            // picture on it is a message, not a request for this screen's own
+            // panel.
+            if text == "/help" {
+                self.input.clear();
+                self.caret = 0;
+                self.opened = Some(view::keys());
+                return;
+            }
+            if text == "/permissions" || text.starts_with("/permissions ") {
+                let arg = text["/permissions".len()..].trim().to_lowercase();
+                self.input.clear();
+                self.caret = 0;
+                match arg.as_str() {
+                    // On its own it is the question, and the list is the answer.
+                    "" => self.pick_permissions(),
+                    mode @ ("ask" | "auto" | "bypass" | "off") => {
+                        self.act("permission.mode", serde_json::json!({ "mode": mode }));
+                    }
+                    other => self.say(format!("permissions: no mode called {other} (ask, auto, bypass, off)")),
+                }
+                return;
+            }
+        }
+        let images: Vec<attach::Image> = self.shots.iter().map(|s| s.image.clone()).collect();
+        // Drawn here and not sent to the worker: a live turn is never echoed
+        // back, so this is the only chance to show what was asked. The row says
+        // the pictures by name, the way a replayed one does.
+        self.log.say(&text, images.iter().map(|i| i.name.clone()).collect());
+        match &mut self.sess {
+            Some(sess) => {
+                if let Err(e) = sess.chat(&text, &images) {
+                    self.say(e);
+                }
+            }
+            // A replay has no worker. Saying so beats a field that looks live.
+            None => self.say("this is a replay: there is nothing to send to".into()),
+        }
+        self.input.clear();
+        self.shots.clear();
+        self.caret = 0;
+        self.follow = true;
+    }
+
+    /// Fold or unfold one step, on the reader's own authority rather than the
+    /// global. The key is the step's head row: the thought when it has one, the
+    /// first call when it does not.
+    fn toggle_step(&mut self, head: usize) {
+        let row = self.log.rows.get(head).cloned();
+        let Some(row) = row else { return };
+        if !view::foldable(&row) {
+            return;
+        }
+        let open = self.shows(head, &row);
+        self.overrides.insert(head, !open);
+    }
+
+    /// Whether a thought shows its text: the reader's own choice if they made one,
+    /// the screen's own if they did not.
+    fn shows(&self, i: usize, _row: &Row) -> bool {
+        self.overrides.get(&i).copied().unwrap_or(self.open)
+    }
+
+    fn scroll_by(&mut self, by: i64) {
+        self.follow = false;
+        self.scroll = (self.scroll as i64 + by).max(0) as u16;
+    }
+
+    /// Where a call can be opened: the row under the pointer, if it is a call.
+    fn open(&mut self, i: usize) {
+        // The row is what the panel is built from, so it is taken out of the log
+        // first: the log cannot be borrowed while the screen is being written to.
+        let row = match self.log.rows.get(i) {
+            Some(row @ Row::Tool { .. }) => row.clone(),
+            _ => return,
+        };
+        let Row::Tool { name, args, call, result, index } = &row else { return };
+        // The arguments first, at once: the wire carried them whole, so the panel
+        // is never empty while the worker is asked for its own record of the call.
+        self.opened = Some(view::call_from_row(name, args, call, result.as_deref(), self.detail_room()));
+        // A call with no index has no record to ask for -- it is still running, or
+        // a replay, which has no worker at all. The row's own copy is the answer.
+        let Some(index) = *index else { return };
+        if let Some(sess) = &mut self.sess {
+            if let Err(e) = sess.command("tool.detail", serde_json::json!({ "index": index })) {
+                self.say(e);
+            }
+        }
+    }
+
+    /// Open the calls menu: every call this conversation has made, newest first,
+    /// so the one just watched go past is already under the cursor and an older
+    /// one is a line away. This is what a keyboard has instead of a mouse to
+    /// double click a row with, and it is the only way to reach a call that is
+    /// not the newest.
+    fn open_calls(&mut self) {
+        let items = menu::calls(&self.log.rows);
+        if items.is_empty() {
+            self.say("no call in this conversation to open".into());
+            return;
+        }
+        let mut open = Menu::open_apart(Kind::Calls);
+        open.fill(items);
+        self.menu = Some(open);
+    }
+
+    /// A bracketed paste, which is how a terminal hands over what was dropped on
+    /// it or pasted in from elsewhere.
+    ///
+    /// All or nothing: a paste that is mostly prose with a filename in it is
+    /// prose, and pulling one word out of it would be the wrong reading of an
+    /// ordinary paste. Every token naming an image is the file-manager drop of
+    /// one or several pictures, which is a gesture and not text.
+    ///
+    /// ponytail: a path *typed* by hand is not absorbed, only a pasted one. That
+    /// would mean a stat on every keystroke, against a gesture nobody uses: the
+    /// drop is what writes a path into a terminal, and the clipboard is the other
+    /// door.
+    fn paste(&mut self, text: String) {
+        if let Some(images) = paths_as_images(&text) {
+            for image in images {
+                self.attach(image);
+            }
+            return;
+        }
+        for c in text.chars() {
+            self.insert(c);
+        }
+    }
+
+    /// Something said in the conversation's own voice. The transcript's notice row
+    /// is the vocabulary it already has, so nothing new is invented on screen.
+    fn say(&mut self, note: String) {
+        self.log.rows.push(Row::Notice { head: note, hidden: 0 });
+    }
+
+    /// The columns a panel's own code blocks have to fit in: the conversation
+    /// pane less the margin and frame the panel is drawn with. It is the width the
+    /// last frame drew at, which is the width the next one will, so a panel opened
+    /// by a keystroke is sized right.
+    ///
+    /// ponytail: a resize between that frame and the panel being built leaves the
+    /// panel a frame stale. Closing and reopening it is the fix; sizing at draw
+    /// time would mean the panel carrying its data instead of its lines.
+    fn detail_room(&self) -> usize {
+        self.body_width.saturating_sub(4).max(8) as usize
+    }
+
+    /// The piece a screen line belongs to, for a click: the row it was drawn from
+    /// and the row its step folds against.
+    fn anchor_at(&self, y: u16) -> Option<(usize, usize)> {
+        let line = self.scroll.checked_add(y.checked_sub(self.body_top)?)? as usize;
+        let at = self.spans.iter().position(|(start, end)| line >= *start && line < *end)?;
+        self.anchors.get(at).copied()
+    }
+
+    fn mouse(&mut self, m: MouseEvent) {
+        // The pointer's own place in the field, for a chip that lights up under
+        // it. Set before anything is decided, because the light is a fact about
+        // the pointer and not about what the click does.
+        self.hover = (m.kind != MouseEventKind::Up(MouseButton::Left)).then_some((m.column, m.row));
+        // An open call has the wheel, the way it has the keyboard.
+        if let Some(open) = &mut self.opened {
+            match m.kind {
+                MouseEventKind::ScrollUp => open.scroll = open.scroll.saturating_sub(3),
+                MouseEventKind::ScrollDown => open.scroll = open.scroll.saturating_add(3),
+                _ => {}
+            }
+            return;
+        }
+        match m.kind {
+            MouseEventKind::ScrollUp => self.scroll_by(-3),
+            MouseEventKind::ScrollDown => self.scroll_by(3),
+            MouseEventKind::Down(MouseButton::Left) => {
+                // A chip under the pointer goes off, which is the "remove it in a
+                // second" the whole thing is for. Read off `field_rows`, the
+                // frame's own numbers, so the column a click lands in is the
+                // column that was drawn.
+                if let Some(n) = self.chip_at(m.column, m.row) {
+                    self.detach(n);
+                    return;
+                }
+                let now = Instant::now();
+                let twice = matches!(self.clicked, Some((x, y, at)) if x == m.column && y == m.row && now.duration_since(at) < DOUBLE_CLICK);
+                self.clicked = Some((m.column, m.row, now));
+                if twice {
+                    if let Some((row, head)) = self.anchor_at(m.row) {
+                        // A call opens, a step folds: the click does the useful
+                        // thing for what it landed on.
+                        if matches!(self.log.rows.get(row), Some(Row::Tool { .. })) {
+                            self.open(row);
+                        } else {
+                            self.toggle_step(head);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The shot under a screen position, if the pointer is on a chip.
+    ///
+    /// The field's own geometry as the last frame drew it: which screen row each
+    /// of its lines landed on, which column its window started at, and which
+    /// chip each drawn column belongs to. A column two in is the prompt, so the
+    /// tag comes off `column - 2`.
+    fn chip_at(&self, column: u16, row: u16) -> Option<usize> {
+        let (_, _, styles) = self
+            .field_rows
+            .iter()
+            .find(|(r, _, _)| self.field_top + r == row)?;
+        let tag = *styles.get(column.saturating_sub(2) as usize)?;
+        (tag != 0).then(|| tag as usize - 1)
+    }
+
+    /// The keys a panel answers to, whether it is a call that was opened or a
+    /// question the worker is blocked on.
+    fn scroll_opened(&mut self, code: KeyCode) {
+        let Some(open) = &mut self.opened else { return };
+        match code {
+            KeyCode::Up => open.scroll = open.scroll.saturating_sub(1),
+            KeyCode::Down => open.scroll = open.scroll.saturating_add(1),
+            KeyCode::PageUp => open.scroll = open.scroll.saturating_sub(10),
+            KeyCode::PageDown => open.scroll = open.scroll.saturating_add(10),
+            KeyCode::Home => open.scroll = 0,
+            _ => {}
+        }
+    }
+
+    /// Stop the round in flight. The worker ends the run and says so; nothing here
+    /// pretends it stopped by itself.
+    fn cancel(&mut self) {
+        if let Some(sess) = &mut self.sess {
+            if let Err(e) = sess.cancel() {
+                self.say(e);
+            }
+        }
+    }
+
+    /// One key. Returns false to leave.
+    fn key(&mut self, k: KeyEvent) -> bool {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+        let cmd = k.modifiers.contains(KeyModifiers::SUPER);
+
+        // Leaving is available whatever else has the keyboard.
+        if ctrl && k.code == KeyCode::Char('c') {
+            return false;
+        }
+
+        // A question the worker is blocked on is answered before anything else: it
+        // is the thing that cannot wait, and the panel beside it is only what the
+        // answer needs.
+        if let Some(mut asked) = self.prompt.clone() {
+            // A question with options gets a panel and the keyboard: arrows move,
+            // enter takes what is under them, a key that is not navigation starts
+            // typing a custom answer instead. Picking from a list is the shortcut;
+            // nothing about it should stop you from saying what you actually mean.
+            //
+            // A permission keeps the y/n it always had. It is binary, it is urgent,
+            // and one keystroke is the right amount of ceremony for it.
+            let reply = if asked.is_question() {
+                match k.code {
+                    // Arrows only move among real choices. A question with no
+                    // options has no list, and swallowing up/down there just
+                    // removes keys from a text field for no reason.
+                    KeyCode::Up if asked.has_choices() && asked.typed.is_empty() => {
+                        asked.picked = asked.picked.saturating_sub(1);
+                        self.prompt = Some(asked);
+                        return true;
+                    }
+                    KeyCode::Down if asked.has_choices() && asked.typed.is_empty() => {
+                        asked.picked = (asked.picked + 1).min(asked.rows() - 1);
+                        self.prompt = Some(asked);
+                        return true;
+                    }
+                    KeyCode::Enter => {
+                        if asked.on_custom() {
+                            // The typed answer, or nothing worth sending.
+                            let said = asked.typed.trim().to_string();
+                            if said.is_empty() { return true; }
+                            Some(serde_json::json!({ "answer": said }))
+                        } else {
+                            Some(serde_json::json!({ "choice": asked.options[asked.picked] }))
+                        }
+                    }
+                    KeyCode::Esc if !asked.typed.is_empty() => {
+                        // Escape backs out of what was typed before it backs out of
+                        // the question: the first thing escape means is "undo that",
+                        // the second is "never mind".
+                        asked.typed.clear();
+                        self.prompt = Some(asked);
+                        return true;
+                    }
+                    KeyCode::Esc => Some(serde_json::json!({ "answer": "" })),
+                    KeyCode::Backspace => {
+                        asked.typed.pop();
+                        self.prompt = Some(asked);
+                        return true;
+                    }
+                    // A digit picks that option straight away, but only while the
+                    // list is what has the cursor: once someone is typing an answer
+                    // that happens to contain a number, the number is text.
+                    KeyCode::Char(c) if c.is_ascii_digit() && asked.typed.is_empty()
+                        && asked.has_choices() && !asked.on_custom() =>
+                    {
+                        let i = c.to_digit(10).unwrap_or(0) as usize;
+                        if i >= 1 && i <= asked.options.len() {
+                            self.prompt = Some(Ask { picked: i - 1, ..asked });
+                            return true;
+                        }
+                        return true;
+                    }
+                    KeyCode::Char(c) if !ctrl && !alt && !cmd => {
+                        // Any other character is the first character of a custom
+                        // answer, and from then on this is a text field.
+                        if !asked.on_custom() {
+                            asked.picked = asked.options.len();
+                        }
+                        asked.typed.push(c);
+                        self.prompt = Some(asked);
+                        return true;
+                    }
+                    code => {
+                        self.scroll_opened(code);
+                        return true;
+                    }
+                }
+            } else {
+                match k.code {
+                    KeyCode::Char('y') | KeyCode::Enter => Some(serde_json::json!({ "allow": true })),
+                    KeyCode::Char('n') | KeyCode::Esc => Some(serde_json::json!({ "allow": false })),
+                    code => {
+                        self.scroll_opened(code);
+                        return true;
+                    }
+                }
+            };
+            if let (Some(sess), Some(body)) = (&mut self.sess, reply) {
+                let _ = sess.reply(&asked.id, "permission", body);
+            }
+            // Said in the conversation's own voice, because the question is gone
+            // from the screen the moment this returns and something has to remain.
+            let said = if asked.is_question() {
+                let picked = if asked.on_custom() {
+                    asked.typed.trim().to_string()
+                } else {
+                    asked.options.get(asked.picked).cloned().unwrap_or_default()
+                };
+                format!("{} {}", asked.question, picked)
+            } else {
+                format!("{} {}", if k.code == KeyCode::Char('n') || k.code == KeyCode::Esc { "refused" } else { "allowed" }, asked.name)
+            };
+            self.say(said.trim().to_string());
+            // Both answers land here, which is why the mark comes down here too:
+            // every way out of the prompt takes it down.
+            self.mark = Some(answered());
+            self.prompt = None;
+            self.opened = None;
+            return true;
+        }
+
+        // An open panel takes what is left: it is what the eye is on, and escape is
+        // what closes it.
+        if self.opened.is_some() {
+            match k.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.opened = None,
+                code => self.scroll_opened(code),
+            }
+            return true;
+        }
+
+        // A menu owns the keyboard while it is up: what is typed filters it and
+        // escape takes back what it wrote.
+        if self.menu.is_some() {
+            return self.menu_key(k);
+        }
+
+        match k.code {
+            // The stop. Escape is what anyone reaches for, so escape is the stop,
+            // and with nothing to stop it does the other thing escape means: it
+            // empties what has been typed. ctrl-k is not a second spelling of it:
+            // that is readline's kill-to-end, and it is bound as one below.
+            KeyCode::Esc => {
+                if self.writing().is_some() {
+                    self.cancel();
+                } else {
+                    self.input.clear();
+                    self.shots.clear();
+                    self.caret = 0;
+                }
+            }
+            // Every thought at once, which is the whole point of the key: one
+            // press and the reasoning is heads. Any thought the reader unfolded
+            // or folded by hand is forgotten, so this really does mean all of
+            // them. A call is not folded -- what it shows, it always shows -- so
+            // this key leaves a column of calls exactly as it found it.
+            KeyCode::Char('t') if ctrl => {
+                self.open = !self.open;
+                self.overrides.clear();
+            }
+            // The calls, listed: a keyboard's answer to a mouse's double click,
+            // and a way to reach one that is not the newest.
+            KeyCode::Char('o') if ctrl => self.open_calls(),
+            // The worker already knows how to push a call into the background,
+            // and discards this when nothing is in flight.
+            KeyCode::Char('b') if ctrl => {
+                if let Some(sess) = &mut self.sess {
+                    if let Err(e) = sess.background() {
+                        self.say(e);
+                    }
+                }
+            }
+            // The clipboard. Not through the terminal: OSC 52 carries text and
+            // most terminals will not answer a read of it at all, and the
+            // terminal's own paste is *its* idea of the clipboard, which for an
+            // image is nothing. The clipboard is the OS's, so the OS is asked.
+            KeyCode::Char('v') if ctrl => {
+                match attach::clipboard() {
+                    Ok(image) => self.attach(image),
+                    // Most of the time the clipboard holds something that is not a
+                    // picture, which is not a failure and does not want a row
+                    // saying so on every ctrl-v of a word.
+                    Err(_) => {}
+                }
+            }
+            // A new line in the message. Which of the two arrives is the
+            // terminal's business rather than the key's: one that reports
+            // shifted keys sends shift-enter as itself, and one that has the key
+            // mapped to a sequence sends the alt-enter bytes for it. Both mean a
+            // new line, so both are taken. VS Code's terminal does the second,
+            // and sends `1b 0d` for shift-enter, which is why `alt` is here.
+            KeyCode::Enter if shift || alt => self.insert('\n'),
+            // The backup, and the only spelling that arrives in a terminal
+            // reporting neither: raw mode makes 0x0A a key of its own, so
+            // ctrl-j is a new line wherever it is pressed. It is listed with
+            // shift-enter because it is the one that always works.
+            KeyCode::Char('j') if ctrl => self.insert('\n'),
+            KeyCode::Enter => self.send(),
+            KeyCode::Backspace if cmd => self.kill_to_line_start(),
+            KeyCode::Backspace if ctrl || alt => self.word_backspace(),
+            KeyCode::Backspace => self.backspace(),
+            // Delete deletes forward everywhere, which is the same in every
+            // terminal. The two modified forms are the word and the line: on
+            // Windows and Linux ctrl is the word, and on a mac cmd is the line
+            // and the option key is the word. Both spellings are taken on every
+            // platform, so a terminal that reports only one of them works, and
+            // nothing here reads the OS.
+            KeyCode::Delete if cmd => self.kill_to_line_end(),
+            KeyCode::Delete if ctrl || alt => self.word_delete(),
+            KeyCode::Delete => self.delete(),
+            // The moves a mac terminal does not send as keys at all.
+            //
+            // Ghostty (which cmux is) ships "natural text editing" on by
+            // default, and its own source says why: it "forces these keys to go
+            // back to legacy encoding". So `cmd+←` arrives as ctrl-A, `cmd+→` as
+            // ctrl-E, `cmd+backspace` as ctrl-U, `alt+←` as alt-B and `alt+→` as
+            // alt-F, before any program sees them. Nothing binds `cmd+delete`,
+            // which is why that one arrives as itself. A terminal that does send
+            // the key sends SUPER instead -- crossterm reads that out of xterm's
+            // `CSI 1;9D` and kitty's `CSI 1;9u` alike -- and a terminal that sends
+            // neither has ctrl and alt with the arrows below. Every spelling is
+            // bound, and none of it asks what OS this is.
+            KeyCode::Char('a') if ctrl => self.line_home(),
+            KeyCode::Char('e') if ctrl => self.to_line_end(),
+            KeyCode::Char('u') if ctrl => self.kill_to_line_start(),
+            KeyCode::Char('k') if ctrl || cmd => self.kill_to_line_end(),
+            // readline's own pair, and what `alt+←` and `alt+→` send. ctrl-b and
+            // ctrl-f are deliberately not bound: this screen already gives
+            // ctrl-b to the background push, and a key cannot mean two things.
+            KeyCode::Char('b') if alt => self.word_left(),
+            KeyCode::Char('f') if alt => self.word_right(),
+            // The editing keys. A word at a time for the two modifiers every
+            // terminal sends, a line at a time for the command key, and home/end
+            // for the message once it is more than one line -- below that they
+            // stay what they were, the ends of the conversation.
+            KeyCode::Left if ctrl || alt => self.word_left(),
+            KeyCode::Right if ctrl || alt => self.word_right(),
+            KeyCode::Left if cmd => self.line_home(),
+            KeyCode::Right if cmd => self.to_line_end(),
+            KeyCode::Left => self.left(),
+            KeyCode::Right => self.right(),
+            // Home and end are the ends of the line being typed whenever there
+            // is a line to end, and the ends of the conversation when the box is
+            // empty. Not "when the message is more than one line": typing a
+            // single line is the common case, and these are the line's ends on
+            // every platform, where the command key is only the mac spelling of
+            // the same thing.
+            KeyCode::Home if !self.input.is_empty() => self.line_home(),
+            KeyCode::End if !self.input.is_empty() => self.to_line_end(),
+            KeyCode::Home => {
+                self.follow = false;
+                self.scroll = 0;
+            }
+            KeyCode::End => self.follow = true,
+            // Up and down are the message's lines while there is more than one
+            // of them, and the conversation's when there is not.
+            KeyCode::Up if self.multiline() => self.up_line(),
+            KeyCode::Down if self.multiline() => self.down_line(),
+            KeyCode::Up => self.scroll_by(-1),
+            KeyCode::Down => self.scroll_by(1),
+            KeyCode::PageUp => self.scroll_by(-10),
+            KeyCode::PageDown => self.scroll_by(10),
+            // A trigger at the start of a word opens its menu; anywhere else it
+            // is a character, so `src/main.rs` and `user@example.com` are text.
+            // A replay has no worker to ask, so it has no menus either.
+            KeyCode::Char(c @ ('/' | '$' | '@'))
+                if !ctrl && self.sess.is_some() && self.at_word_start() =>
+            {
+                self.insert(c);
+                self.open_menu(Kind::of(c).unwrap());
+            }
+            KeyCode::Char(c) if !ctrl => self.insert(c),
+            _ => {}
+        }
+        true
+    }
+
+    /// Whether the caret sits at the start of a word, which is the only place a
+    /// trigger opens a menu. Only at the end of the message, too: a menu filters
+    /// on the tail of the line, and there is no tail to filter on from inside it.
+    fn at_word_start(&self) -> bool {
+        self.caret == self.chars()
+            && self.input.chars().last().map_or(true, char::is_whitespace)
+    }
+
+    /// Put a menu up for the trigger that was just typed, and ask for the rows
+    /// it needs unless they are already in hand.
+    fn open_menu(&mut self, kind: Kind) {
+        // The trigger is already on the line, and it is the last character.
+        let anchor = self.caret.saturating_sub(1);
+        let mut open = Menu::open(kind, anchor);
+        let held = match kind {
+            Kind::Commands => {
+                open.fill(menu::with_local(self.commands.clone()));
+                !self.commands.is_empty()
+            }
+            Kind::Skills => {
+                open.fill(self.skills.clone());
+                !self.skills.is_empty()
+            }
+            // A directory is a walk and never held: the tree moves under it.
+            // A picker is opened fresh every time for the same reason: what it
+            // marks as acting now is what changed. The calls are the frontend's
+            // own rows, so they are filled as they are read.
+            Kind::Calls => {
+                open.fill(menu::calls(&self.log.rows));
+                true
+            }
+            _ => false,
+        };
+        self.menu = Some(open);
+        if !held {
+            self.ask_for_rows();
+        }
+    }
+
+    /// Ask the worker for what the open menu needs, when it does not have it.
+    ///
+    /// A file filter is a path, so a filter that walks into a subdirectory is a
+    /// different question and only a changed directory is asked again: typing
+    /// `src/` costs one request rather than one per keystroke.
+    fn ask_for_rows(&mut self) {
+        let (Some(sess), Some(open)) = (&mut self.sess, &mut self.menu) else { return };
+        let ask = match open.kind {
+            Kind::Commands => ("command.list", serde_json::json!({})),
+            Kind::Skills => ("skill.list", serde_json::json!({})),
+            // Asked once per opening and never again while the menu is up: a
+            // list of providers is a network question, and a keystroke is no
+            // reason to ask it twice. Held between openings either, because
+            // what these two mark is what changed.
+            Kind::Providers | Kind::Models => {
+                if !open.is_empty() {
+                    return;
+                }
+                if open.kind == Kind::Providers {
+                    ("provider.list", serde_json::json!({}))
+                } else {
+                    // No name: the worker lists for the provider it is on and
+                    // says which one that was in the reply.
+                    ("model.list", serde_json::json!({}))
+                }
+            }
+            // Asked for by the launch, once, before any of this: there is
+            // nothing here to ask again.
+            Kind::Sessions => return,
+            // Handed to the menu when it opens, not asked for: the four modes
+            // are this frontend's own list, and the calls are read off the
+            // transcript it already holds.
+            Kind::Permissions | Kind::Calls => return,
+            Kind::Files => {
+                let (dir, _) = open.walked();
+                let dir = dir.to_string();
+                if open.dir.as_deref() == Some(dir.as_str()) {
+                    return;
+                }
+                open.dir = Some(dir.clone());
+                // The rows on hand are the last directory's, and a name that
+                // happens to match in both would be the wrong file.
+                open.fill(Vec::new());
+                ("fs.list", serde_json::json!({ "dir": dir }))
+            }
+        };
+        let _ = sess.command(ask.0, ask.1);
+    }
+
+    /// One key while a menu is up.
+    fn menu_key(&mut self, k: KeyEvent) -> bool {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        match k.code {
+            // Escape takes back the trigger and the filter both. A menu that
+            // left its own characters behind would have edited a message the
+            // user never asked it to touch.
+            KeyCode::Esc => {
+                if let Some(open) = &self.menu {
+                    // A trigger's own characters come back off the line. A
+                    // picker never put any there, so escape at one is only the
+                    // question closing -- and the new session stays.
+                    if open.on_line() {
+                        self.input = self.input.chars().take(open.anchor).collect();
+                        self.caret = open.anchor;
+                    }
+                }
+                self.menu = None;
+            }
+            KeyCode::Up => {
+                if let Some(open) = &mut self.menu {
+                    open.move_sel(-1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(open) = &mut self.menu {
+                    open.move_sel(1);
+                }
+            }
+            KeyCode::Enter | KeyCode::Tab => self.choose(),
+            // The filter is the tail of the line, so one character comes off
+            // both. Taking the trigger itself off is what closes the menu.
+            KeyCode::Backspace => {
+                let (line, empty) = match &self.menu {
+                    Some(open) => (open.on_line(), open.filter.is_empty()),
+                    None => return true,
+                };
+                if empty {
+                    // Nothing left to take back. On the line that character is
+                    // the trigger, so the menu goes with it; at a picker there
+                    // was no trigger and the question stays.
+                    if line {
+                        self.backspace();
+                        self.menu = None;
+                    }
+                    return true;
+                }
+                // The filter is the tail of the line, so one character comes off
+                // both of them.
+                if line {
+                    self.backspace();
+                }
+                if let Some(open) = &mut self.menu {
+                    open.filter.pop();
+                    open.refilter();
+                }
+                self.ask_for_rows();
+            }
+            KeyCode::Char(c) if !ctrl => {
+                // Typed after a trigger, the character is on the line as well as
+                // in the filter: they are the same text. A picker's filter is its
+                // own and the line is not touched.
+                if self.menu.as_ref().is_some_and(|open| open.on_line()) {
+                    let at = self.caret_byte();
+                    self.input.insert(at, c);
+                    self.caret += 1;
+                }
+                if let Some(open) = &mut self.menu {
+                    open.filter.push(c);
+                    open.refilter();
+                }
+                self.ask_for_rows();
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// Put the chosen row on the line or send it, whichever the row is for.
+    ///
+    /// The trigger and the filter go either way, so what is left is the thing
+    /// itself -- and for a picker, nothing at all.
+    fn choose(&mut self) {
+        let Some((kind, anchor, value)) = self.menu.as_ref().and_then(|open| {
+            open.chosen().map(|item| (open.kind, open.anchor, item.value.clone()))
+        }) else {
+            return;
+        };
+        match kind {
+            // A picker is a switch rather than a word: nothing about it goes on
+            // the line, and the line is left as it was.
+            Kind::Providers => {
+                self.menu = None;
+                self.act("provider.use", serde_json::json!({ "name": value }));
+            }
+            Kind::Models => {
+                let provider =
+                    self.menu.as_ref().map(|open| open.provider.clone()).unwrap_or_default();
+                self.menu = None;
+                self.act("provider.set", serde_json::json!({ "name": provider, "model": value }));
+            }
+            // Carrying on with an older conversation. The worker replays it and
+            // the screen fills in from that, so nothing goes on the line.
+            Kind::Sessions => {
+                self.menu = None;
+                self.act("session.load", serde_json::json!({ "id": value }));
+            }
+            // Two of the worker's own commands have a list behind them: a
+            // provider and a model are picked rather than spelled. The rest are
+            // words, put on the line for the worker's own parser to read.
+            Kind::Commands if value == "/provider" || value == "/model" => {
+                self.input = self.input.chars().take(anchor).collect();
+                self.caret = anchor;
+                self.pick(if value == "/provider" { Kind::Providers } else { Kind::Models });
+            }
+            // A list of this frontend's own rather than a word: the four modes
+            // are its to name, and choosing one switches instead of typing.
+            Kind::Commands if value == "/permissions" => {
+                self.input = self.input.chars().take(anchor).collect();
+                self.caret = anchor;
+                self.pick_permissions();
+            }
+            // A picker is a switch, so nothing about it goes on the line.
+            Kind::Permissions => {
+                self.menu = None;
+                self.act("permission.mode", serde_json::json!({ "mode": value }));
+            }
+            // A call is opened rather than written: the row's index is what the
+            // worker's own record of it is asked for by, and what the panel is
+            // built from until that lands.
+            Kind::Calls => {
+                self.menu = None;
+                if let Ok(i) = value.parse::<usize>() {
+                    self.open(i);
+                }
+            }
+            _ => {
+                let keep: String = self.input.chars().take(anchor).collect();
+                self.input = format!("{keep}{value} ");
+                self.caret = self.chars();
+                self.menu = None;
+            }
+        }
+    }
+
+    /// Open one of the lists a command reaches rather than a trigger. It is a
+    /// picker, so nothing is written to the line until a row is chosen.
+    fn pick(&mut self, kind: Kind) {
+        self.menu = Some(Menu::open_apart(kind));
+        self.ask_for_rows();
+    }
+
+    /// The permission modes, listed rather than spelled: four names, one of
+    /// them the one in use, which is a thing to choose from and not a word to
+    /// remember. Filled here because the worker holds the mode and no list.
+    fn pick_permissions(&mut self) {
+        let now = self.sess.as_ref().map(|s| s.snap.mode.clone()).unwrap_or_default();
+        let mut open = Menu::open_apart(Kind::Permissions);
+        open.fill(menu::modes(&now));
+        self.menu = Some(open);
+    }
+
+    /// Send one command to the worker, saying so on the screen when it will not
+    /// go rather than leaving a choice that looks taken.
+    fn act(&mut self, action: &str, fields: serde_json::Value) {
+        if let Some(sess) = &mut self.sess {
+            if let Err(e) = sess.command(action, fields) {
+                self.say(e);
+            }
+        }
+    }
+}
+
+/// How far the highlight travelling over a row has got, or None when nothing on the
+/// screen is moving.
+///
+/// Two reasons for it to be on, and one clock for both. While the worker is working --
+/// or while a peer's message is sitting in its mailbox waiting for the round to end,
+/// which is a wait the round has not reached yet -- the sweep runs for as long as that
+/// lasts, which is the whole of a round rather than the second after a row landed. The
+/// arrival window is on top of that, so a peer message that lands on an idle screen
+/// still gets its own second's glance, which is what catches the eye when nothing else
+/// is moving.
+///
+/// Spaced off the screen's own clock rather than off a frame count: any event makes the
+/// loop come round early, and a highlight that moved once per frame would race as soon
+/// as the mouse moved. A free function rather than a method so the two rules can be
+/// checked without a worker to start.
+fn shimmer_phase(snap: Option<&Snapshot>, peer_age: Option<Duration>, ms: u128) -> Option<usize> {
+    let alive = snap.is_some_and(|s| s.state.busy() || s.peer_waiting.is_some());
+    if alive {
+        return Some(ms as usize / view::SHIMMER_STEP_MS as usize);
+    }
+    let age = peer_age?.as_millis();
+    if age > view::SHIMMER_MS {
+        return None;
+    }
+    Some((age / view::SHIMMER_STEP_MS) as usize)
+}
+
+/// What the status line says about a peer whose message is waiting: the other agent's
+/// own session name, as the worker put it on the knock. A knock the worker named nobody
+/// on still says a peer is waiting, rather than inventing a name for one.
+fn waiting_words(name: &str) -> String {
+    match name.trim() {
+        "" => "waiting on a peer".to_string(),
+        who => format!("waiting on {who}"),
+    }
+}
+
+fn run(mut app: App) -> io::Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        // The enhanced keyboard protocol is what makes a shifted enter reportable
+        // as itself: without it most terminals send the same byte plain enter
+        // sends, so shift-enter would send a half-written message. A terminal that
+        // does not know the sequence ignores it, and ctrl-j still gets a newline
+        // in everywhere.
+        event::PushKeyboardEnhancementFlags(event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+        // Rows fold on a double click, which a terminal only reports if it is
+        // asked to. The cost is the terminal's own drag-to-select.
+        EnableMouseCapture,
+        // Bracketed paste, which is what makes a dropped or pasted picture
+        // arrive as one `Paste` event rather than as a burst of keystrokes. A
+        // file dragged onto the window is the terminal typing its path, and
+        // without this there is no way to tell that from a person typing one:
+        // the path would land in the message as text and the picture it names
+        // would never be attached.
+        EnableBracketedPaste,
+        SetBackgroundColor(TermColor::Rgb { r: view::PAGE.0, g: view::PAGE.1, b: view::PAGE.2 })
+    )?;
+    let mut term = Terminal::new(CrosstermBackend::new(stdout))?;
+
+    let result = loop {
+        app.pump();
+        // The permission mark, written straight to the tty through the terminal's
+        // own writer: between two frames, never inside one, so it cannot land in a
+        // cell ratatui then believes it has already drawn. A terminal that does
+        // not know `OSC 9` drops it on the floor.
+        if let Some(mark) = app.mark.take() {
+            execute!(term.backend_mut(), Print(mark))?;
+        }
+        term.draw(|f| draw(f, &mut app))?;
+
+        if event::poll(Duration::from_millis(30))? {
+            match event::read() {
+                Ok(CEvent::Key(k)) if k.kind != crossterm::event::KeyEventKind::Release => {
+                    if !app.key(k) {
+                        break Ok(());
+                    }
+                }
+                Ok(CEvent::Mouse(m)) => app.mouse(m),
+                // A paste is the second door a picture gets in through: a file
+                // dropped on the window arrives as its path, and a paste of
+                // several is the same gesture with more than one file. A paste
+                // of words is the words.
+                Ok(CEvent::Paste(text)) => app.paste(text),
+                Ok(CEvent::Resize(_, _)) => {}
+                Ok(_) => {}
+                // A sequence this terminal sends and crossterm does not know is
+                // dropped rather than taken as a reason to stop. xterm's older
+                // modifyOtherKeys is one of those, and dying on a key press is
+                // the worst thing a key handler can do.
+                Err(_) => {}
+            }
+        }
+    };
+
+    if let Some(sess) = &mut app.sess {
+        sess.close();
+    }
+    disable_raw_mode()?;
+    execute!(
+        term.backend_mut(),
+        event::PopKeyboardEnhancementFlags,
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        SetBackgroundColor(TermColor::Reset)
+    )?;
+    term.show_cursor()?;
+    result
+}
+
+fn draw(f: &mut Frame, app: &mut App) {
+    let area = f.area();
+    let head = app.header();
+    let status = app.status_text();
+    // Read once and used twice: the row's highlight and the status line's are the same
+    // sweep off the same clock, which is what keeps the two moving at one speed.
+    let shimmer = app.shimmer();
+    // The frame is the header, the conversation, the box between its two rules,
+    // and the status line when there is something to put on it. A pane too small
+    // for that keeps the conversation and the box: the frame is what goes.
+    let framed = usize::from(area.height) >= head.len() + 4 + usize::from(status.is_some());
+    let chunks = if framed {
+        // What is left once the frame has its own lines: the box takes what the
+        // message needs, up to its ceiling, and the conversation keeps the rest.
+        let spare = usize::from(area.height) - head.len() - 3 - usize::from(status.is_some());
+        let field_w = field_room(area.width as usize, app.keep());
+        let field_h = (app.field_height(field_w) as usize).min(spare.max(1)).max(1) as u16;
+        Layout::vertical([
+            Constraint::Length(head.len() as u16),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(field_h),
+            Constraint::Length(1),
+            Constraint::Length(u16::from(status.is_some())),
+        ])
+        .split(area)
+    } else {
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area)
+    };
+    let (body, rules, field_at, status_at) = if framed {
+        (chunks[1], Some((chunks[2], chunks[4])), chunks[3], status.is_some().then(|| chunks[5]))
+    } else {
+        (chunks[0], None, chunks[1], None)
+    };
+
+    if framed {
+        f.render_widget(Paragraph::new(head), chunks[0]);
+    }
+
+    let pieces = view::pieces(
+        &app.log.rows,
+        &|i, row| app.shows(i, row),
+        &|i| app.figures(i),
+        app.writing(),
+        app.flash(),
+        body.width.max(1) as usize,
+        shimmer,
+    );
+    let Drawn { lines, spans, anchors } = view::draw(&pieces, body.width.max(1) as usize);
+    app.spans = spans;
+    app.anchors = anchors;
+    app.body_top = body.y;
+    app.body_width = body.width;
+
+    let total = lines.len() as u16;
+    let height = body.height.max(1);
+    let end = total.saturating_sub(height);
+    if app.follow {
+        app.scroll = end;
+    } else if app.scroll >= end {
+        // Scrolled back to the end by hand: the newest row is what it shows, so
+        // it follows again.
+        app.scroll = end;
+        app.follow = true;
+    }
+    f.render_widget(Paragraph::new(lines).scroll((app.scroll, 0)), body);
+
+    if let Some((top, bottom)) = rules {
+        let rule = Line::from(Span::styled(
+            "\u{2500}".repeat(area.width as usize),
+            Style::new().fg(ink::rule()),
+        ));
+        f.render_widget(Paragraph::new(rule.clone()), top);
+        f.render_widget(Paragraph::new(rule), bottom);
+    }
+    let field = app.field_lines(field_at.width.max(1) as usize, field_at.height.max(1) as usize, field_at.y);
+    // What the field turned out to be, for a click on a chip: the same numbers
+    // the draw just used, rather than a second derivation of them.
+    app.field_rows = field_windows(&app, field_at.width.max(1) as usize);
+    app.field_top = field_at.y;
+    f.render_widget(Paragraph::new(field), field_at);
+
+    if let Some(at) = status_at {
+        let said = status.unwrap_or_default();
+        // The status line carries the same sweep while the worker is working or a peer
+        // is waiting: the row's own highlight says *what* arrived, and this says the
+        // screen is still alive between two rows. Its ramp tops out at `ink::dim` -- the
+        // line is the screen's asides and a bright one would out-shout the row it is
+        // reporting on -- and it recolours the text without touching a character of it.
+        let line = match shimmer {
+            Some(phase) => view::sweep(&format!(" {said}"), phase),
+            None => Line::from(Span::styled(format!(" {said}"), Style::new().fg(ink::quiet()))),
+        };
+        f.render_widget(Paragraph::new(line), at);
+    }
+
+    // A menu, over the tail of the conversation and just above the field: it is
+    // what the line being typed is for, and covering the answer it is about to
+    // become part of would be the wrong thing to hide.
+    if let Some(menu) = &app.menu {
+        if body.height >= 3 {
+            let inner = (body.width.saturating_sub(4) as usize).max(8);
+            let lines = menu.lines(inner);
+            let height = (lines.len() as u16 + 2).min(body.height);
+            let popup = Rect {
+                x: body.x,
+                y: body.y + body.height - height,
+                width: (inner as u16 + 4).min(body.width),
+                height,
+            };
+            f.render_widget(Clear, popup);
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::bordered()
+                        .title(format!(" {} ", menu.title()))
+                        .border_style(Style::new().fg(ink::rule())),
+                ),
+                popup,
+            );
+        }
+    }
+
+    // A question with options is its own panel, above the field and below the
+    // conversation: it is a decision, so it gets the room a decision needs rather
+    // than one line in a box built for typing. Drawn here rather than through
+    // `opened` because the keyboard is answering it while it is up, and a panel
+    // that shared the scroll keys with the answer would be fighting itself.
+    if let Some(asked) = app.prompt.as_ref().filter(|a| a.is_question()) {
+        let want = asked.options.len() as u16 + 5
+            + u16::from(!asked.detail.is_empty()) * 2
+            + u16::from(asked.on_custom() && !asked.typed.is_empty());
+        let height = want.min(body.height.saturating_sub(1)).max(5);
+        // Capped rather than stretched: a two-word question in a 200-column border
+        // reads as a wall. Wide questions still get the room they need.
+        let width = body.width.saturating_sub(4).min(72).max(24);
+        let popup = Rect {
+            x: body.x + (body.width.saturating_sub(width)) / 2,
+            y: body.y + body.height.saturating_sub(height),
+            width,
+            height,
+        };
+        let inner = width.saturating_sub(2).max(1) as usize;
+        let mut lines: Vec<Line> = Vec::new();
+        for text in wrap_text(&asked.question, inner) {
+            lines.push(Line::from(Span::styled(text, Style::new().fg(ink::code()).bold())));
+        }
+        if !asked.detail.is_empty() {
+            lines.push(Line::from(""));
+            for text in wrap_text(&asked.detail, inner).into_iter().take(6) {
+                lines.push(Line::from(Span::styled(text, Style::new().fg(ink::quiet()))));
+            }
+        }
+        lines.push(Line::from(""));
+        for (i, option) in asked.options.iter().enumerate() {
+            let on = i == asked.picked;
+            let style = if on {
+                Style::new().fg(ink::code()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(ink::rule())
+            };
+            lines.push(Line::from(vec![
+                Span::styled(if on { "\u{276f} " } else { "  " }, style),
+                Span::styled(format!("{}. ", i + 1), Style::new().fg(ink::quiet())),
+                Span::styled(option.clone(), style),
+            ]));
+        }
+        // The answer row: a text field when nothing was offered, and one more
+        // choice when something was. The list is never a cage, and when there is
+        // no list it is the only thing there is.
+        // The answer row. Three states, and each has to be visibly different from
+        // the others or the box reads as broken: the cursor is here and it is
+        // empty (a block caret in the field), the cursor is here and something is
+        // typed (the text, a caret, and a hint about enter), or the cursor is up
+        // in the list (a quiet prompt saying this row exists).
+        let on = asked.on_custom();
+        let typing = on && !asked.typed.is_empty();
+        let body = if typing {
+            format!("{}\u{2588}", asked.typed)
+        } else if on {
+            "\u{2588}".to_string()
+        } else if asked.has_choices() {
+            "or type your own\u{2026}".to_string()
+        } else {
+            String::new()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if on { "\u{276f} " } else { "  " },
+                         Style::new().fg(if on { ink::code() } else { ink::rule() })),
+            Span::styled(body, Style::new().fg(if on { ink::code() } else { ink::quiet() })),
+        ]));
+        if typing {
+            // Enter is what sends it, and the one thing a typed answer needs said.
+            lines.push(Line::from(Span::styled(
+                "  enter sends it \u{b7} esc clears",
+                Style::new().fg(ink::quiet()),
+            )));
+        }
+        f.render_widget(Clear, popup);
+        f.render_widget(
+            Paragraph::new(lines).block(
+                Block::bordered()
+                    .title(asked.title())
+                    .border_style(Style::new().fg(ink::code())),
+            ),
+            popup,
+        );
+    }
+
+    // An open panel, over the conversation and not over the field: a question is
+    // answered on that line, and a panel that covered the answer would be asking for
+    // one it hid.
+    if let Some(open) = &mut app.opened {
+        let popup = centred(body, body.width.saturating_sub(2), body.height);
+        // Clear the whole pane, not just the box: a box inset inside it would
+        // leave a column of the conversation showing down its edge, which reads
+        // as a broken frame rather than as a margin.
+        f.render_widget(Clear, body);
+        // Wrapped here, not by the widget, so the scroll offset counts what is on
+        // the screen: a panel of long lines would otherwise scroll to the wrong
+        // place, and nothing would stop it scrolling past the end.
+        let inner = popup.width.saturating_sub(2).max(1) as usize;
+        let wrapped = view::wrap_lines(&open.lines, inner);
+        let most = (wrapped.len() as u16).saturating_sub(popup.height.saturating_sub(2));
+        open.scroll = open.scroll.min(most);
+        f.render_widget(
+            Paragraph::new(wrapped)
+                .block(
+                    Block::bordered()
+                        .title(format!(" {} ", open.title))
+                        .border_style(Style::new().fg(ink::rule())),
+                )
+                .scroll((open.scroll, 0)),
+            popup,
+        );
+    }
+}
+
+/// A picture waiting to be sent: its bytes, its own name, and where its chip sits
+/// in the message.
+///
+/// The label is derived rather than stored -- `[image 2]` is `at + 2` -- because
+/// the number is what ties the chip to the bytes, and a stored label could drift
+/// from the ordinal the worker is handed.
+#[derive(Clone)]
+struct Shot {
+    image: attach::Image,
+    at: usize,
+    len: usize,
+}
+
+/// One span of the message as it is drawn: text the user typed, or a chip
+/// standing in for a picture. The message itself never holds the label -- `at`
+/// and `len` are the characters of the message the chip covers -- so the text
+/// that is sent and the text that is drawn cannot disagree.
+///
+/// The label is derived rather than stored -- `[image 2]` is the shot's own
+/// place in `shots` plus one -- because the number is what ties the chip to the
+/// bytes, and a stored label could drift from the ordinal the worker is handed.
+/// The shot covering character `at`, if one is there. What makes a chip one
+/// thing to the caret: a character inside one is the whole of it.
+fn shot_at(shots: &[Shot], at: usize) -> Option<usize> {
+    shots.iter().position(|s| at >= s.at && at < s.at + s.len)
+}
+
+/// The picture paths in a pasted block, if every token in it is one.
+///
+/// All or nothing on purpose: a paste that is mostly prose with a filename in it
+/// is prose. Backslash-escaped spaces and quoted strings are the two ways a
+/// terminal hands a path over, and both are read the way a shell reads them.
+fn paths_as_images(text: &str) -> Option<Vec<attach::Image>> {
+    let mut paths = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut chars = trimmed.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+            (Some(_), '\\') => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            (Some(_), _) => current.push(c),
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '\\') => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            (None, c) if c.is_whitespace() => {
+                if !current.is_empty() {
+                    paths.push(std::mem::take(&mut current));
+                }
+            }
+            (None, _) => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        paths.push(current);
+    }
+    if paths.is_empty() || !paths.iter().all(|p| attach::looks_like_image(p)) {
+        return None;
+    }
+    let mut out = Vec::new();
+    for path in paths {
+        let path = expand_tilde(&path);
+        match attach::read_file(&path) {
+            Ok(image) => out.push(image),
+            // Every path named a picture and one of them could not be read: the
+            // paste is that file's failure rather than the user's, so nothing is
+            // attached and the text stands as it was typed.
+            Err(_) => return None,
+        }
+    }
+    Some(out)
+}
+
+/// `~/shot.png`, which is how a path is usually written and never how the disk
+/// spells it.
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{home}/{rest}");
+        }
+    }
+    path.to_string()
+}
+
+/// The style a column of the field's line is drawn in: the amber the design
+/// gives anything you can act on for a chip, and a reversal while the pointer is
+/// on that chip, which is how it says that a click would take it off.
+fn chip_style(tag: u8, under_pointer: Option<u8>) -> Style {
+    if tag == 0 {
+        return Style::new();
+    }
+    let style = Style::new().fg(ink::code());
+    if under_pointer == Some(tag) {
+        style.add_modifier(Modifier::REVERSED)
+    } else {
+        style
+    }
+}
+
+/// The columns the message gets on a row of the box: the box less the prompt, less
+/// what the first row owes the turn's readout.
+/// A string broken to lines that fit a width, on word boundaries where there are
+/// any. The question panel draws what the worker sent, and that is prose of no
+/// particular length.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for para in text.split('\n') {
+        let mut line = String::new();
+        for word in para.split_whitespace() {
+            if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+                out.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() { line.push(' '); }
+            line.push_str(word);
+        }
+        out.push(line);
+    }
+    out
+}
+
+fn field_room(width: usize, keep: usize) -> usize {
+    width.saturating_sub(2 + keep).max(1)
+}
+
+/// What each row of the field is, and which chip each of its columns belongs to.
+///
+/// The draw needs exactly this and a click needs exactly this, so it is derived
+/// once per frame rather than twice. `field_lines` is what paints it; this is
+/// what a click reads. A row is now the whole width of the box, so there is no
+/// window to remember and no offset to add back: the column a click lands in is
+/// the column of the row.
+fn field_windows(app: &App, width: usize) -> Vec<(u16, usize, Vec<u8>)> {
+    let (cols, rows, _, _) = app.drawn(width, app.keep());
+    let mut out = Vec::new();
+    for (k, (start, end)) in rows.iter().enumerate() {
+        let styles: Vec<u8> = cols[*start..*end].iter().map(|(_, t)| *t).collect();
+        out.push((k as u16, 0, styles));
+    }
+    out
+}
+
+/// A box centred in `area`, at most this wide and this tall.
+fn centred(area: Rect, width: u16, height: u16) -> Rect {
+    let w = width.min(area.width);
+    let h = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+/// The design's second line: what is answering, with as much of the context as
+/// the worker has said, and nothing where it has said nothing.
+fn model_line(snap: &Snapshot) -> String {
+    let mut parts = Vec::new();
+    if !snap.model.is_empty() {
+        parts.push(snap.model.clone());
+    }
+    if snap.context_max > 0 {
+        parts.push(format!("({} context)", plenty(snap.context_max)));
+    }
+    if !snap.effort.is_empty() {
+        parts.push(format!("with {} effort", capitalize(&snap.effort)));
+    }
+    let head = parts.join(" ");
+    // Only the provider comes after the dot, and a dot with nothing in front of
+    // it says nothing.
+    if snap.provider.is_empty() {
+        head
+    } else if head.is_empty() {
+        snap.provider.clone()
+    } else {
+        format!("{head} \u{b7} {}", snap.provider)
+    }
+}
+
+/// The effort ladder's own word, the way the design writes it: High, not high.
+fn capitalize(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// A round number of tokens, the way a context window is quoted: 1m, 200k.
+fn plenty(n: i64) -> String {
+    if n >= 1_000_000 {
+        format!("{}m", n / 1_000_000)
+    } else if n >= 1_000 {
+        format!("{}k", n / 1_000)
+    } else {
+        n.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn seed(app: &mut App) {
+        for line in [
+            r#"{"type":"token","id":"a","data":{"state":"user","token":"what time is it?"}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"They want the time. Run date."}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"Bash","args":{"command":"date"}}]}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"Bash","result":{"result":{"exit_code":0,"stdout":"Sat Oct  3 04:56:38 IDT 2026\n","duration":0.3}}}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"content","token":"It's 04:56 IDT on Saturday, October 3, 2026."}}"#,
+        ] {
+            app.feed(wire::parse(line).unwrap());
+        }
+    }
+
+    /// The permission mark, byte for byte. This is the contract with
+    /// `fleet/src/term.rs`: it reads these two strings back off the pane's stream
+    /// and the whole point of a control plane is that a pane which stopped to ask
+    /// is not a pane that looks idle. If this assertion changes, the other side
+    /// changes with it or the mark silently stops being seen.
+    #[test]
+    fn the_permission_mark_is_the_bytes_fleet_reads() {
+        assert_eq!(needs_you().as_bytes(), b"\x1b]9;cua-code-needs-you\x07");
+        assert_eq!(answered().as_bytes(), b"\x1b]9;cua-code-needs-you-answer\x07");
+        // OSC 9 to its `BEL`: a terminal that has never heard of us does nothing
+        // with it rather than printing it, which is the whole reason for the
+        // sequence and not `ESC [ ...`.
+        assert!(needs_you().starts_with("\u{1b}]9;") && needs_you().ends_with('\u{7}'));
+        // The answer's own name has the question's in it, so the two must not be
+        // the same string: a prefix match on the raise would fire on the lower.
+        assert_ne!(needs_you(), answered());
+    }
+
+    /// The build id and the update notice have to reach the row a person reads,
+    /// not just the struct: the header is the only place this screen says which
+    /// code it is, and the only thing it says on its own account.
+    #[test]
+    fn the_header_names_the_build_and_the_update() {
+        fn header(app: &App) -> String {
+            app.header()
+                .iter()
+                .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+                .collect()
+        }
+        let mut app = App::new(None);
+        let quiet = header(&app);
+        assert!(quiet.contains(version::ID), "header was {quiet:?}");
+        assert!(!quiet.contains("behind"), "no news is no line: {quiet:?}");
+
+        // One update is a word, three are a number with an s on it: a screen that
+        // says "1 updates" is the tell that nobody read it.
+        app.news = Some(version::News::Behind(1));
+        let one = header(&app);
+        assert!(one.contains("behind 1 update"), "header was {one:?}");
+        assert!(!one.contains("1 updates"), "header was {one:?}");
+        app.news = Some(version::News::Behind(3));
+        let loud = header(&app);
+        assert!(loud.contains("you are behind 3 updates"), "header was {loud:?}");
+        assert!(loud.contains("cuacode doctor --upgrade"), "header was {loud:?}");
+
+        // A check that could not be made says nothing rather than guessing.
+        app.news = Some(version::News::Unknown("no network".into()));
+        assert!(!header(&app).contains("behind"));
+    }
+
+    /// The mark goes up where the question does and comes down on every way out
+    /// of it, which is the only thing about it the screen can get wrong.
+    #[test]
+    fn a_question_raises_the_mark_and_an_answer_lowers_it() {
+        let ask = r#"{"type":"permission","id":"p1","data":{"name":"file","args":{"action":"write","path":"a.py","content":"x"}}}"#;
+        for (exit, allow) in [(KeyCode::Char('y'), true), (KeyCode::Char('n'), false)] {
+            let mut app = App::new(None);
+            assert_eq!(app.mark, None, "nothing is marked on a screen with no question");
+            app.feed(wire::parse(ask).unwrap());
+            assert_eq!(app.mark, Some(needs_you()), "the question raises the mark");
+            app.key(KeyEvent::new(exit, KeyModifiers::NONE));
+            assert_eq!(
+                app.mark,
+                Some(answered()),
+                "{} lowers it, and a refusal is an exit like any other",
+                if allow { "a yes" } else { "a no" }
+            );
+            assert!(app.prompt.is_none());
+        }
+        // Escape answers too, and is the third way out.
+        let mut app = App::new(None);
+        app.feed(wire::parse(ask).unwrap());
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mark, Some(answered()));
+    }
+
+    /// The field holding this text, with the caret at its end. What most of these
+    /// tests mean by "a message".
+    fn typed(app: &mut App, text: &str) {
+        app.input = text.to_string();
+        app.caret = app.input.chars().count();
+    }
+
+    /// More text at the caret, through the same insertion the keyboard uses, so a
+    /// chip's place in the message moves exactly as it does for a person typing.
+    fn more(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.insert(c);
+        }
+    }
+
+    /// A picture onto the app, standing in for one read off disk: the bytes are
+    /// nothing, and nothing here reads them.
+    fn shot(app: &mut App, name: &str) {
+        app.attach(attach::Image { name: name.into(), b64: "AAAA".into() });
+    }
+
+    /// The field's rows as a person sees them, and which chip each column of the
+    /// first row belongs to.
+    fn field_text(app: &App) -> (String, Vec<u8>) {
+        let lines = app.field_lines(80, 8, 0);
+        let text: String = lines.iter().map(Line::to_string).collect::<Vec<_>>().join("\n");
+        let (cols, rows, _, _) = app.drawn(80, app.keep());
+        let tags: Vec<u8> = cols[rows[0].0..rows[0].1].iter().map(|(_, t)| *t).collect();
+        (text, tags)
+    }
+
+    /// The whole point of the feature: a chip in the message, the picture on the
+    /// wire, and a number that ties the two together.
+    #[test]
+    fn a_picture_goes_in_as_an_atomic_chip_and_out_as_numbered_bytes() {
+        let mut app = App::new(None);
+        typed(&mut app, "look at");
+        shot(&mut app, "shot.png");
+        more(&mut app, " and this");
+        shot(&mut app, "other.png");
+
+        // What the frame actually paints: the chips have to be on the screen, not
+        // only in the model.
+        let mut term = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let screen: Vec<String> =
+            (0..10).map(|y| (0..60).map(|x| buf[(x, y)].symbol()).collect()).collect();
+        let shown = screen.join("\n");
+        assert!(shown.contains("[image 1]") && shown.contains("[image 2]"), "{shown}");
+        assert!(shown.contains("look at") && shown.contains("and this"), "{shown}");
+
+        // The message holds the label text, which is what gets sent; the drawing
+        // shows the same label to the same width, so what is read is what is sent.
+        assert_eq!(app.input, "look at [image 1]  and this [image 2] ");
+        let (drawn, styles) = field_text(&app);
+        assert!(drawn.contains("[image 1]") && drawn.contains("[image 2]"), "{drawn}");
+        assert!(styles.iter().any(|t| *t == 1) && styles.iter().any(|t| *t == 2));
+
+        // What the model is handed: the ordinal in the name matches the ordinal
+        // in the message, which is the one thing this cannot get wrong.
+        let json = app.shots[1].image.json(2);
+        assert_eq!(json["name"], "image 2: other.png");
+        assert_eq!(app.shots[0].image.json(1)["name"], "image 1: shot.png");
+    }
+
+    /// A chip is one thing: the caret steps over it, and one press takes it and
+    /// its bytes off the message.
+    #[test]
+    fn a_chip_is_one_thing_to_the_caret_and_to_backspace() {
+        let mut app = App::new(None);
+        shot(&mut app, "a.png");
+        assert_eq!(app.caret, app.input.chars().count(), "the caret lands past the chip");
+        let end = app.caret;
+        let start = end - app.shots[0].len;
+
+        // Left from past the chip lands before it, never inside it.
+        app.left();
+        assert_eq!(app.caret, start);
+        app.right();
+        assert_eq!(app.caret, end);
+        // Home is the line's start, which is before it; end is past it.
+        app.line_home();
+        assert_eq!(app.caret, 0);
+        app.to_line_end();
+        assert_eq!(app.caret, end);
+
+        // And the one press: chip and bytes both gone.
+        app.backspace();
+        assert!(app.input.is_empty(), "{:?}", app.input);
+        assert!(app.shots.is_empty());
+        assert_eq!(app.caret, 0);
+
+        // Delete does the same looking forward: with the caret before the chip.
+        let mut app = App::new(None);
+        shot(&mut app, "a.png");
+        app.caret = 0;
+        app.delete();
+        assert!(app.input.is_empty() && app.shots.is_empty(), "{:?}", app.input);
+    }
+
+    /// Text typed around a chip, and deleted around it, moves the chip's place in
+    /// the message without losing the picture.
+    #[test]
+    fn the_chips_stay_in_step_with_the_text_around_them() {
+        let mut app = App::new(None);
+        typed(&mut app, "one two");
+        shot(&mut app, "a.png");
+        more(&mut app, "three");
+        // The caret lands past the chip, so the word typed next follows it: what
+        // a person paste-then-keep-typing does.
+        assert_eq!(app.input, "one two [image 1] three");
+        assert_eq!(app.shots[0].at, 7);
+
+        // A word delete that stops at the chip: the chip is not a word, so the cut
+        // ends where the chip begins and it keeps its bytes.
+        app.word_backspace();
+        assert_eq!(app.shots.len(), 1, "the word delete ate the picture");
+        assert_eq!(app.shots[0].image.name, "a.png");
+        assert_eq!(app.input, "one two [image 1] ");
+
+        // Killing to the end of the line after a chip leaves the chip alone, and
+        // one with the caret before it takes it and the words after it.
+        let mut app = App::new(None);
+        typed(&mut app, "before");
+        shot(&mut app, "a.png");
+        app.kill_to_line_end();
+        assert_eq!(app.input, "before [image 1] ");
+        assert_eq!(app.shots.len(), 1);
+        app.caret = 0;
+        app.kill_to_line_end();
+        assert!(app.input.is_empty() && app.shots.is_empty(), "{:?}", app.input);
+
+        // And in the middle: a chip stays where it is while text is typed around
+        // it, and its number still matches the bytes it carries.
+        let mut app = App::new(None);
+        typed(&mut app, "start");
+        shot(&mut app, "a.png");
+        more(&mut app, "end");
+        app.left();
+        app.left();
+        more(&mut app, "X");
+        assert_eq!(app.input, "start [image 1] eXnd");
+        assert_eq!(app.shots[0].at, 5);
+        assert_eq!(app.shots[0].image.json(1)["name"], "image 1: a.png");
+    }
+
+    /// Removing one picture renumbers the ones after it, which is what keeps the
+    /// chips and the bytes handed over in the same order.
+    #[test]
+    fn removing_a_picture_renumbers_the_ones_after_it() {
+        let mut app = App::new(None);
+        shot(&mut app, "a.png");
+        shot(&mut app, "b.png");
+        shot(&mut app, "c.png");
+        assert_eq!(app.shots[1].image.name, "b.png");
+        // The chip's own place in `shots` is its number, so taking the middle one
+        // out is all that renumbering takes.
+        app.detach(1);
+        assert_eq!(app.shots.iter().map(|s| s.image.name.as_str()).collect::<Vec<_>>(), vec!["a.png", "c.png"]);
+        assert_eq!(app.shots[1].image.json(2)["name"], "image 2: c.png");
+        assert!(!app.input.contains("[image 3]"), "{:?}", app.input);
+    }
+
+    /// A click on a chip takes that one off, and a click anywhere else does not.
+    #[test]
+    fn a_click_on_a_chip_removes_that_picture() {
+        let mut app = App::new(None);
+        typed(&mut app, "hi");
+        shot(&mut app, "a.png");
+        // Paint once so `field_rows` carries what a click reads: the draw is what
+        // puts the geometry there.
+        let mut term = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let (row, first, styles) = app.field_rows.first().cloned().expect("the field drew");
+        let col = styles.iter().position(|t| *t == 1).expect("a chip column") as u16;
+        // The field's own column, which is two in for the prompt.
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col + 2 + first as u16,
+            row: app.field_top + row,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.mouse(click);
+        assert!(app.shots.is_empty(), "the click missed the chip");
+        assert_eq!(app.input, "hi");
+
+        // A click on the words does nothing but remember where it was.
+        let mut app = App::new(None);
+        typed(&mut app, "hi");
+        shot(&mut app, "a.png");
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let row = app.field_rows[0].0;
+        app.mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 3,
+            row: app.field_top + row,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.shots.len(), 1);
+    }
+
+    /// The pointer on a chip lights it, and off it does not.
+    #[test]
+    fn a_chip_lights_up_under_the_pointer() {
+        let mut app = App::new(None);
+        shot(&mut app, "a.png");
+        let mut term = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let (row, first, _) = app.field_rows.first().cloned().expect("the field drew");
+        let at = MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 2 + first as u16 + 1,
+            row: app.field_top + row,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.mouse(at);
+        assert!(app.chip_at(at.column, at.row).is_some(), "the chip was not found");
+        // Somewhere else on the line is not the chip.
+        assert!(app.chip_at(40, at.row).is_none());
+    }
+
+    /// A paste is the other door in: a path that names a picture is that picture,
+    /// and a paste of words is words.
+    #[test]
+    fn a_pasted_path_is_a_picture_and_a_pasted_sentence_is_a_sentence() {
+        // A real png on disk, in the notebook rather than anywhere of the user's.
+        let dir = std::env::temp_dir().join("quik-paste-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("shot.png");
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.extend_from_slice(b"payload");
+        std::fs::write(&png, &bytes).unwrap();
+
+        let mut app = App::new(None);
+        app.paste(png.display().to_string());
+        assert_eq!(app.shots.len(), 1, "the path was not read as a picture");
+        assert_eq!(app.input, " [image 1] ");
+
+        // A sentence with a filename in it is a sentence.
+        let mut app = App::new(None);
+        app.paste(format!("look at {} please", png.display()));
+        assert!(app.shots.is_empty(), "a sentence was read as a drop");
+        assert!(app.input.contains("look at"), "{:?}", app.input);
+
+        // And a path that is not a picture at all is text.
+        let mut app = App::new(None);
+        app.paste("/tmp/notes.txt".to_string());
+        assert!(app.shots.is_empty());
+        assert_eq!(app.input, "/tmp/notes.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// cmd+delete and ctrl+delete, which are the line and the word, and which
+    /// both have to work on a terminal that reports only one of the modifiers.
+    #[test]
+    fn the_line_and_word_deletes_are_bound_where_each_platform_puts_them() {
+        let mut app = App::new(None);
+        typed(&mut app, "one two three");
+        app.caret = 4;
+        // cmd+delete takes the rest of the line, which is the whole message here.
+        app.key(KeyEvent::new(KeyCode::Delete, KeyModifiers::SUPER));
+        assert_eq!(app.input, "one ");
+        // ctrl+delete and alt+delete take the next word instead.
+        typed(&mut app, "one two three");
+        app.caret = 0;
+        app.key(KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL));
+        assert_eq!(app.input, "two three");
+        typed(&mut app, "one two three");
+        app.caret = 0;
+        app.key(KeyEvent::new(KeyCode::Delete, KeyModifiers::ALT));
+        assert_eq!(app.input, "two three");
+        // And the backspace half: ctrl+backspace is the word behind the caret.
+        typed(&mut app, "one two");
+        app.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+        assert_eq!(app.input, "one ");
+    }
+
+    /// cmd+backspace, which on a mac terminal is not a key at all: Ghostty turns
+    /// it into ctrl-u before the program sees it. Both spellings have to do the
+    /// same thing, whichever one the terminal chose to send.
+    #[test]
+    fn cmd_backspace_clears_the_line_however_the_terminal_spells_it() {
+        // The key itself, from a terminal that reports it: the whole line goes.
+        let mut app = App::new(None);
+        typed(&mut app, "delete all of this");
+        app.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::SUPER));
+        assert_eq!(app.input, "");
+
+        // And the bytes Ghostty actually sends for it, ctrl-u: the same answer.
+        let mut app = App::new(None);
+        typed(&mut app, "delete all of this");
+        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(app.input, "");
+
+        // It is the *line*, not the message: the line above it stays.
+        let mut app = App::new(None);
+        typed(&mut app, "keep me\ndrop this");
+        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(app.input, "keep me\n");
+        assert_eq!(app.caret, 8);
+
+        // And only what is before the caret on that line: the word after it, and
+        // the space between them, are still there.
+        let mut app = App::new(None);
+        typed(&mut app, "head tail");
+        app.caret = 4;
+        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(app.input, " tail");
+        assert_eq!(app.caret, 0, "the caret goes with what it cut");
+    }
+
+    /// ctrl-a, ctrl-e, alt-b and alt-f: the bytes `cmd+←`, `cmd+→`, `alt+←` and
+    /// `alt+→` become on a mac terminal, and readline's own moves everywhere else.
+    #[test]
+    fn the_line_and_word_moves_answer_to_the_bytes_a_terminal_sends_for_them() {
+        let mut app = App::new(None);
+        typed(&mut app, "one two three");
+        // ctrl-a / ctrl-e are cmd+left and cmd+right where those are re-encoded.
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(app.caret, 0, "cmd+left arrives as ctrl-a");
+        app.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert_eq!(app.caret, 13, "cmd+right arrives as ctrl-e");
+
+        // alt-b and alt-f are alt+left and alt+right, and a word per press.
+        app.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert_eq!(app.caret, 8);
+        app.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert_eq!(app.caret, 4);
+        app.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT));
+        assert_eq!(app.caret, 8);
+
+        // ctrl-b is not one of them: this screen gives it to the background push.
+        let mut app = App::new(None);
+        typed(&mut app, "one two");
+        app.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert_eq!(app.caret, 7, "ctrl-b moved the caret, so it is bound to two things");
+    }
+
+    /// The line ends are still the line's ends when the message has more than one,
+    /// and the ctrl spelling moves the same way the command key does.
+    #[test]
+    fn the_line_ends_are_the_line_ends_on_every_spelling() {
+        for spelling in [KeyCode::Char('a'), KeyCode::Left] {
+            let mut app = App::new(None);
+            typed(&mut app, "one\ntwo");
+            let modifiers = if spelling == KeyCode::Char('a') {
+                KeyModifiers::CONTROL
+            } else {
+                KeyModifiers::SUPER
+            };
+            app.key(KeyEvent::new(spelling, modifiers));
+            assert_eq!(app.caret, 4, "{spelling:?} went to the start of the second line");
+        }
+        for spelling in [KeyCode::Char('e'), KeyCode::Right] {
+            let mut app = App::new(None);
+            typed(&mut app, "one\ntwo");
+            app.caret = 4;
+            let modifiers = if spelling == KeyCode::Char('e') {
+                KeyModifiers::CONTROL
+            } else {
+                KeyModifiers::SUPER
+            };
+            app.key(KeyEvent::new(spelling, modifiers));
+            assert_eq!(app.caret, 7, "{spelling:?} went to the end of the second line");
+        }
+    }
+
+    /// A pane this small has no room for the header and the rules; it must still
+    /// draw, because a split that small is where this frontend is meant to live.
+    #[test]
+    fn a_pane_too_small_for_the_frame_still_draws() {
+        for (w, h) in [(20u16, 5u16), (8, 4), (2, 2)] {
+            let mut app = App::new(None);
+            seed(&mut app);
+            typed(&mut app, "hi");
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| draw(f, &mut app)).unwrap();
+        }
+    }
+
+    /// The second line, in the order the design writes it: what is answering,
+    /// how much room it has, how hard it is thinking, and who is serving it.
+    #[test]
+    fn the_model_line_reads_as_the_design_writes_it() {
+        let snap = Snapshot {
+            model: "deepseek-v4.1-flash".into(),
+            context_max: 1_000_000,
+            effort: "high".into(),
+            provider: "ollama".into(),
+            ..Snapshot::default()
+        };
+        assert_eq!(model_line(&snap), "deepseek-v4.1-flash (1m context) with High effort \u{b7} ollama");
+    }
+
+    /// A menu draws over the conversation without taking the field with it:
+    /// what is being chosen has to stay visible on the line it is being typed
+    /// into, and a pane too small for the frame must still draw.
+    #[test]
+    fn a_menu_draws_over_the_conversation_and_leaves_the_field() {
+        let mut app = App::new(None);
+        seed(&mut app);
+        typed(&mut app, "$un");
+        let mut menu = Menu::open(Kind::Skills, 1);
+        menu.fill(vec![
+            Item::new("unslop", "Cut AI tells", "$unslop"),
+            Item::new("review", "A verdict", "$review"),
+        ]);
+        app.menu = Some(menu);
+
+        let (w, h) = (60u16, 14u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let lines: Vec<String> =
+            (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
+        let body = lines[3..h as usize - 3].join("\n");
+        assert!(body.contains("skill"), "{body}");
+        assert!(body.contains("unslop"), "{body}");
+        assert!(lines[h as usize - 2].starts_with('\u{276f}'), "{:?}", lines[h as usize - 2]);
+
+        // And it draws in a pane with no room for it, rather than panicking.
+        for (w, h) in [(30u16, 6u16), (12, 5), (4, 3)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| draw(f, &mut app)).unwrap();
+        }
+    }
+
+    /// A picker's filter is its own. Typing at the session question must not put
+    /// characters on the message, and escape there takes nothing back off it
+    /// because nothing was ever put on. A trigger's menu is the exact opposite,
+    /// and both halves are the same key handler.
+    #[test]
+    fn typing_at_a_picker_leaves_the_message_alone() {
+        let mut app = App::new(None);
+        typed(&mut app, "hello/");
+        app.menu = Some(Menu::open_apart(Kind::Sessions));
+        app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(app.input, "hello/");
+        assert_eq!(app.menu.as_ref().unwrap().filter, "x");
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.input, "hello/");
+        assert!(app.menu.is_none());
+
+        // The trigger at index 5 opened this one, so what is typed after it is
+        // on the line, and escape takes the trigger and the filter back off.
+        app.menu = Some(Menu::open(Kind::Skills, 5));
+        app.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(app.input, "hello/y");
+        app.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.input, "hello/");
+        assert!(app.menu.is_some(), "a filter character comes off and the menu stays");
+        app.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.input, "hello");
+        assert!(app.menu.is_none(), "taking the trigger itself off closes the menu");
+    }
+
+    /// What the command line means, including the id that skips the question.
+    #[test]
+    fn the_resume_flag_reads_as_deck_reads_it() {
+        let args = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        assert_eq!(start_of(&args("quik")), Start::Fresh);
+        assert_eq!(start_of(&args("quik --resume")), Start::Ask);
+        assert_eq!(start_of(&args("quik -c")), Start::Ask);
+        assert_eq!(start_of(&args("quik --continue")), Start::Ask);
+        assert_eq!(start_of(&args("quik --resume abc")), Start::This("abc".into()));
+        assert_eq!(start_of(&args("quik --resume=abc")), Start::This("abc".into()));
+        // A following flag is not an id.
+        assert_eq!(start_of(&args("quik --resume --fixture f.jsonl")), Start::Ask);
+        assert_eq!(start_of(&args("quik -r abc --print")), Start::This("abc".into()));
+    }
+
+    /// A launch can carry the message to open with. A lone word that names a
+    /// file is that file's contents; anything else is words, because every word
+    /// after the first is part of the message.
+    #[test]
+    fn the_message_is_the_first_thing_that_is_not_a_flag() {
+        // The binary's own name is skipped before the args get here, as it is in
+        // main.
+        let args = |s: &str| {
+            s.split_whitespace().skip(1).map(String::from).collect::<Vec<_>>()
+        };
+        let dir = std::env::temp_dir().join(format!("quik-args-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("prompt.txt");
+        std::fs::write(&file, "read this file, then do what it says\n").unwrap();
+        let blank = dir.join("blank.txt");
+        std::fs::write(&blank, "  \n\n").unwrap();
+        let path = file.to_str().unwrap();
+
+        assert_eq!(opening_message(&args("quik")), None);
+        assert_eq!(opening_message(&args("quik --resume")), None);
+        // A flag's own value is not the message, and skipping it must not eat a
+        // word that follows a flag that takes none.
+        assert_eq!(opening_message(&args("quik --home /tmp --resume")), None);
+        assert_eq!(opening_message(&args("quik --refresh")), None);
+        assert_eq!(opening_message(&args(&format!("quik {path}"))), Some("read this file, then do what it says\n".into()));
+        // A blank file is no message: there would be nothing to send.
+        assert_eq!(opening_message(&args(&format!("quik {}", blank.display()))), None);
+        assert_eq!(
+            opening_message(&args("quik --resume abc fix the parser")),
+            Some("fix the parser".into())
+        );
+        assert_eq!(
+            opening_message(&args("quik why is this failing")),
+            Some("why is this failing".into()),
+            "a word that names no file is a word"
+        );
+        assert_eq!(
+            opening_message(&args("quik -- --not-a-flag just words")),
+            Some("--not-a-flag just words".into())
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A message that starts no loop must leave no clock. Sending starts one
+    /// optimistically, because the frontend cannot know what the text is yet;
+    /// the worker's `idle` is what takes it back. A round that ran keeps its
+    /// readout, so the two endings are told apart rather than both clearing.
+    #[test]
+    fn a_round_that_never_ran_leaves_no_clock() {
+        let mut app = App::new(None);
+        app.track(&State::Running, None, false);
+        assert!(app.turn.is_some(), "sending puts the clock up");
+        app.track(&State::Idle, None, false);
+        assert!(app.turn.is_none(), "idle takes it back down");
+
+        app.track(&State::Running, Some(120), false);
+        app.track(&State::Tools, Some(120), false);
+        app.track(&State::Done, Some(120), false);
+        let kept = app.turn.as_ref().expect("a round that ran keeps its readout");
+        assert_eq!(kept.tokens, Some(120));
+        assert!(kept.ended.is_some());
+    }
+
+    /// The readout rides on the field line, at its right end. A round in flight is
+    /// the one thing on the screen that moves on its own, so it is not something
+    /// the eye should have to hunt for, and it keeps its end of the line even when
+    /// what has been typed would run past it.
+    #[test]
+    fn the_readout_sits_at_the_end_of_the_field_line() {
+        let mut app = App::new(None);
+        // Long enough to wrap to a second row, short enough that the first row is
+        // still on screen: the readout rides the first row, and it is a reserve of
+        // columns rather than a thing drawn over the text.
+        typed(&mut app, &"x".repeat(30));
+        app.turn = Some(Turn {
+            started: Instant::now(),
+            ended: None,
+            tokens: Some(12345),
+            estimated: true,
+        });
+        let (w, h) = (40u16, 8u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let lines: Vec<String> =
+            (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
+        let field = lines.iter().find(|l| l.starts_with('\u{276f}')).expect("no field line");
+        assert!(field.contains("~12.3k tok \u{b7} "), "{field}");
+        assert!(field.ends_with('s'), "{field}");
+        assert_eq!(field.chars().count(), w as usize, "{field}");
+        // The words stop before the readout rather than running under it: the row
+        // that carries it is the one the readout keeps its end of.
+        let text: Vec<char> = field.chars().collect();
+        let readout = field.find("~12.3k tok").expect("the readout is on the row");
+        // No x runs into the readout: the last of them is behind it.
+        let last_x = text.iter().rposition(|c| *c == 'x').expect("no text");
+        assert!(last_x < readout, "the text ran under the readout: {field}");
+        // And the row holds fewer x's than the box is wide, because it reserved
+        // the readout's room: 40 less the prompt less the readout.
+        assert!(text.iter().filter(|c| **c == 'x').count() < w as usize - 20, "{field}");
+    }
+
+    /// The field is an editor, not a line that only grows at its end: the caret
+    /// moves, a word at a time with the modifiers every terminal sends, and a
+    /// character comes out from under the caret rather than off the end.
+    #[test]
+    fn the_caret_moves_and_edits_where_it_stands() {
+        let mut app = App::new(None);
+        typed(&mut app, "one two three");
+        assert_eq!(app.caret, 13);
+        app.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.caret, 11);
+        // A new line lands where the caret is, not at the end of the message.
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(app.input, "one two thr\nee");
+        assert_eq!(app.lines(), vec!["one two thr", "ee"]);
+        // The same key in the other encoding a terminal puts it in: VS Code's
+        // terminal sends shift-enter as ESC CR, which is alt-enter here, and
+        // both means the same thing to this field.
+        typed(&mut app, "abc");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        assert_eq!(app.input, "abc\n");
+
+        // A word at a time, both ways: ctrl and alt are the same gesture.
+        typed(&mut app, "one two three");
+        app.key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL));
+        assert_eq!(app.caret, 8);
+        app.key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL));
+        assert_eq!(app.caret, 4);
+        app.key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
+        assert_eq!(app.caret, 8);
+        // The ends of the line, which is the whole message while it is one.
+        app.key(KeyEvent::new(KeyCode::Left, KeyModifiers::SUPER));
+        assert_eq!(app.caret, 0);
+        app.key(KeyEvent::new(KeyCode::Right, KeyModifiers::SUPER));
+        assert_eq!(app.caret, 13);
+
+        // Backspace takes what is behind the caret and delete what is on it.
+        typed(&mut app, "abc");
+        app.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.input, "ac");
+        assert_eq!(app.caret, 1);
+        app.key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(app.input, "a");
+
+        // Home and end are the line's ends while there is a message, and the
+        // conversation's when the box is empty. The command key does the same
+        // thing wherever the terminal reports it, which is the mac spelling.
+        typed(&mut app, "abc");
+        app.key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(app.caret, 0);
+        assert!(app.follow, "the field had the key, not the conversation");
+        app.key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(app.caret, 3);
+        app.input.clear();
+        app.caret = 0;
+        app.key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert!(!app.follow, "an empty box leaves the conversation the key");
+
+        // The backup spelling, and the only one a terminal reporting neither
+        // encoding can send: raw mode leaves 0x0A unambiguous.
+        typed(&mut app, "abc");
+        app.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        assert_eq!(app.input, "abc\n");
+    }
+
+    /// A message of more than one line: the box grows a line at a time, the
+    /// prompt is only on the first, and past its ceiling the window follows the
+    /// caret rather than the end of the message.
+    #[test]
+    fn a_multi_line_message_grows_the_box_and_scrolls_to_the_caret() {
+        let mut app = App::new(None);
+        typed(&mut app, "first\nsecond");
+        assert_eq!(app.field_height(40), 2);
+        assert!(app.multiline());
+
+        let (w, h) = (40u16, 12u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let lines: Vec<String> = (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
+        let first = lines.iter().position(|l| l.starts_with('\u{276f}')).expect("no field line");
+        assert!(lines[first].contains("first"), "{:?}", lines[first]);
+        assert!(lines[first + 1].starts_with("  second"), "{:?}", lines[first + 1]);
+
+        // Ten lines is more than the box will show, so the window moves to the
+        // line the caret is on and the first line goes off the top of it.
+        typed(&mut app, &(1..=10).map(|n| format!("row {n}")).collect::<Vec<_>>().join("\n"));
+        assert_eq!(app.field_height(40), FIELD_MAX as u16, "the box stops growing");
+        let (w, h) = (40u16, 20u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let lines: Vec<String> = (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
+        assert!(lines.iter().any(|l| l.contains("row 10")), "{}", lines.join("\n"));
+        assert!(!lines.iter().any(|l| l.contains("row 1 ")), "{}", lines.join("\n"));
+    }
+
+    /// A single long line wraps instead of running off the edge: the box grows a
+    /// row, the continuation starts under the text rather than under the prompt,
+    /// and no row is wider than the box.
+    #[test]
+    fn a_long_line_wraps_and_the_box_grows_a_row() {
+        let mut app = App::new(None);
+        let words = "alpha beta gamma delta epsilon zeta eta theta iota kappa";
+        typed(&mut app, words);
+        assert!(!app.multiline(), "one line, however many rows it takes");
+        // A 30-wide box gives the message 28 columns, and these ten words want
+        // three rows of them.
+        assert_eq!(app.field_height(30), 3, "the box grew a row per wrapped line");
+        let (w, h) = (30u16, 16u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let lines: Vec<String> =
+            (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
+        let first = lines.iter().position(|l| l.starts_with('\u{276f}')).expect("no field line");
+        let field: Vec<&String> = lines[first..first + 3].iter().collect();
+        // The prompt is on the first row and the continuations are not, and each
+        // one starts with a word rather than with half of one.
+        assert!(field[0].starts_with('\u{276f}'), "{:?}", field[0]);
+        assert!(field[1].starts_with("  alpha") || field[1].starts_with("  beta") || field[1].starts_with("  gamma") || field[1].starts_with("  delta") || field[1].starts_with("  epsilon"), "{:?}", field[1]);
+        assert!(field[2].starts_with("  "), "{:?}", field[2]);
+        // Everything typed is on the screen, word for word: wrapping is not
+        // clipping, and it is not cutting a word at the edge either.
+        let shown = field.iter().map(|l| l.trim_end()).collect::<Vec<_>>().join(" ");
+        for word in words.split(' ') {
+            assert!(shown.contains(word), "{word} is not whole on the screen: {shown:?}");
+        }
+        // And not one row is wider than the box, which is the thing that was
+        // wrong before: the text ran on past the frame forever.
+        for l in &lines {
+            assert!(l.chars().count() <= w as usize, "a row ran off the box: {l:?}");
+        }
+    }
+
+    /// A chip is moved whole to the next row rather than being cut at the edge of
+    /// the box: half of `[image 1]` on one row and half on the next would be a
+    /// label that is not what gets sent.
+    #[test]
+    fn a_wrap_never_cuts_a_chip_in_half() {
+        let mut app = App::new(None);
+        // A word that fills most of the row, so the chip has nowhere to sit but
+        // the next one, then enough after it to push it over again.
+        typed(&mut app, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        shot(&mut app, "a.png");
+        let (w, h) = (30u16, 14u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let lines: Vec<String> =
+            (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
+        let rows: Vec<&String> = lines.iter().filter(|l| l.starts_with("  ") || l.starts_with('\u{276f}')).collect();
+        // The label is on one row and undivided, wherever the wrap fell.
+        assert_eq!(
+            rows.iter().filter(|l| l.contains("[image 1]")).count(),
+            1,
+            "the chip is not whole on one row: {rows:?}"
+        );
+        assert!(!rows.iter().any(|l| l.contains("[image") && !l.contains("[image 1]")), "{rows:?}");
+    }
+
+    /// The row the caret is on is the row it was drawn in, so a caret at the end
+    /// of a line that wrapped puts the box's window where the typing is.
+    #[test]
+    fn the_box_follows_the_caret_through_a_wrap() {
+        let mut app = App::new(None);
+        // Eight rows' worth of a 20-wide box, so the ceiling is passed and the
+        // window has to move, with the caret at the very end.
+        typed(&mut app, &"word ".repeat(60));
+        assert_eq!(app.field_height(20), FIELD_MAX as u16);
+        let (w, h) = (20u16, 20u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let lines: Vec<String> =
+            (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
+        // The last row on screen is the one the caret is on, and the caret's own
+        // bar is at its end.
+        let field = lines.iter().rposition(|l| l.starts_with('\u{276f}') || l.starts_with("  ") || l.contains('\u{258f}'))
+            .expect("no field row");
+        assert!(lines[field].contains('\u{258f}'), "the caret is not on the last row: {:?}", lines[field]);
+    }
+
+    /// `/help` is the door to the keys, and it opens a panel like any other: the
+    /// worker has no help command, so a line that only said `/help` would go to
+    /// the model as prose unless the frontend reads it first.
+    #[test]
+    fn help_opens_the_keys_instead_of_going_to_the_model() {
+        let mut app = App::new(None);
+        typed(&mut app, "/help");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let open = app.opened.as_ref().expect("help did not open");
+        assert_eq!(open.title, "keys");
+        let text: String = open.lines.iter().map(Line::to_string).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("ctrl-o") && text.contains("ctrl-b"), "{text}");
+        // A key list is keys. The commands are the `/` menu's own list, and
+        // naming one here would be the only command on a screen with room for
+        // none of the others.
+        assert!(!text.contains("/permissions"), "a command on the keys: {text}");
+        assert!(!text.contains("/help"), "the panel naming itself: {text}");
+        // It is a panel, so escape is what closes it, and nothing was said to
+        // the conversation on the way in.
+        assert!(app.log.rows.is_empty(), "help went into the transcript");
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.opened.is_none());
+    }
+
+    /// `/permissions` is a command rather than a key: on its own it opens the
+    /// four modes with the one in use marked, and a mode after it sets the mode
+    /// directly. Neither way says anything to the conversation.
+    #[test]
+    fn permissions_is_a_command_with_the_four_modes_behind_it() {
+        let mut app = App::new(None);
+        typed(&mut app, "/permissions");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.menu.as_ref().expect("no modes").kind, Kind::Permissions);
+        let modes = menu::modes("ask");
+        let rows: Vec<&str> = modes.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(rows, ["ask", "auto", "bypass", "off"]);
+        assert!(modes[0].hint.contains("acting now"), "the mode in use is marked");
+        assert!(modes[1].hint.is_empty(), "the others are not");
+        assert!(app.log.rows.is_empty(), "the command was said to the conversation");
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.menu.is_none());
+
+        // Spelled out it is the command, not the list, and a mode it does not
+        // have is answered rather than swallowed.
+        typed(&mut app, "/permissions off");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.menu.is_none());
+        assert!(app.log.rows.is_empty());
+        typed(&mut app, "/permissions sideways");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let said = app.log.rows.last().cloned().expect("nothing was said");
+        assert!(matches!(&said, Row::Notice { head, .. } if head.contains("no mode called")), "{said:?}");
+    }
+
+    /// The `/` menu is filled twice: from the rows in hand when it opens, and
+    /// again from the list that lands under it. The second fill must keep this
+    /// frontend's own verbs, or the row being filtered for goes out from under
+    /// the keystrokes -- which is what `/permissions` did the first time.
+    #[test]
+    fn the_workers_command_list_keeps_the_frontends_own_verbs() {
+        let mut app = App::new(None);
+        app.open_menu(Kind::Commands);
+        app.feed(
+            wire::parse(
+                r#"{"type":"commands","id":"a","data":{"commands":[{"name":"model","description":"which model"}]}}"#,
+            )
+            .unwrap(),
+        );
+        let open = app.menu.as_ref().expect("the menu closed");
+        let rows: String = open.lines(60).iter().map(Line::to_string).collect::<Vec<_>>().join("\n");
+        assert!(rows.contains("help"), "{rows}");
+        assert!(rows.contains("permissions"), "{rows}");
+        assert!(rows.contains("model"), "{rows}");
+    }
+
+    /// ctrl-o opens the calls: the conversation's own rows, newest first, so a
+    /// call that is not the newest is still reachable. Choosing one opens it from
+    /// the row's own copy -- a replay has no worker to ask for the rest of it.
+    #[test]
+    fn ctrl_o_lists_the_calls_and_opens_the_one_chosen() {
+        let mut app = App::new(None);
+        seed(&mut app);
+        // A second call, so "newest" is a choice rather than the only row there is.
+        app.feed(wire::parse(r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"file","args":{"action":"write","path":"a.py","content":"one\ntwo"}}]}}"#).unwrap());
+        app.feed(wire::parse(r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"file","result":{"result":{"created":true}}}}"#).unwrap());
+
+        // A frame first, the way the loop runs: a panel is sized from the width
+        // the screen last drew at, and with no frame there is no width to size to.
+        let mut term = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+
+        app.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        let open = app.menu.as_ref().expect("ctrl-o opened no menu");
+        assert_eq!(open.kind, Kind::Calls);
+        let rows: Vec<String> = open.lines(60).iter().map(Line::to_string).collect();
+        assert!(rows[0].contains("write(a.py)"), "newest first: {:?}", rows[0]);
+        assert!(rows.iter().any(|r| r.contains("Bash(date)")), "{rows:?}");
+        assert!(app.input.is_empty(), "a picker writes nothing on the line");
+
+        // Choosing the row under the cursor opens that call in full.
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.menu.is_none());
+        let panel = app.opened.as_ref().expect("nothing opened");
+        assert_eq!(panel.title, "write(a.py)");
+        let text: String = panel.lines.iter().map(Line::to_string).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("\u{250c} content \u{b7} 2 lines "), "{text}");
+        assert!(text.contains("\u{2502} one") && text.contains("\u{2502} two"), "{text}");
+
+        // Escape is what closes a panel, however it was opened.
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.opened.is_none());
+    }
+
+    /// A panel's scroll is clamped to what it holds. The offset counts the lines
+    /// on the screen rather than the ones the panel was built from, because a
+    /// long line is several of them -- and a call that fits must not scroll off
+    /// into the void.
+    #[test]
+    fn a_panel_scrolls_no_further_than_it_has_to() {
+        let mut app = App::new(None);
+        let long = (0..200)
+            .map(|n| format!("line {n}, padded out so it wraps in a narrow box"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let call = serde_json::json!({"action": "write", "path": "a.py", "content": long});
+        app.opened = Some(view::call_from_row("file", "path=a.py", &call, Some("created"), 40));
+        app.opened.as_mut().unwrap().scroll = u16::MAX;
+        let (w, h) = (40u16, 12u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let max = app.opened.as_ref().unwrap().scroll;
+        assert!(max > 0, "a panel taller than the box has somewhere to scroll to");
+        // It stays where it was put rather than creeping on every draw.
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(app.opened.as_ref().unwrap().scroll, max);
+
+        // A call with less in it than the box has room for is pinned at the top.
+        let short = serde_json::json!({"action": "read", "path": "a.py"});
+        app.opened = Some(view::call_from_row("file", "path=a.py", &short, None, 40));
+        app.opened.as_mut().unwrap().scroll = u16::MAX;
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(app.opened.as_ref().unwrap().scroll, 0);
+    }
+    /// A question the model asked draws its own panel, and the screen says so.
+    ///
+    /// The bug this pins: `is_question` was decided by "did any options arrive",
+    /// so a question with no options fell through to the permission line and its
+    /// yes/no keys -- the one case that most needs a text box was the one that did
+    /// not get one. The envelope now carries `kind`, and this holds the drawing to
+    /// it: a question shows its own text and an empty answer row, a permission
+    /// still shows `allow ... ? y / n`.
+    #[test]
+    fn a_question_draws_a_question_and_a_permission_still_draws_permission() {
+        let frame = |app: &mut App, w: u16, h: u16| {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| draw(f, app)).unwrap();
+            let buf = term.backend().buffer();
+            (0..h)
+                .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // 1. A question with no options: a text box, and nothing about allowing.
+        let mut app = App::new(None);
+        app.feed(wire::parse(r#"{"type":"permission","id":"q1","data":{"name":"ask_user","kind":"question","question":"what should this be called?","options":[]}}"#).unwrap());
+        let shown = frame(&mut app, 80, 24);
+        assert!(shown.contains("what should this be called?"), "{shown}");
+        assert!(!shown.contains("allow ask_user?"), "question drew the permission line:\n{shown}");
+        // The caret is in the answer row, because there is no list to pick from.
+        assert!(app.prompt.as_ref().is_some_and(|a| a.is_question() && a.on_custom()), "{shown}");
+
+        // 2. A question with options: numbered rows, plus the custom row.
+        let mut app = App::new(None);
+        app.feed(wire::parse(r#"{"type":"permission","id":"q2","data":{"name":"ask_user","kind":"question","question":"which file?","options":["main.rs","lib.rs"]}}"#).unwrap());
+        let shown = frame(&mut app, 80, 24);
+        if std::env::var("SHOW_QUESTION_PANEL").is_ok() { println!("{shown}"); }
+        assert!(shown.contains("which file?") && shown.contains("main.rs") && shown.contains("lib.rs"), "{shown}");
+        assert!(!shown.contains("allow ask_user?"), "question drew the permission line:\n{shown}");
+
+        // 2b. The panel is called a question, not by the tool's name, and says
+        //     which one of how many.
+        let mut app = App::new(None);
+        app.feed(wire::parse(r#"{"type":"permission","id":"q2b","data":{"name":"ask_user","kind":"question","question":"which file?","options":["a","b"],"n":2,"of":3}}"#).unwrap());
+        let shown = frame(&mut app, 80, 24);
+        assert!(shown.contains("question 2 of 3"), "no count in the title:\n{shown}");
+        assert!(!shown.contains("ask_user"), "the tool name is still on the panel:\n{shown}");
+        // With the cursor up in the list, the answer row says it is there.
+        assert!(shown.contains("or type your own"), "{shown}");
+
+        // 2c. Typing moves the cursor down and the row becomes the field, with a
+        //     caret and the hint that enter sends it.
+        for c in "notes.txt".chars() {
+            app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let shown = frame(&mut app, 80, 24);
+        if std::env::var("SHOW_QUESTION_PANEL").is_ok() { println!("{shown}"); }
+        assert!(shown.contains("notes.txt"), "typed text not drawn:\n{shown}");
+        assert!(shown.contains("enter sends it"), "no hint while typing:\n{shown}");
+        assert!(!shown.contains("or type your own"), "still prompting for input it has:\n{shown}");
+
+        // 2d. A digit picks an option while the list has the cursor, and is text
+        //     once something is being typed.
+        let mut app = App::new(None);
+        app.feed(wire::parse(r#"{"type":"permission","id":"q2d","data":{"name":"ask_user","kind":"question","question":"pick","options":["one","two"]}}"#).unwrap());
+        app.key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+        assert_eq!(app.prompt.as_ref().unwrap().picked, 1, "digit did not pick");
+        app.key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        assert_eq!(app.prompt.as_ref().unwrap().picked, 0, "digit did not move the list");
+
+        // 3. A permission is untouched: still one line, still y / n.
+        let mut app = App::new(None);
+        app.feed(wire::parse(r#"{"type":"permission","id":"p1","data":{"name":"shell","kind":"permission","args":{"command":"rm x"}}}"#).unwrap());
+        let shown = frame(&mut app, 80, 24);
+        assert!(shown.contains("allow shell?"), "permission lost its line:\n{shown}");
+        assert!(shown.contains("y / n"), "{shown}");
+        assert!(app.prompt.as_ref().is_some_and(|a| !a.is_question()));
+
+        // 4. An envelope from a worker that predates `kind` still lands right: the
+        //    question mark is the field only a question carries.
+        let mut app = App::new(None);
+        app.feed(wire::parse(r#"{"type":"permission","id":"q3","data":{"name":"ask_user","args":{"question":"still a question?"},"question":"still a question?"}}"#).unwrap());
+        assert!(app.prompt.as_ref().is_some_and(|a| a.is_question()), "old envelope misread");
+    }
+
+    /// A character typed at a question goes into the answer, not into a dead arm.
+    #[test]
+    fn typing_at_a_question_builds_the_answer() {
+        let mut app = App::new(None);
+        app.feed(wire::parse(r#"{"type":"permission","id":"q","data":{"name":"ask_user","kind":"question","question":"name it","options":[]}}"#).unwrap());
+        for c in "widget".chars() {
+            app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        // Backspace takes one back, as a text field does.
+        app.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        let asked = app.prompt.clone().expect("still up");
+        assert_eq!(asked.typed, "widge", "typed answer: {:?}", asked.typed);
+        assert!(asked.on_custom(), "an empty list means the answer row is the only row");
+    }
+
+    /// The fold line says something, and stops saying it.
+    ///
+    /// The complaint this pins: `/compact` runs on the main loop, outside
+    /// generate(), so there was no outbox for its events and the screen never
+    /// learned a fold was happening. The status text is what the frame draws off
+    /// the snapshot, so this asserts the snapshot produces the line -- the frame
+    /// itself only reserves a status row when there is one.
+    #[test]
+    fn a_fold_puts_a_line_on_the_status_row_and_takes_it_away() {
+        use cuacode::session::{compact_state, Snapshot};
+
+        // What the worker's start event does to the snapshot. Without the state
+        // moving to Running the frame reserves no status row, which is the bug:
+        // the worker sat in a model call with a screen that looked hung.
+        let mut snap = Snapshot::default();
+        assert_eq!(snap.state, State::Idle, "nothing is folding yet");
+
+        compact_state(&mut snap, "start", 24, 18_000);
+        assert_eq!(snap.state, State::Running, "a fold at the prompt must show as busy");
+        assert_eq!(snap.compacting, "start");
+
+        compact_state(&mut snap, "done", 0, 0);
+        assert_eq!(snap.state, State::Idle, "a finished fold did not finish a turn");
+        assert_eq!(snap.compacting, "done");
+    }
+
+}

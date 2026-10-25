@@ -2,6 +2,7 @@
 venv
 .venv
 .DS_Store
+.test-home/
 /bin/
 rust/target/
 .env

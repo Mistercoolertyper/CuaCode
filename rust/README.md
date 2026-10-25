@@ -1,8 +1,8 @@
 # cuacode-rs
 
-CuaCode's frontend half, in Rust: two frontends over one worker, which is the
+CuaCode's frontend half, in Rust: three frontends over one worker, which is the
 Python process in the parent directory. The shared part is a port of the Go
-side's `core/protocol`, `core/session` and `core/runner`. Neither frontend is
+side's `core/protocol`, `core/session` and `core/runner`. No frontend is
 built into it, and it draws nothing.
 
 ## Where things are
@@ -20,6 +20,9 @@ rust/
         main.rs        keys, the frame, the turn's clock
         view.rs        what a row looks like in cells
         menu.rs        the `/`, `$` and `@` menus
+  quik/   quik         the compact terminal frontend, starting from fastrs's code
+                       and drawn more tightly: one line a step, no air, a thought
+                       named by a small model; the design is not settled yet
   app/   cuacode       the app: projects and sessions, the conversation,
                        and the composer (GPUI, superset's look)
         main.rs        the window, the keys, the four composer menus, the cache
@@ -35,6 +38,7 @@ rust/
 
 ```bash
 ./run.sh fastrs          # terminal
+./run.sh quik            # terminal, the compact one (`--print`/`--frame` preview it)
 ./run.sh cuacode         # the app
 ./build.sh fastrs        # just build one
 ./rust/app/app.sh        # the app as a real macOS bundle
