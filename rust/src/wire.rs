@@ -141,6 +141,13 @@ pub struct Payload {
     /// name, which stays absent rather than becoming an empty one here.
     #[serde(rename = "peer_name", default)]
     pub peer_name: Option<String>,
+    /// The first words of the thought a `step_name` names.
+    ///
+    /// A block id is the frontend's own counter, so the worker cannot address a
+    /// row with one. What both ends hold is the thought itself, and this is the
+    /// handle they meet on: the row whose text starts with these words is the step.
+    #[serde(default)]
+    pub of: Option<String>,
     /// A fold in the conversation: "start" while the summarizer runs, "done" when
     /// it lands. `folded` and `freed` are what the status line can say about it.
     #[serde(default)]

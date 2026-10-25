@@ -30,7 +30,7 @@ pub enum Row {
     /// what stops a later answer being appended to an earlier one: two
     /// different blocks are two different rows, however little separates them
     /// on screen.
-    Thinking { text: String, block: u64 },
+    Thinking { text: String, block: u64, name: Option<String> },
     Content { text: String, block: u64 },
     /// A call, and the result that came back against it. `result` is a summary,
     /// never a body: a shell result is kilobytes and a row is a line.
@@ -145,6 +145,13 @@ impl Transcript {
                 self.result(ev);
                 true
             }
+            // A name for a step, from the worker's small model. It arrives after
+            // the step it names, which is why it carries the thought's opening
+            // words rather than an id: the row is found by the words.
+            ("token", "step_name") => {
+                self.name_step(ev);
+                true
+            }
             ("token", "error") | ("status", "error") => {
                 let text = ev.payload.error.clone().unwrap_or_else(|| ev.token_text());
                 self.next_block();
@@ -169,7 +176,7 @@ impl Transcript {
         }
         let block = self.block;
         self.rows.push(if thinking {
-            Row::Thinking { text, block }
+            Row::Thinking { text, block, name: None }
         } else {
             Row::Content { text, block }
         });
@@ -180,7 +187,7 @@ impl Transcript {
     fn stream(&mut self, thinking: bool) -> Option<&mut String> {
         let block = self.block;
         match self.rows.get_mut(self.open?)? {
-            Row::Thinking { text, block: b } if thinking && *b == block => Some(text),
+            Row::Thinking { text, block: b, .. } if thinking && *b == block => Some(text),
             Row::Content { text, block: b } if !thinking && *b == block => Some(text),
             _ => None,
         }
@@ -191,6 +198,30 @@ impl Transcript {
     fn next_block(&mut self) {
         self.block += 1;
         self.open = None;
+    }
+
+    /// Put the worker's name on the step it names.
+    ///
+    /// The newest thought whose text starts with the words the event carries. A
+    /// name that finds no row is dropped: the row is what it was for, and naming
+    /// the wrong step is worse than leaving one unnamed.
+    fn name_step(&mut self, ev: &Event) {
+        let name = ev.token_text().trim().to_string();
+        let of = ev.payload.of.clone().unwrap_or_default();
+        if name.is_empty() {
+            return;
+        }
+        let at = self.rows.iter().rposition(|row| match row {
+            Row::Thinking { text, .. } => {
+                of.trim().is_empty() || text.trim_start().starts_with(of.trim())
+            }
+            _ => false,
+        });
+        if let Some(i) = at {
+            if let Row::Thinking { name: slot, .. } = &mut self.rows[i] {
+                *slot = Some(name);
+            }
+        }
     }
 
     /// The row the worker is writing into right now, for a frontend drawing the
@@ -498,6 +529,27 @@ mod tests {
 
     fn ev(line: &str) -> Event {
         wire::parse(line).unwrap()
+    }
+
+    /// A step name arrives after the step and is put on the thought it names. The
+    /// handle is the thought's own opening words, because a block id belongs to the
+    /// frontend's fold and the worker has never seen one.
+    #[test]
+    fn a_step_name_lands_on_the_thought_it_names() {
+        let mut t = Transcript::default();
+        t.apply(&ev(r#"{"type":"token","id":"a","data":{"state":"thinking","token":"The router needs pattern segments. Let me look at the app."}}"#));
+        t.apply(&ev(r#"{"type":"token","id":"a","data":{"state":"step_name","token":"Tracing router callers","of":"The router needs pattern"}}"#));
+        match &t.rows[0] {
+            Row::Thinking { name, .. } => assert_eq!(name.as_deref(), Some("Tracing router callers")),
+            other => panic!("{other:?}"),
+        }
+        // A name that matches no row is dropped rather than hung on whichever
+        // thought happens to be last: a wrong name is worse than none.
+        t.apply(&ev(r#"{"type":"token","id":"a","data":{"state":"step_name","token":"Something else","of":"nothing said this"}}"#));
+        match &t.rows[0] {
+            Row::Thinking { name, .. } => assert_eq!(name.as_deref(), Some("Tracing router callers")),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

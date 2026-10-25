@@ -9,6 +9,7 @@ from handler.session import store
 from handler.session.main import Session
 from handler import config, context, environment, peers, usage, version
 from integrations.memory import loader as memory, naming, recall
+from handler.agent import stepname
 from integrations.instructions import loader as instructions
 from integrations.skills import loader as skills
 from integrations.permissions import decider
@@ -965,6 +966,11 @@ while True:
                     elif typ == "assistant":
                         sess.add_assistant(chunk.get("thinking", ""), chunk.get("content", ""),
                                            chunk.get("tool_calls") or [], usage=round_cost)
+                        # A step just closed: its thought and the calls it made are
+                        # the whole input a small model needs to name it, and the
+                        # calls are about to run, which is the room the naming has.
+                        stepname.maybe_name(ipc.send, chunk.get("thinking", ""),
+                                            chunk.get("tool_calls") or [])
                     elif typ == "cancelled":
                         # No rewind: the loop closed the round off and every
                         # tool_call has an interrupted result, so messages is resumable.

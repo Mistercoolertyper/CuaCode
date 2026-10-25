@@ -273,6 +273,24 @@ def vision_helper(cfg: dict = None) -> tuple:
         return (v.get("provider") or "").strip(), (v.get("model") or "").strip()
     return (v or "").strip(), ""
 
+def steps_helper(cfg: dict = None) -> tuple:
+    """(provider, model) named to label the steps of a run, or ("", "") for nobody.
+
+    The same two spellings `vision` takes, for the same reason: the model that
+    names a step is rarely the model holding the conversation, and pointing this
+    at a small one is the whole point. Unset falls back to `vision`, which is the
+    other model this file already names for work that is not the conversation.
+    """
+    cfg = cfg or load()
+    v = cfg.get("steps")
+    if isinstance(v, dict):
+        return (v.get("provider") or "").strip(), (v.get("model") or "").strip()
+    if (v or "").strip():
+        return v.strip(), ""
+    # Not named: the model already set aside for the side jobs does this one, so
+    # there is one place to point at a small model rather than two.
+    return vision_helper(cfg)
+
 def set_vision_helper(name: str, model: str = None) -> dict:
     """Name the provider that looks at images, or "" to go back to auto. Checked here rather than at use
     time: a helper that cannot see or cannot be reached would otherwise fail hours later, inside a tool
