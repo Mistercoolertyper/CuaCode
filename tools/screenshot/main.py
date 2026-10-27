@@ -32,15 +32,16 @@ def run(args: dict, ctx) -> dict:
     grid_size = max(2, int(args.get("grid_size") or 100))
     session_dir = getattr(ctx, "session_dir", None) if ctx else None
     self_name = getattr(ctx, "self_identity", None)
+    self_handle = getattr(ctx, "self_handle", None)
 
     # Park the terminal in the left strip, without raising it, on every capture: nothing
     # else re-checks parking, and raising here would leave the terminal focused and eat
     # the agent's next click. A window-manager failure never propagates; losing the shot
     # is worse than a bad parking job.
     self_snapped = False
-    if self_name:
+    if self_name or self_handle:
         try:
-            self_snapped = _window.park_self(self_name)
+            self_snapped = _window.park_self(self_name, self_handle)
         except Exception:
             self_snapped = False
 

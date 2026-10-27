@@ -101,7 +101,9 @@ The agent and the target window must be on the same interactive desktop. Input
 cannot cross into an elevated process unless CuaCode is running at the same
 integrity level, and UAC's secure desktop is not part of a normal screenshot.
 When snapping, the terminal occupies the left 30% of the usable desktop and the
-window being driven occupies the right 70%; both stop above the taskbar.
+window being driven occupies the right 70%; both stop above the taskbar. The
+terminal is identified by the console this session is attached to, not by its
+executable name, so a second terminal running the same app is left where it is.
 
 ## Terminal notes
 

@@ -24,6 +24,7 @@ class Ctx(dict):
     """Envelope fields, plus the attribute spellings some tools read off it."""
 
     self_identity = property(lambda s: s.get("frontmost_app"))
+    self_handle = property(lambda s: s.get("frontmost_hwnd"))
     session_dir = property(lambda s: s.get("session_dir"))
     cwd = property(lambda s: s.get("cwd"))
 
@@ -37,12 +38,22 @@ def terminal_ctx(data) -> Ctx:
     when the two swap places.
     """
     info = dict(data or {})
-    if os.name == "nt" and not info.get("frontmost_app"):
-        try:
-            from tools.screenshot._capture_windows import active_app_name
-            info["frontmost_app"] = active_app_name()
-        except Exception:
-            pass
+    if os.name == "nt":
+        if not info.get("frontmost_app"):
+            try:
+                from tools.screenshot._capture_windows import active_app_name
+                info["frontmost_app"] = active_app_name()
+            except Exception:
+                pass
+        # The name cannot distinguish two terminals of the same app. The window
+        # in front at boot can: this worker was started by the terminal the user
+        # launched, and that window is the one parking must move.
+        if not info.get("frontmost_hwnd"):
+            try:
+                from tools.screenshot._capture_windows import foreground_window
+                info["frontmost_hwnd"] = foreground_window()
+            except Exception:
+                pass
     return Ctx(info)
 
 
