@@ -105,19 +105,22 @@ def trigger(settings: dict, cfg: dict = None) -> int:
     """The token count at which this conversation folds, or 0 to never.
 
     `compact` in config.json wins when it is a number, and wins with 0 by turning
-    folding off. A window nobody knows means no trigger: guessing the size of the
-    window is guessing when to throw away the user's context.
+    folding off. Read before the window, because a count is a count: a provider
+    that will not say how big its window is can still be given one, and a
+    conversation with a written-down limit folds on it -- the alternative is that
+    an unrecognized model has no way to fold on purpose before it hits the wall.
+    A window nobody knows with no override means no trigger: guessing the size of
+    the window is guessing when to throw away the user's context.
     """
     from handler import config
+    override = (cfg if cfg is not None else config.load()).get("compact")
+    fixed = isinstance(override, (int, float)) and not isinstance(override, bool)
+    if fixed and override <= 0: return 0
+    if fixed and override > 1: return int(override)      # a token count
     window = config.context_window(settings.get("provider", ""), settings.get("model", ""), cfg)
     if not window: return 0
-    override = (cfg if cfg is not None else config.load()).get("compact")
-    if isinstance(override, (int, float)) and not isinstance(override, bool):
-        if override <= 0: return 0
-        # Over 1 is a token count, under it a share of the window.
-        return int(override) if override > 1 else int(window * override)
-    r = ratio(window)
-    return int(window * r) if r else 0
+    r = override if fixed else ratio(window)            # a share of the window
+    return int(window * r)
 
 
 def _chars(rec: dict) -> int:
@@ -273,6 +276,15 @@ def check():
     assert ratio(0) == 0.0
     assert ratio(100_000) == 0.70 and ratio(2_000_000) == 0.40
     assert 0.40 < ratio(628_000) < 0.70
+
+    # A written-down count is honoured even when the provider will not say how big
+    # its window is, and 0 still means never. Neither branch may reach the
+    # provider, which is why a name no registry entry has is the test case.
+    unknown = {"provider": "no-such-provider", "model": "unknown-1"}
+    assert trigger(unknown, {"compact": 400_000}) == 400_000
+    assert trigger(unknown, {"compact": 0}) == 0
+    assert trigger(unknown, {"compact": 0.4}) == 0        # a share of nothing
+    assert trigger(unknown, {}) == 0
     prev = 1.0
     for w in (50_000, 256_000, 400_000, 700_000, 1_000_000, 3_000_000):
         r = ratio(w) or 1.0

@@ -296,14 +296,16 @@ def _compact_now(messages: list, used: int, limit: int, ctx=None) -> str:
     # Rebuild the provider messages from the folded records rather than editing the
     # list: the fold removes assistant/tool groups, and the only thing that knows
     # how to turn a record list back into this dialect is replay.
+    # Read before the fold: fold() slices `records` in place, so a length taken
+    # after it is the count that went out, not the one that came in.
+    before = len(records)
     sess.rewrite(c.fold(records, steps), fold=steps)
     messages[:] = sess.messages()
     # The transcript's mark. Says what it did, how much it saved, and -- because it
     # is the thing a person will want when a summary reads wrong -- that the
     # original is still on disk.
     saved = f"{steps['freed']:,} chars freed"
-    before = len(records)
-    after = len(records) - steps["folded"] + 1
+    after = len(records)
     return (f"compacted {before} records to {after} \u00b7 {saved} \u00b7 "
             f"the original is in folds/ on this session")
 
