@@ -111,13 +111,22 @@ def trigger(settings: dict, cfg: dict = None) -> int:
     an unrecognized model has no way to fold on purpose before it hits the wall.
     A window nobody knows with no override means no trigger: guessing the size of
     the window is guessing when to throw away the user's context.
+
+    `compact` is the default for every model; `model_params[<model>].compact` is
+    that model's own answer and wins. A large-window model and a small-window one
+    do not have to share a threshold, which is what a single global count forced.
     """
     from handler import config
-    override = (cfg if cfg is not None else config.load()).get("compact")
+    cfg = cfg if cfg is not None else config.load()
+    name = settings.get("provider", "")
+    model = settings.get("model") or config.model_for(name, cfg)
+    override = config.local_param(name, model, "compact", cfg)
+    if override is None:
+        override = cfg.get("compact")
     fixed = isinstance(override, (int, float)) and not isinstance(override, bool)
     if fixed and override <= 0: return 0
     if fixed and override > 1: return int(override)      # a token count
-    window = config.context_window(settings.get("provider", ""), settings.get("model", ""), cfg)
+    window = config.context_window(name, model, cfg)
     if not window: return 0
     r = override if fixed else ratio(window)            # a share of the window
     return int(window * r)
