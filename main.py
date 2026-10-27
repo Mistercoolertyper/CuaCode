@@ -244,6 +244,15 @@ def replay(session, env):
     for r in session.records():
         t = r.get("t")
         if t == "user":
+            # A record the worker marked as a note is runtime text it put in front of the
+            # model, not a line the person typed: drawn as the notice it was, or a
+            # reopened conversation puts words in their mouth. The tag in the text is
+            # for the records written before that mark existed -- a turn carrying a
+            # runtime block was never typed by a person.
+            text = r.get("text") or ""
+            if r.get("note") or "<todo_status>" in text:
+                ipc.reply(env, "token", {"state": "notice", "token": text})
+                continue
             # Names, never payloads: shipping the base64 back puts megabytes on the wire.
             data = {"state": "user", "token": r.get("text", "")}
             if r.get("images"):
@@ -970,7 +979,7 @@ while True:
                         # the whole input a small model needs to name it, and the
                         # calls are about to run, which is the room the naming has.
                         stepname.maybe_name(ipc.send, chunk.get("thinking", ""),
-                                            chunk.get("tool_calls") or [])
+                                            chunk.get("tool_calls") or [], text)
                     elif typ == "cancelled":
                         # No rewind: the loop closed the round off and every
                         # tool_call has an interrupted result, so messages is resumable.
@@ -1055,9 +1064,12 @@ while True:
                                                  "peer_name": chunk.get("peer_name", ""),
                                                  "result": {"n": chunk.get("n", 1)}})
                     elif typ == "notice":
-                        # Recorded by the peer branch above, or as the user's turn below.
+                        # Recorded by the peer branch above, or as the user's turn below --
+                        # marked as a note, so reopening the conversation draws runtime
+                        # text as the notice it was and not as something the person typed.
                         if not peer_from:
-                            sess.add_user(chunk.get("text", ""), chunk.get("images") or None)
+                            sess.add_user(chunk.get("text", ""), chunk.get("images") or None,
+                                          note=True)
                         # Only the runtime half goes to the frontend: it drew the
                         # user's line when they typed it.
                         shown = chunk.get("show", chunk.get("text", ""))

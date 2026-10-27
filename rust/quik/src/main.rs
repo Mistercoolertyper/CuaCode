@@ -301,9 +301,11 @@ fn print_fixture(path: &str, open: bool) -> io::Result<()> {
     }
     // The same pieces the screen wraps, unwrapped for a pipe. Folded by default
     // because that is what the screen opens as: a preview of the screen, not a
-    // dump of the conversation.
+    // dump of the conversation. `--open` opens the steps; the thoughts inside them
+    // stay lines, which is what the screen shows too.
     let expanded = |_: usize, _: &Row| open;
-    for piece in view::pieces(&log.rows, &expanded, &|_| None, None, true, 100, None) {
+    let folded = |_: usize| false;
+    for piece in view::pieces(&log.rows, &expanded, &folded, &|_| None, None, true, 100, None) {
         println!("{}{}", piece.lead, piece.text());
     }
     println!("\n{} rows from {drawn} events", log.rows.len());
@@ -473,13 +475,17 @@ struct App {
     /// field is a small editor rather than a line: a message can be several
     /// lines long and a typo in the middle of one has to be reachable.
     caret: usize,
-    /// Whether the thoughts show their text. Off, so a screen opened on a long
-    /// session is heads rather than a wall of reasoning. ctrl-t flips them all at
-    /// once, and a double click beats it for one row. A call is not folded: what a
-    /// call shows, it always shows.
+    /// Whether a step shows its calls and the lines of its thinking. Off, so a
+    /// screen opened on a long session is heads rather than a wall of reasoning.
+    /// ctrl-t flips them all at once, and a double click beats it for one step.
     open: bool,
     /// The rows the reader unfolded or folded by hand, by index.
     overrides: HashMap<usize, bool>,
+    /// Whether a thought inside an opened step shows its text, by row. Off unless
+    /// the reader opened it: a step opened on ctrl-t is its calls, and each thought
+    /// in it is one line saying what it was about, so the calls are what the eye
+    /// finds when it scrolls. Opening one is the same press the step itself takes.
+    thoughts: HashMap<usize, bool>,
     /// Rows of the transcript the view is scrolled past, and whether the newest
     /// row is what it is showing. Scrolling up leaves the end behind.
     scroll: u16,
@@ -613,6 +619,7 @@ impl App {
             caret: 0,
             open: false,
             overrides: HashMap::new(),
+            thoughts: HashMap::new(),
             scroll: 0,
             follow: true,
             spans: Vec::new(),
@@ -639,7 +646,16 @@ impl App {
 
     /// Take whatever the worker has said since the last look, and keep the turn's
     /// stopwatch in step with it.
-    fn pump(&mut self) {
+    /// Whether anything on screen is moving by itself: a round in flight, which
+    /// turns the spinner and the mark, or a turn whose clock is still running.
+    fn animating(&self) -> bool {
+        self.sess.as_ref().is_some_and(|s| s.snap.state.busy())
+            || self.turn.as_ref().is_some_and(|t| t.ended.is_none())
+    }
+
+    /// Take everything the worker has said. Says whether anything arrived, which
+    /// is what decides a redraw.
+    fn pump(&mut self) -> bool {
         // An answer that has landed, taken before anything else so a screen with
         // no worker - never mind why - still hears it.
         if let Some(rx) = &self.news_rx {
@@ -650,8 +666,9 @@ impl App {
         }
         let events = match &mut self.sess {
             Some(sess) => sess.drain(),
-            None => return,
+            None => return false,
         };
+        let arrived = !events.is_empty();
         for ev in events {
             self.feed(ev);
         }
@@ -666,7 +683,7 @@ impl App {
                     estimated: sess.snap.think_est,
                 },
             ),
-            None => return,
+            None => return false,
         };
         self.track(&state, tokens, estimated);
         // File the round's figures against the reasoning row they belong to. That
@@ -678,6 +695,7 @@ impl App {
                 self.figures.insert(i, think);
             }
         }
+        arrived
     }
 
     fn feed(&mut self, ev: Event) {
@@ -909,12 +927,6 @@ impl App {
         out
     }
 
-    /// Whether the worker is running calls rather than thinking, which is which
-    /// set of words the readout draws from.
-    fn tooling(&self) -> bool {
-        matches!(self.sess.as_ref().map(|s| &s.snap.state), Some(State::Tools))
-    }
-
     /// The line under the box: what the round is doing, how much of the window
     /// the conversation has filled, how fast it is coming, and which permission
     /// mode is on. Every figure is one the worker sent, so nothing is invented to
@@ -942,6 +954,14 @@ impl App {
                     format!("\u{25c6} compacting: {}k chars freed", f / 1000),
                 _ => "\u{25c6} compacting the conversation into a summary".to_string(),
             });
+        }
+        // What is happening, first, in the plainest words there are for it: an
+        // answer to "what is it doing", not a voice. A line that says `working`
+        // while nothing is being written is worth more than one that says nothing.
+        match snap.state {
+            State::Running => said.push("generating".to_string()),
+            State::Tools => said.push("running tools".to_string()),
+            _ => {}
         }
         if snap.context_max > 0 {
             said.push(format!("ctx {}/{}", plenty(snap.context_used), plenty(snap.context_max)));
@@ -1003,7 +1023,7 @@ impl App {
         let n = rows.len();
         let shown = height.clamp(1, n.max(1));
         let first_shown = (caret_row + 1).saturating_sub(shown).min(n - shown.min(n));
-        let status = self.turn.as_ref().map(|t| view::turn(t, self.ms(), self.shimmer(), self.tooling()));
+        let status = self.turn.as_ref().map(|t| view::turn(t, self.ms()));
         let mut out = Vec::new();
         for li in first_shown..first_shown + shown {
             let first = li == 0;
@@ -1179,7 +1199,7 @@ impl App {
     /// is showing, which is when the box has the full width.
     fn keep(&self) -> usize {
         match &self.turn {
-            Some(t) => view::turn_room(t, self.tooling()) + 3,
+            Some(t) => view::turn(t, self.ms()).width() + 3,
             None => 0,
         }
     }
@@ -1598,6 +1618,21 @@ impl App {
         self.overrides.get(&i).copied().unwrap_or(self.open)
     }
 
+    /// Whether one thought inside an opened step shows its text. Its own fold, and
+    /// nothing global: ctrl-t is what opens a step's calls, and a step's thinking
+    /// is opened one thought at a time.
+    fn thought_shows(&self, i: usize) -> bool {
+        self.thoughts.get(&i).copied().unwrap_or(false)
+    }
+
+    fn toggle_thought(&mut self, i: usize) {
+        if !matches!(self.log.rows.get(i), Some(Row::Thinking { .. })) {
+            return;
+        }
+        let open = self.thought_shows(i);
+        self.thoughts.insert(i, !open);
+    }
+
     fn scroll_by(&mut self, by: i64) {
         self.follow = false;
         self.scroll = (self.scroll as i64 + by).max(0) as u16;
@@ -1722,10 +1757,14 @@ impl App {
                 self.clicked = Some((m.column, m.row, now));
                 if twice {
                     if let Some((row, head)) = self.anchor_at(m.row) {
-                        // A call opens, a step folds: the click does the useful
-                        // thing for what it landed on.
+                        // A call opens, a thought unfolds, a step folds: the click
+                        // does the useful thing for what it landed on. The step's own
+                        // first row is the step -- that is the line that folds it --
+                        // and a thought under it is the thought.
                         if matches!(self.log.rows.get(row), Some(Row::Tool { .. })) {
                             self.open(row);
+                        } else if row != head {
+                            self.toggle_thought(row);
                         } else {
                             self.toggle_step(head);
                         }
@@ -1810,6 +1849,28 @@ impl App {
                     }
                     KeyCode::Down if asked.has_choices() && asked.typed.is_empty() => {
                         asked.picked = (asked.picked + 1).min(asked.rows() - 1);
+                        self.prompt = Some(asked);
+                        return true;
+                    }
+                    // A new line in the answer, in the spellings a terminal
+                    // actually sends: shift-enter where it reports a shifted key,
+                    // alt-enter where it maps the key to `1b 0d`, and ctrl-j
+                    // everywhere, since raw mode makes 0x0A a key of its own.
+                    // Enter is the answer, so a break is only ever a modified
+                    // form -- and it is what makes a two-paragraph answer one.
+                    KeyCode::Enter if shift || alt => {
+                        if !asked.on_custom() {
+                            asked.picked = asked.options.len();
+                        }
+                        asked.typed.push('\n');
+                        self.prompt = Some(asked);
+                        return true;
+                    }
+                    KeyCode::Char('j') if ctrl => {
+                        if !asked.on_custom() {
+                            asked.picked = asked.options.len();
+                        }
+                        asked.typed.push('\n');
                         self.prompt = Some(asked);
                         return true;
                     }
@@ -1929,14 +1990,16 @@ impl App {
                     self.caret = 0;
                 }
             }
-            // Every thought at once, which is the whole point of the key: one
-            // press and the reasoning is heads. Any thought the reader unfolded
-            // or folded by hand is forgotten, so this really does mean all of
-            // them. A call is not folded -- what it shows, it always shows -- so
-            // this key leaves a column of calls exactly as it found it.
+            // Every step at once, which is the whole point of the key: one press
+            // and the calls are all there. Any step the reader unfolded or folded
+            // by hand is forgotten, and so is every thought they opened, so this
+            // really does mean all of them. A call is not folded -- what it shows,
+            // it always shows -- so this key leaves a column of calls exactly as it
+            // found it.
             KeyCode::Char('t') if ctrl => {
                 self.open = !self.open;
                 self.overrides.clear();
+                self.thoughts.clear();
             }
             // The calls, listed: a keyboard's answer to a mouse's double click,
             // and a way to reach one that is not the newest.
@@ -2276,7 +2339,19 @@ impl App {
             Kind::Calls => {
                 self.menu = None;
                 if let Ok(i) = value.parse::<usize>() {
-                    self.open(i);
+                    // A call opens its panel. A thought opens the step it belongs to
+                    // first -- the line it folds to is only drawn once the step is
+                    // open -- and then the thought's own text.
+                    match self.log.rows.get(i) {
+                        Some(Row::Thinking { .. }) => {
+                            let start = view::step_start(&self.log.rows, i);
+                            if !self.shows(start, &self.log.rows[start]) {
+                                self.overrides.insert(start, true);
+                            }
+                            self.toggle_thought(i);
+                        }
+                        _ => self.open(i),
+                    }
                 }
             }
             _ => {
@@ -2380,7 +2455,7 @@ fn run(mut app: App) -> io::Result<()> {
     let mut term = Terminal::new(CrosstermBackend::new(stdout))?;
 
     let result = loop {
-        app.pump();
+        let arrived = app.pump();
         // The permission mark, written straight to the tty through the terminal's
         // own writer: between two frames, never inside one, so it cannot land in a
         // cell ratatui then believes it has already drawn. A terminal that does
@@ -2388,9 +2463,17 @@ fn run(mut app: App) -> io::Result<()> {
         if let Some(mark) = app.mark.take() {
             execute!(term.backend_mut(), Print(mark))?;
         }
-        term.draw(|f| draw(f, &mut app))?;
+        // A still screen is redrawn only when something has changed it. A round in
+        // flight turns the spinner and the mark, so it is drawn on a clock; nothing
+        // in flight is drawn when the worker speaks or a key is pressed, which is
+        // the whole of what can change it then.
+        let moving = app.animating();
+        if arrived || moving {
+            term.draw(|f| draw(f, &mut app))?;
+        }
 
-        if event::poll(Duration::from_millis(30))? {
+        let tick = if moving { 60 } else { 500 };
+        if event::poll(Duration::from_millis(tick))? {
             match event::read() {
                 Ok(CEvent::Key(k)) if k.kind != crossterm::event::KeyEventKind::Release => {
                     if !app.key(k) {
@@ -2411,6 +2494,15 @@ fn run(mut app: App) -> io::Result<()> {
                 // the worst thing a key handler can do.
                 Err(_) => {}
             }
+            // Anything that got here came from the keyboard, the mouse or the
+            // terminal's size: each of those can change the screen. A frame is drawn
+            // for it unless the loop is going to draw one on the way round anyway,
+            // which is what keeps a round in flight from paying for two frames an
+            // event -- a stream is a thousand events, and the top of the loop has
+            // already taken in what just arrived.
+            if !app.animating() {
+                term.draw(|f| draw(f, &mut app))?;
+            }
         }
     };
 
@@ -2428,6 +2520,139 @@ fn run(mut app: App) -> io::Result<()> {
     )?;
     term.show_cursor()?;
     result
+}
+
+/// How many rows of a typed answer the panel shows: the tail, because typing
+/// appends at the end, and a cap is what keeps a pasted paragraph from pushing
+/// the question off the top of its own box.
+const ANSWER_ROWS: usize = 4;
+
+/// `text` wrapped to `inner` columns and cut to `room` rows, the last one
+/// ellipsized when there was more of it than the room. A box that just stopped
+/// mid sentence read as the text being broken rather than as the panel being
+/// short.
+fn head_lines(text: &str, inner: usize, room: usize, style: Style) -> Vec<Line<'static>> {
+    let wrapped = wrap_text(text, inner);
+    let cut = wrapped.len() > room;
+    wrapped
+        .into_iter()
+        .take(room)
+        .enumerate()
+        .map(|(i, line)| {
+            let line = if cut && i + 1 == room {
+                let mut short: String = line.chars().take(inner.saturating_sub(1)).collect();
+                while short.ends_with(' ') {
+                    short.pop();
+                }
+                short.push('\u{2026}');
+                short
+            } else {
+                line
+            };
+            Line::from(Span::styled(line, style))
+        })
+        .collect()
+}
+
+/// The question's panel, as rows wrapped into `inner` columns and fitted to the
+/// `room` a pane can give it.
+///
+/// Measured after the wrapping rather than guessed from the options: the height
+/// used to be "options plus five", so a question that wrapped to four lines --
+/// and every answer typed past one line -- pushed the answer row out of the
+/// bottom of a box whose height had been worked out without them. That is the
+/// "some of it is hidden" it looked like. What cannot be missing is built
+/// first: the answer row and its hint, then whatever the question and its
+/// detail have left over.
+///
+/// ponytail: a question taller than the whole pane loses its tail rather than
+/// growing a scrollbar. It is a question, not a document; give the panel an
+/// offset of its own if one ever needs more room than the pane has.
+fn ask_panel(asked: &Ask, inner: usize, room: usize) -> Vec<Line<'static>> {
+    let bright = Style::new().fg(ink::code());
+    let dim = Style::new().fg(ink::quiet());
+    let on_mark = bright.add_modifier(Modifier::BOLD);
+    let off_mark = Style::new().fg(ink::rule());
+    let indent = inner.saturating_sub(5).max(1);
+
+    let typing = asked.on_custom() && !asked.typed.is_empty();
+    // The answer and its hint sit two columns in, so two columns less is the room
+    // they have -- the same measure the row is drawn on, not the options'.
+    let field = inner.saturating_sub(2).max(1);
+    let mut fixed: Vec<Line> = vec![Line::from("")];
+    for (i, option) in asked.options.iter().enumerate() {
+        let on = i == asked.picked;
+        let style = if on { on_mark } else { off_mark };
+        // Wrapped, with the lead repeating on every row the option needs: a
+        // choice is often a whole sentence, and one that ran off the border read
+        // as the list cutting it off rather than as a long choice.
+        for (n, text) in wrap_text(option, indent).into_iter().enumerate() {
+            fixed.push(Line::from(vec![
+                Span::styled(
+                    if n == 0 {
+                        format!("{} {}. ", if on { "\u{276f}" } else { " " }, i + 1)
+                    } else {
+                        " ".repeat(5)
+                    },
+                    if n == 0 { style } else { dim },
+                ),
+                Span::styled(text, style),
+            ]));
+        }
+    }
+    // The answer row. Three states, each visibly different or the box reads as
+    // broken: the cursor is here and nothing is typed (a block caret), the cursor
+    // is here and something is typed (the text, wrapped, with the caret at its
+    // end), or the cursor is up in the list (a quiet row saying this one exists).
+    let answer = if typing {
+        wrap_text(&format!("{}\u{2588}", asked.typed), field)
+    } else if asked.on_custom() {
+        vec!["\u{2588}".to_string()]
+    } else if asked.has_choices() {
+        vec!["or type your own\u{2026}".to_string()]
+    } else {
+        vec![String::new()]
+    };
+    let from = answer.len().saturating_sub(ANSWER_ROWS);
+    for (n, text) in answer[from..].iter().enumerate() {
+        fixed.push(Line::from(vec![
+            Span::styled(
+                if n == 0 && asked.on_custom() { "\u{276f} " } else { "  " },
+                Style::new().fg(if asked.on_custom() { ink::code() } else { ink::rule() }),
+            ),
+            Span::styled(
+                text.clone(),
+                Style::new().fg(if asked.on_custom() { ink::code() } else { ink::quiet() }),
+            ),
+        ]));
+    }
+    if typing {
+        // Enter is what sends it, and the one thing a typed answer needs said:
+        // the answer takes new lines, so the key that sends has to be told apart
+        // from the one that breaks the line.
+        for text in wrap_text("enter sends it \u{b7} shift-enter a new line \u{b7} esc clears", field) {
+            fixed.push(Line::from(Span::styled(format!("  {text}"), dim)));
+        }
+    }
+
+    let head_room = room.saturating_sub(fixed.len());
+    let mut lines = head_lines(
+        &asked.question,
+        inner,
+        head_room.max(usize::from(room > 0)),
+        bright.add_modifier(Modifier::BOLD),
+    );
+    let left = room.saturating_sub(lines.len());
+    if !asked.detail.is_empty() && left > 1 {
+        lines.push(Line::from(""));
+        lines.extend(head_lines(&asked.detail, inner, left - 1, dim));
+    }
+    lines.extend(fixed);
+    // A pane with less room than the question and its list need: the tail goes,
+    // which is the hint and then the last of the options. Nothing is ever drawn
+    // past its own box, where the row after it would cut it in half.
+    lines.truncate(room.max(1));
+    lines
 }
 
 fn draw(f: &mut Frame, app: &mut App) {
@@ -2472,6 +2697,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     let pieces = view::pieces(
         &app.log.rows,
         &|i, row| app.shows(i, row),
+        &|i| app.thought_shows(i),
         &|i| app.figures(i),
         app.writing(),
         app.flash(),
@@ -2514,15 +2740,7 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     if let Some(at) = status_at {
         let said = status.unwrap_or_default();
-        // The status line carries the same sweep while the worker is working or a peer
-        // is waiting: the row's own highlight says *what* arrived, and this says the
-        // screen is still alive between two rows. Its ramp tops out at `ink::dim` -- the
-        // line is the screen's asides and a bright one would out-shout the row it is
-        // reporting on -- and it recolours the text without touching a character of it.
-        let line = match shimmer {
-            Some(phase) => view::sweep(&format!(" {said}"), phase),
-            None => Line::from(Span::styled(format!(" {said}"), Style::new().fg(ink::quiet()))),
-        };
+        let line = Line::from(Span::styled(format!(" {said}"), Style::new().fg(ink::quiet())));
         f.render_widget(Paragraph::new(line), at);
     }
 
@@ -2558,75 +2776,22 @@ fn draw(f: &mut Frame, app: &mut App) {
     // `opened` because the keyboard is answering it while it is up, and a panel
     // that shared the scroll keys with the answer would be fighting itself.
     if let Some(asked) = app.prompt.as_ref().filter(|a| a.is_question()) {
-        let want = asked.options.len() as u16 + 5
-            + u16::from(!asked.detail.is_empty()) * 2
-            + u16::from(asked.on_custom() && !asked.typed.is_empty());
-        let height = want.min(body.height.saturating_sub(1)).max(5);
         // Capped rather than stretched: a two-word question in a 200-column border
-        // reads as a wall. Wide questions still get the room they need.
-        let width = body.width.saturating_sub(4).min(72).max(24);
+        // reads as a wall. Never wider than the pane it sits in, or the panel runs
+        // off the edge of the screen.
+        let width = body.width.saturating_sub(4).min(72).max(24).min(body.width).max(1);
+        let inner = width.saturating_sub(2).max(1) as usize;
+        // The height is the rows the wrapping actually produced, not an estimate
+        // off the option count: that estimate is what let a question of four
+        // wrapped lines push the answer row out of the bottom of its own box.
+        let lines = ask_panel(asked, inner, body.height.saturating_sub(2) as usize);
+        let height = (lines.len() as u16 + 2).min(body.height).max(2);
         let popup = Rect {
             x: body.x + (body.width.saturating_sub(width)) / 2,
             y: body.y + body.height.saturating_sub(height),
             width,
             height,
         };
-        let inner = width.saturating_sub(2).max(1) as usize;
-        let mut lines: Vec<Line> = Vec::new();
-        for text in wrap_text(&asked.question, inner) {
-            lines.push(Line::from(Span::styled(text, Style::new().fg(ink::code()).bold())));
-        }
-        if !asked.detail.is_empty() {
-            lines.push(Line::from(""));
-            for text in wrap_text(&asked.detail, inner).into_iter().take(6) {
-                lines.push(Line::from(Span::styled(text, Style::new().fg(ink::quiet()))));
-            }
-        }
-        lines.push(Line::from(""));
-        for (i, option) in asked.options.iter().enumerate() {
-            let on = i == asked.picked;
-            let style = if on {
-                Style::new().fg(ink::code()).add_modifier(Modifier::BOLD)
-            } else {
-                Style::new().fg(ink::rule())
-            };
-            lines.push(Line::from(vec![
-                Span::styled(if on { "\u{276f} " } else { "  " }, style),
-                Span::styled(format!("{}. ", i + 1), Style::new().fg(ink::quiet())),
-                Span::styled(option.clone(), style),
-            ]));
-        }
-        // The answer row: a text field when nothing was offered, and one more
-        // choice when something was. The list is never a cage, and when there is
-        // no list it is the only thing there is.
-        // The answer row. Three states, and each has to be visibly different from
-        // the others or the box reads as broken: the cursor is here and it is
-        // empty (a block caret in the field), the cursor is here and something is
-        // typed (the text, a caret, and a hint about enter), or the cursor is up
-        // in the list (a quiet prompt saying this row exists).
-        let on = asked.on_custom();
-        let typing = on && !asked.typed.is_empty();
-        let body = if typing {
-            format!("{}\u{2588}", asked.typed)
-        } else if on {
-            "\u{2588}".to_string()
-        } else if asked.has_choices() {
-            "or type your own\u{2026}".to_string()
-        } else {
-            String::new()
-        };
-        lines.push(Line::from(vec![
-            Span::styled(if on { "\u{276f} " } else { "  " },
-                         Style::new().fg(if on { ink::code() } else { ink::rule() })),
-            Span::styled(body, Style::new().fg(if on { ink::code() } else { ink::quiet() })),
-        ]));
-        if typing {
-            // Enter is what sends it, and the one thing a typed answer needs said.
-            lines.push(Line::from(Span::styled(
-                "  enter sends it \u{b7} esc clears",
-                Style::new().fg(ink::quiet()),
-            )));
-        }
         f.render_widget(Clear, popup);
         f.render_widget(
             Paragraph::new(lines).block(
@@ -2881,6 +3046,18 @@ fn plenty(n: i64) -> String {
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+
+    /// One frame drawn into a test buffer and read back as text: the layout and
+    /// the characters, without a terminal.
+    fn frame_of(app: &mut App, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, app)).unwrap();
+        let buf = term.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     fn seed(app: &mut App) {
         for line in [
@@ -3841,6 +4018,93 @@ mod tests {
         assert!(app.opened.is_none());
     }
 
+    /// Two thoughts and the call between them: one step, opened on ctrl-t, with
+    /// its thinking folded to a line each.
+    fn a_step_with_two_thoughts(app: &mut App) {
+        for line in [
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"Look at the loader first. Then read the file."}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"Bash","args":{"command":"ls"}}]}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"Bash","result":{"result":{"exit_code":0,"stdout":"a\n"}}}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"Now the loader is clear. Write the patch."}}"#,
+        ] {
+            app.feed(wire::parse(line).unwrap());
+        }
+    }
+
+    /// The screen row a transcript row was drawn on, off the frame's own numbers.
+    fn line_of(app: &App, row: usize) -> u16 {
+        let at = app
+            .anchors
+            .iter()
+            .position(|&(r, _)| r == row)
+            .expect("the row drew");
+        app.body_top + app.spans[at].0 as u16 - app.scroll
+    }
+
+    /// A double click on a thought's line opens that thought and leaves the step
+    /// open under it; the step's own first line is what folds the step. Without the
+    /// distinction the head's own thinking could not be opened at all, and a line
+    /// of reasoning would be the only way to shut the column it sits in.
+    #[test]
+    fn a_double_click_opens_a_thought_and_the_head_still_folds_the_step() {
+        let mut app = App::new(None);
+        a_step_with_two_thoughts(&mut app);
+        let mut term = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        app.key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(app.shows(0, &app.log.rows[0]), "ctrl-t did not open the step");
+        assert!(!app.thought_shows(2), "the thinking opened with it");
+
+        let at = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 8,
+            row: line_of(&app, 2),
+            modifiers: KeyModifiers::NONE,
+        };
+        app.mouse(at);
+        app.mouse(at);
+        assert!(app.thought_shows(2), "the click missed the thought");
+        assert!(app.shows(0, &app.log.rows[0]), "a thought folded its step");
+
+        // The head line is the step, so pressing it twice shuts the whole column.
+        let head = MouseEvent {
+            row: line_of(&app, 0),
+            ..at
+        };
+        app.mouse(head);
+        app.mouse(head);
+        assert!(!app.shows(0, &app.log.rows[0]), "the head did not fold the step");
+
+        // ctrl-t is all of them at once, and it remembers none of them: the step
+        // the head folded, and the thought opened by hand, are both back the way the
+        // column opens.
+        app.key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert!(!app.shows(0, &app.log.rows[0]), "ctrl-t kept a step open");
+        assert!(!app.thought_shows(2), "a thought outlived ctrl-t");
+        app.key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert!(app.shows(0, &app.log.rows[0]), "ctrl-t kept the head's fold");
+    }
+
+    /// A thought is in the calls list, and choosing one opens the step it is in
+    /// first: the line it folds to is only drawn once the step is open, so an
+    /// entry that only unfolded the thought would open nothing on screen.
+    #[test]
+    fn choosing_a_thought_opens_the_step_before_the_thought() {
+        let mut app = App::new(None);
+        a_step_with_two_thoughts(&mut app);
+        let mut term = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(!app.shows(0, &app.log.rows[0]), "the screen opens folded");
+
+        app.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        // Newest first, so the thought the step is named for is the top entry.
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.menu.is_none(), "the picker stayed up");
+        assert!(app.shows(0, &app.log.rows[0]), "the step did not open");
+        assert!(app.thought_shows(2), "the thought did not open");
+    }
+
     /// A panel's scroll is clamped to what it holds. The offset counts the lines
     /// on the screen rather than the ones the panel was built from, because a
     /// long line is several of them -- and a call that fits must not scroll off
@@ -3881,15 +4145,7 @@ mod tests {
     /// still shows `allow ... ? y / n`.
     #[test]
     fn a_question_draws_a_question_and_a_permission_still_draws_permission() {
-        let frame = |app: &mut App, w: u16, h: u16| {
-            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-            term.draw(|f| draw(f, app)).unwrap();
-            let buf = term.backend().buffer();
-            (0..h)
-                .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
+        let frame = frame_of;
 
         // 1. A question with no options: a text box, and nothing about allowing.
         let mut app = App::new(None);
@@ -3951,6 +4207,91 @@ mod tests {
         let mut app = App::new(None);
         app.feed(wire::parse(r#"{"type":"permission","id":"q3","data":{"name":"ask_user","args":{"question":"still a question?"},"question":"still a question?"}}"#).unwrap());
         assert!(app.prompt.as_ref().is_some_and(|a| a.is_question()), "old envelope misread");
+    }
+
+    /// A question too long for one row, a choice too long for one line, and an
+    /// answer typed across several: all of it inside the box, and the box as tall
+    /// as what it holds.
+    ///
+    /// The bug this pins: the height was "options plus five", worked out before
+    /// anything was wrapped, so the wrapped question's own rows pushed the answer
+    /// row and the hint out of the bottom of the box -- and a choice longer than
+    /// the border was cut off at it, mid word.
+    #[test]
+    fn a_long_question_and_a_long_answer_stay_inside_their_box() {
+        let long = "should the panel keep the whole question when the wrapping needs more rows than the option count ever suggested";
+        let choice = "keep the question whole and let the box grow to the rows it needs";
+        let mut app = App::new(None);
+        let said = serde_json::json!({
+            "type": "permission",
+            "id": "q",
+            "data": {
+                "name": "ask_user",
+                "kind": "question",
+                "question": long,
+                "options": [choice, "cut it off and say nothing"],
+            },
+        });
+        app.feed(wire::parse(&said.to_string()).unwrap());
+        let shown = frame_of(&mut app, 80, 24);
+        if std::env::var("SHOW_QUESTION_PANEL").is_ok() {
+            println!("{shown}");
+        }
+        for word in long.split(' ').chain(choice.split(' ')) {
+            assert!(shown.contains(word), "a word of it was cut off: {word}\n{shown}");
+        }
+
+        // Typed across two lines through both newline keys, since a terminal that
+        // reports a shifted enter and one that maps the key to `1b 0d` send a
+        // different event for it, and ctrl-j is the one that arrives everywhere.
+        for c in "one line".chars() {
+            app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        app.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        for c in "and a second".chars() {
+            app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(
+            app.prompt.as_ref().unwrap().typed,
+            "one line\n\nand a second",
+            "a newline key did not break the line"
+        );
+
+        let shown = frame_of(&mut app, 80, 24);
+        if std::env::var("SHOW_QUESTION_PANEL").is_ok() {
+            println!("{shown}");
+        }
+        assert!(shown.contains("and a second"), "the answer's last line is not drawn:\n{shown}");
+        assert!(shown.contains('\u{2588}'), "the caret left the box:\n{shown}");
+        assert!(
+            shown.contains("esc clears"),
+            "the hint is the box's last row and it was clipped:\n{shown}"
+        );
+
+        // And the fitting itself, measured rather than read off a frame: never
+        // more rows than the room it was given, never a row wider than the box.
+        let asked = app.prompt.clone().unwrap();
+        for (w, h) in [(66usize, 20usize), (40, 12), (34, 5)] {
+            let lines = ask_panel(&asked, w, h);
+            assert!(lines.len() <= h, "{w}x{h}: {} rows in {h}", lines.len());
+            for line in &lines {
+                assert!(
+                    line.width() <= w,
+                    "{w}x{h}: {:?} is {} wide",
+                    line.to_string(),
+                    line.width()
+                );
+            }
+        }
+
+        // A long answer shows its tail, which is where the caret is: the head of
+        // it going off the top is the field scrolling, not the box losing rows.
+        let mut many = asked.clone();
+        many.typed = "one\ntwo\nthree\nfour\nfive\nsix".to_string();
+        let lines: Vec<String> = ask_panel(&many, 40, 20).iter().map(Line::to_string).collect();
+        assert!(!lines.iter().any(|l| l.contains("one")), "the head of a long answer is drawn: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains("six")), "the caret's own row is not drawn: {lines:?}");
     }
 
     /// A character typed at a question goes into the answer, not into a dead arm.
