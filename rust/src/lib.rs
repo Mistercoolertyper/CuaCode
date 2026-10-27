@@ -7,6 +7,7 @@
 //! this is and whether origin has moved past it.
 
 pub mod attach;
+pub mod doctor;
 pub mod session;
 pub mod transcript;
 pub mod version;

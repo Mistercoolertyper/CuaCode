@@ -168,8 +168,12 @@ that does something about it:
 
 ```bash
 cuacode doctor              # the build, the tree, the branch, and how far behind
-cuacode doctor --upgrade    # git pull --ff-only, then ./build.sh; restart after
+cuacode doctor --upgrade    # git pull --ff-only, then rebuild; restart after
 ```
+
+On Windows, `bin\cuacode.cmd doctor` runs the same command without WSL or Git
+Bash. The native updater rebuilds `quik` and `fastrs` with Cargo and stages a
+new doctor binary for the next launch. See `WINDOWS.md` for the build steps.
 
 `/version` typed in a conversation answers with the worker's own stamp, which is
 not always the frontend's: both read the tree, and only one of them is rebuilt

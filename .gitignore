@@ -3,7 +3,8 @@ venv
 .venv
 .DS_Store
 .test-home/
-/bin/
+/bin/*
+!/bin/cuacode.cmd
 rust/target/
 .env
 rust/app/cuacode.app/
