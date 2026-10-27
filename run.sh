@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Run one frontend straight from source.
-#   ./run.sh            list frontends
-#   ./run.sh fastrs     run the terminal frontend
+#   ./run.sh            the quik TUI
 #   ./run.sh cuacode    run the GUI, building it if it is stale
+#   ./run.sh fastrs     the older terminal frontend
+#   ./run.sh --list     the frontends in this tree
 #   ./run.sh doctor     what this build is, and whether origin moved
 set -euo pipefail
 
@@ -46,15 +47,19 @@ if [ ! -f "$sentinel" ] || [ requirements.txt -nt "$sentinel" ]; then
     mkdir -p bin && touch "$sentinel"
 fi
 
-if [ $# -eq 0 ]; then
+# No argument means the TUI: the command is named after the app, so a bare
+# `cuacode` has to land in a conversation rather than print a usage error. The
+# list moved to --list, which is a question and exits 0.
+[ $# -eq 0 ] && set -- quik
+
+if [ "$1" = "--list" ] || [ "$1" = "list" ]; then
     echo "usage: ./run.sh <frontend> [args...]   anything else goes to the frontend"
     echo "       ./run.sh <frontend> --resume     carry on with an earlier conversation"
     echo "       ./run.sh --usage [--days N] [--json]"
     echo "frontends:"
     rust_frontends | awk -F: '{ printf "  %s  (%s)\n", $2, $1 }'
     echo "  doctor  (rust/app)   the build, the tree, and how far behind origin it is"
-
-    exit 1
+    exit 0
 fi
 
 name="$1"

@@ -12,7 +12,7 @@ CLI agent for computer use and more.
 ## Install
 
 One script does the whole thing: finds an interpreter, makes a venv, installs
-the dependencies, builds every frontend.
+the dependencies, builds every frontend, and puts a `cuacode` command on PATH.
 
 ```bash
 ./install.sh
@@ -21,14 +21,22 @@ the dependencies, builds every frontend.
 Flags: `--no-build` for the Python side only, `--no-venv` to install into the
 interpreter as found. Re-running is safe - an existing `venv/` is reused.
 
-Then run one:
+The command goes to `~/.local/bin` (override with `CUACODE_BIN=<dir>`), and it
+is a shim for this checkout rather than a copy of a binary, so editing the tree
+is enough and nothing goes stale. It warns when that directory is not on PATH.
+
+Then:
 
 ```bash
-./run.sh fastrs   # terminal frontend, built on first run
-./run.sh cuacode  # the GUI app
-./run.sh          # list the frontends you have
-./run.sh --usage  # what every conversation has cost, no session started
+cuacode           # the quik TUI
+cuacode cuacode   # the GUI app
+cuacode --list    # the frontends in this tree
+cuacode doctor    # what this build is, and how far behind origin
+cuacode --usage   # what every conversation has cost, no session started
 ```
+
+`./run.sh <frontend>` is the same thing without the command installed, and
+`CUACODE_ROOT=/other/checkout cuacode` drives a different tree.
 
 Building on its own is `./build.sh`, optionally with one frontend's name, or
 `--keep-going` to report failures at the end rather than stopping at the first.
