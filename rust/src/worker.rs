@@ -64,7 +64,11 @@ pub fn python(worker: &Path) -> Result<PathBuf, String> {
     }
     if let Some(root) = worker.parent() {
         for venv in ["venv", ".venv"] {
-            for name in ["bin/python3", "bin/python"] {
+            #[cfg(windows)]
+            let names = ["Scripts/python.exe", "Scripts/python3.exe"];
+            #[cfg(not(windows))]
+            let names = ["bin/python3", "bin/python"];
+            for name in names {
                 let candidate = root.join(venv).join(name);
                 if candidate.is_file() {
                     return Ok(candidate);
@@ -72,7 +76,11 @@ pub fn python(worker: &Path) -> Result<PathBuf, String> {
             }
         }
     }
-    for name in ["python3", "python"] {
+    #[cfg(windows)]
+    let names = ["python3.exe", "python.exe"];
+    #[cfg(not(windows))]
+    let names = ["python3", "python"];
+    for name in names {
         if let Some(p) = on_path(name) {
             return Ok(p);
         }

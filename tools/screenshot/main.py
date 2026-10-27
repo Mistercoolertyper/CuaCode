@@ -54,6 +54,17 @@ def run(args: dict, ctx) -> dict:
     except Exception:
         pass
 
+    # The window in front is the one the agent is looking at, whether it was
+    # opened by app_open or had already been running. Park it on the right even
+    # when no baseline ever saw it appear. Without self_name the foreground could
+    # be the terminal itself, so leave it alone rather than guessing.
+    active_app = ""
+    if self_name:
+        try:
+            active_app = _window.park_active(self_name, focus=False)
+        except Exception:
+            active_app = ""
+
     plat = _capture_module()
     img = plat.capture()
     # Copied for the archive, because everything below mutates: draw_grid draws straight
@@ -101,6 +112,7 @@ def run(args: dict, ctx) -> dict:
 
     out_meta = {"image_base64": b64, "width": lw, "height": lh, "grid_size": grid_size, "self_snapped": self_snapped}
     if opened: out_meta["opened_apps"] = opened
+    if active_app: out_meta["parked_active_app"] = active_app
     if region:
         # Straight from the crop box, not recomputed from the zoom: the two roundings
         # disagreed, and this is the number the agent uses to tell whether the point it

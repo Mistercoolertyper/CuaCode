@@ -10,7 +10,7 @@ the same right-hand slice as everything else it drives.
 State is module level, so it is per worker process, which is the lifetime over which
 "new" means "the agent opened it".
 """
-import importlib.util, platform, threading
+import importlib.util, os, platform, threading
 from pathlib import Path
 
 OS = platform.system()
@@ -25,6 +25,17 @@ _BACKEND = None
 _seen: dict = {}            # app -> handle, everything known to have been running
 _seeded = False             # whether _seen means anything yet
 _parked: dict = {}          # app -> handle, everything this module put in APP_REGION
+
+
+def _app_key(name) -> str:
+    """A process name without a path or .exe, for comparing identities."""
+    base = os.path.basename(str(name or "").strip().strip('"')).lower()
+    return base[:-4] if base.endswith(".exe") else base
+
+
+def _same_app(a, b) -> bool:
+    a, b = _app_key(a), _app_key(b)
+    return bool(a and b) and (a == b or a in b or b in a)
 
 
 def backend():
@@ -107,7 +118,7 @@ def park_new(self_name: str | None = None, focus: bool = True) -> list:
             _seen.update(apps)
             _seeded = True
             return []
-        fresh = [n for n in apps if n not in _seen and n != self_name]
+        fresh = [n for n in apps if n not in _seen and not _same_app(n, self_name)]
         _seen.update(apps)
 
     parked = []
@@ -137,11 +148,39 @@ def park_known(self_name: str | None = None) -> list:
         known = list(_parked.items())
     still = []
     for name, handle in known:
-        if name == self_name:
+        if _same_app(name, self_name):
             continue
         if _snap(handle, APP_REGION, False):
             still.append(name)
     return still
+
+
+def park_active(self_name: str | None = None, focus: bool = False) -> str:
+    """Park the foreground app, unless it is the agent's own terminal.
+
+    `park_new` only knows apps that appeared after a baseline. An app that was
+    already open, or one started by its own launcher, was never in that set, so
+    screenshots moved the terminal left while the window being driven stayed
+    where it was. This asks the platform for the actual foreground window on
+    every capture and parks it on the right side.
+
+    Backends without foreground_app (the non-Windows implementations) are a
+    no-op, not an error: parking is best-effort and must never fail a capture.
+    """
+    try:
+        find = getattr(backend(), "foreground_app", None)
+        info = find() if find else None
+        if not info:
+            return ""
+        name, handle = str(info.get("name") or ""), info.get("handle")
+        if not name or _same_app(name, self_name) or not _wait_for_window(handle):
+            return ""
+        if not _snap(handle, APP_REGION, focus):
+            return ""
+        remember(handle, name)
+        return name
+    except Exception:                                           # noqa: BLE001
+        return ""
 
 
 def park_self(self_name: str | None) -> bool:
