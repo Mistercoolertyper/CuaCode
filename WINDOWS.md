@@ -71,7 +71,8 @@ exits. `--upgrade` fetches the remote's default branch and fast-forwards the
 checkout onto it, then rebuilds the Windows frontends with Cargo; it does not
 require WSL or Git Bash. It names the branch from the remote rather than from
 the local branch's upstream, so a checkout cloned from a fork still updates
-from the project. The running doctor is
+from the project. It moves whichever branch you are standing on, and refuses
+rather than merging when that would not be a fast-forward. The running doctor is
 staged as `cuacode-doctor.next.exe` and replaces itself before the next `doctor`
 launch, because Windows cannot overwrite a running executable.
 

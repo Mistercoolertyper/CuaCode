@@ -2811,7 +2811,9 @@ fn paths_as_images(text: &str) -> Option<Vec<attach::Image>> {
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = cuacode::home_dir() {
-            return format!("{}/{rest}", home.display());
+            // Joined, not formatted: a Windows home already ends in a drive and
+            // joins with the separator the rest of the path is checked against.
+            return home.join(rest).display().to_string();
         }
     }
     path.to_string()

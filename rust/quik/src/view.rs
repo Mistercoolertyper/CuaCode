@@ -2104,8 +2104,10 @@ fn summary_key(args: &str) -> &str {
 /// at home -- or, on Windows, at a drive -- and has no space in it. A command
 /// that happens to contain a slash is not one, and is left as it was written.
 fn is_path(text: &str) -> bool {
-    let rooted = matches!(text.chars().next(), Some('/') | Some('~'))
-        || (cfg!(windows) && text.as_bytes().get(1) == Some(&b':'));
+    let bytes = text.as_bytes();
+    // A drive is a letter and a colon. Any second colon - `12:30` - is prose.
+    let drive = cfg!(windows) && bytes.len() > 1 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    let rooted = matches!(text.chars().next(), Some('/') | Some('~')) || drive;
     rooted && !text.contains(char::is_whitespace)
 }
 

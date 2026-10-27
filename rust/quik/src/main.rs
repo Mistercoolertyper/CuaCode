@@ -2503,10 +2503,13 @@ fn run(mut app: App) -> io::Result<()> {
                 Ok(CEvent::Key(k)) if k.kind != crossterm::event::KeyEventKind::Release => {
                     // A key with console records behind it is the middle of a
                     // paste, not the end of one. The flag is set before the key
-                    // is handled, so an enter that has more of the paste waiting
-                    // behind it is a newline; it is then left set only while
-                    // that queue remains, so the next enter after the paste
-                    // sends the message.
+                    // is handled and again after it, so an enter is a newline
+                    // when either the enter has more of the paste behind it, or
+                    // the key before it did. That second case is the one that
+                    // matters: a pasted block ending in a newline has nothing
+                    // behind that newline, so without the carry-over the paste
+                    // would send itself. Once the queue is empty for two keys in
+                    // a row, the next enter sends the message.
                     #[cfg(target_os = "windows")]
                     if winpaste::pending_key_presses() > 0 {
                         app.paste_burst = true;
@@ -2969,7 +2972,9 @@ fn paths_as_images(text: &str) -> Option<Vec<attach::Image>> {
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = cuacode::home_dir() {
-            return format!("{}/{rest}", home.display());
+            // Joined, not formatted: a Windows home already ends in a drive and
+            // joins with the separator the rest of the path is checked against.
+            return home.join(rest).display().to_string();
         }
     }
     path.to_string()
