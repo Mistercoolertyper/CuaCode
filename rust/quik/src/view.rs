@@ -2101,10 +2101,12 @@ fn summary_key(args: &str) -> &str {
 }
 
 /// Whether a string is a path rather than prose: one that starts at the root or
-/// at home and has no space in it. A command that happens to contain a slash is
-/// not one, and is left as it was written.
+/// at home -- or, on Windows, at a drive -- and has no space in it. A command
+/// that happens to contain a slash is not one, and is left as it was written.
 fn is_path(text: &str) -> bool {
-    matches!(text.chars().next(), Some('/') | Some('~')) && !text.contains(char::is_whitespace)
+    let rooted = matches!(text.chars().next(), Some('/') | Some('~'))
+        || (cfg!(windows) && text.as_bytes().get(1) == Some(&b':'));
+    rooted && !text.contains(char::is_whitespace)
 }
 
 /// A path as a row has room for it: relative to the directory this conversation
@@ -2120,7 +2122,7 @@ fn is_path(text: &str) -> bool {
 /// Nothing is lost: what a call was run with is in full in its panel, one
 /// keypress away, and that is the copy with the room for it.
 pub fn short_path(path: &str) -> String {
-    let home = std::env::var("HOME").ok();
+    let home = cuacode::home_dir().map(|p| p.display().to_string());
     let short = if let Some(rest) = inside(path, &session::working_dir()) {
         rest
     } else if let Some(rest) = home.as_deref().and_then(|home| inside(path, home)) {
@@ -3265,7 +3267,10 @@ mod tests {
     fn a_long_path_is_shortened_for_the_row() {
         let here = cuacode::session::working_dir();
         assert_eq!(short_path(&format!("{here}/src/view.rs")), "src/view.rs");
-        let home = std::env::var("HOME").expect("a home to shorten against");
+        let home = cuacode::home_dir()
+            .expect("a home to shorten against")
+            .display()
+            .to_string();
         assert_eq!(
             short_path(&format!(
                 "{home}/.cuacode/sessions/20260917-172453-ea54/notebook/SESSION_BREAKDOWN.md"
@@ -3295,12 +3300,18 @@ mod tests {
     /// name gets to be the bright part of a long path.
     #[test]
     fn a_files_row_shortens_its_path_and_says_it_once() {
-        let home = std::env::var("HOME").expect("a home to shorten against");
+        let home = cuacode::home_dir()
+            .expect("a home to shorten against")
+            .display()
+            .to_string();
         let path =
             format!("{home}/.cuacode/sessions/20260917-172453-ea54/notebook/SESSION_BREAKDOWN.md");
+        // The path is a Windows path too, and a backslash inside JSON is an
+        // escape: the test has to send the path the worker would send.
+        let path_json = path.replace('\\', "\\\\");
         let call = rows(&[
             &format!(
-                r#"{{"type":"token","id":"a","data":{{"state":"tool_calls","token":[{{"name":"file","args":{{"action":"write","path":"{path}","content":"x"}}}}]}}}}"#
+                r#"{{"type":"token","id":"a","data":{{"state":"tool_calls","token":[{{"name":"file","args":{{"action":"write","path":"{path_json}","content":"x"}}}}]}}}}"#
             ),
             r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"file","result":{"result":{"created":true,"path":"/tmp/x","written":7977}}}}"#,
         ]);

@@ -2759,14 +2759,22 @@ fn paths_as_images(text: &str) -> Option<Vec<attach::Image>> {
         match (quote, c) {
             (Some(q), _) if c == q => quote = None,
             (Some(_), '\\') => {
-                if let Some(next) = chars.next() {
+                // On Windows a backslash is a separator, not an escape: a
+                // quoted `C:\shots\one.png` has to keep every one of them.
+                if cfg!(windows) {
+                    current.push('\\');
+                } else if let Some(next) = chars.next() {
                     current.push(next);
                 }
             }
             (Some(_), _) => current.push(c),
             (None, '\'' | '"') => quote = Some(c),
             (None, '\\') => {
-                if let Some(next) = chars.next() {
+                // The same on an unquoted path: `C:\shots\one.png` is one
+                // token, and eating each separator leaves a name no disk has.
+                if cfg!(windows) {
+                    current.push('\\');
+                } else if let Some(next) = chars.next() {
                     current.push(next);
                 }
             }
@@ -2802,8 +2810,8 @@ fn paths_as_images(text: &str) -> Option<Vec<attach::Image>> {
 /// spells it.
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
+        if let Some(home) = cuacode::home_dir() {
+            return format!("{}/{rest}", home.display());
         }
     }
     path.to_string()

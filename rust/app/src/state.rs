@@ -2030,7 +2030,7 @@ pub fn leaf(path: &Path) -> String {
 
 /// A path with the home directory shortened to `~`.
 pub fn short_path(path: &Path) -> String {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = cuacode::home_dir() else {
         return path.display().to_string();
     };
     match path.strip_prefix(&home) {
@@ -2350,7 +2350,7 @@ mod tests {
         // only, so it still says exactly where the session stands.
         // Built from the home this test actually runs under: the shortening is
         // what is under test, not any one person's directory layout.
-        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+        let home = cuacode::home_dir().expect("a home to shorten against");
         let c = caption(&home.join("Documents/Work/demo").display().to_string(), None);
         assert_eq!(c.text(), "~/Documents/Work/demo");
         assert!(c.two_line());

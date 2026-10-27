@@ -27,6 +27,8 @@
 
 mod menu;
 mod view;
+#[cfg(windows)]
+mod winpaste;
 
 use std::collections::HashMap;
 use std::io::{self, Read};
@@ -556,6 +558,12 @@ struct App {
     /// thirty a second, so `App::live` asks on a thread that outlives the frame
     /// and the loop collects it here.
     news_rx: Option<Receiver<version::News>>,
+    /// Windows only: whether the key just read was followed by more of a paste
+    /// in the console's input queue. Crossterm's Windows backend has no
+    /// bracketed paste, so this is what tells a newline inside a pasted block
+    /// from the enter that sends it.
+    #[cfg(target_os = "windows")]
+    paste_burst: bool,
 }
 
 impl App {
@@ -641,6 +649,8 @@ impl App {
             peer_at: None,
             news: None,
             news_rx: None,
+            #[cfg(target_os = "windows")]
+            paste_burst: false,
         }
     }
 
@@ -1689,6 +1699,10 @@ impl App {
     /// drop is what writes a path into a terminal, and the clipboard is the other
     /// door.
     fn paste(&mut self, text: String) {
+        // A terminal may hand a paste over with CRLF or bare CR line endings,
+        // depending on where the text came from. The field keeps lines, so both
+        // spellings collapse to the newline the keyboard inserts.
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
         if let Some(images) = paths_as_images(&text) {
             for image in images {
                 self.attach(image);
@@ -2038,6 +2052,12 @@ impl App {
             // ctrl-j is a new line wherever it is pressed. It is listed with
             // shift-enter because it is the one that always works.
             KeyCode::Char('j') if ctrl => self.insert('\n'),
+            // Windows has no bracketed paste: a paste arrives as key presses,
+            // and the console queue is what says a newline is text inside one
+            // rather than the send key. Everywhere else the paste event already
+            // said so, and this stays false.
+            #[cfg(target_os = "windows")]
+            KeyCode::Enter if self.paste_burst => self.insert('\n'),
             KeyCode::Enter => self.send(),
             KeyCode::Backspace if cmd => self.kill_to_line_start(),
             KeyCode::Backspace if ctrl || alt => self.word_backspace(),
@@ -2481,8 +2501,22 @@ fn run(mut app: App) -> io::Result<()> {
         if event::poll(Duration::from_millis(tick))? {
             match event::read() {
                 Ok(CEvent::Key(k)) if k.kind != crossterm::event::KeyEventKind::Release => {
+                    // A key with console records behind it is the middle of a
+                    // paste, not the end of one. The flag is set before the key
+                    // is handled, so an enter that has more of the paste waiting
+                    // behind it is a newline; it is then left set only while
+                    // that queue remains, so the next enter after the paste
+                    // sends the message.
+                    #[cfg(target_os = "windows")]
+                    if winpaste::pending_key_presses() > 0 {
+                        app.paste_burst = true;
+                    }
                     if !app.key(k) {
                         break Ok(());
+                    }
+                    #[cfg(target_os = "windows")]
+                    {
+                        app.paste_burst = winpaste::pending_key_presses() > 0;
                     }
                 }
                 Ok(CEvent::Mouse(m)) => app.mouse(m),
@@ -2883,14 +2917,22 @@ fn paths_as_images(text: &str) -> Option<Vec<attach::Image>> {
         match (quote, c) {
             (Some(q), _) if c == q => quote = None,
             (Some(_), '\\') => {
-                if let Some(next) = chars.next() {
+                // On Windows a backslash is a separator, not an escape: a
+                // quoted `C:\shots\one.png` has to keep every one of them.
+                if cfg!(windows) {
+                    current.push('\\');
+                } else if let Some(next) = chars.next() {
                     current.push(next);
                 }
             }
             (Some(_), _) => current.push(c),
             (None, '\'' | '"') => quote = Some(c),
             (None, '\\') => {
-                if let Some(next) = chars.next() {
+                // The same on an unquoted path: `C:\shots\one.png` is one
+                // token, and eating each separator leaves a name no disk has.
+                if cfg!(windows) {
+                    current.push('\\');
+                } else if let Some(next) = chars.next() {
                     current.push(next);
                 }
             }
@@ -2926,8 +2968,8 @@ fn paths_as_images(text: &str) -> Option<Vec<attach::Image>> {
 /// spells it.
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
+        if let Some(home) = cuacode::home_dir() {
+            return format!("{}/{rest}", home.display());
         }
     }
     path.to_string()
@@ -3404,6 +3446,28 @@ mod tests {
         assert!(app.shots.is_empty());
         assert_eq!(app.input, "/tmp/notes.txt");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows hands a paste over as keys, so the line endings it carries have
+    /// to become the field's own newline rather than characters nobody can see.
+    #[test]
+    fn a_pasted_block_keeps_windows_line_endings_as_lines() {
+        let mut app = App::new(None);
+        app.paste("first\r\nsecond\rthird\n".to_string());
+        assert_eq!(app.input, "first\nsecond\nthird\n");
+    }
+
+    /// An enter with more of a paste behind it is a line in the message, not
+    /// the send key. The queue check itself needs a real console; this is the
+    /// decision it feeds.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_enter_inside_a_windows_paste_is_a_newline() {
+        let mut app = App::new(None);
+        typed(&mut app, "first");
+        app.paste_burst = true;
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.input, "first\n");
     }
 
     /// cmd+delete and ctrl+delete, which are the line and the word, and which

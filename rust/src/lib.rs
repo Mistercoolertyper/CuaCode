@@ -28,7 +28,7 @@ pub fn state_root() -> std::path::PathBuf {
 
 /// The user's home directory. A Windows shell sets no `HOME`, so `USERPROFILE`
 /// is what answers there; Python's `expanduser` reads the same one.
-pub(crate) fn home_dir() -> Option<std::path::PathBuf> {
+pub fn home_dir() -> Option<std::path::PathBuf> {
     #[cfg(windows)]
     {
         std::env::var_os("USERPROFILE")

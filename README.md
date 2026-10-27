@@ -168,7 +168,7 @@ that does something about it:
 
 ```bash
 cuacode doctor              # the build, the tree, the branch, and how far behind
-cuacode doctor --upgrade    # git pull --ff-only, then rebuild; restart after
+cuacode doctor --upgrade    # fast-forward upstream main, then rebuild; restart after
 ```
 
 On Windows, `bin\cuacode.cmd doctor` runs the same command without WSL or Git

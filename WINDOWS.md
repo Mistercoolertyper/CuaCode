@@ -67,8 +67,11 @@ cuacode doctor --upgrade
 ```
 
 `doctor` prints the build, checkout, update, worker, and state-root status and
-exits. `--upgrade` performs a fast-forward pull and rebuilds the Windows
-frontends with Cargo; it does not require WSL or Git Bash. The running doctor is
+exits. `--upgrade` fetches the remote's default branch and fast-forwards the
+checkout onto it, then rebuilds the Windows frontends with Cargo; it does not
+require WSL or Git Bash. It names the branch from the remote rather than from
+the local branch's upstream, so a checkout cloned from a fork still updates
+from the project. The running doctor is
 staged as `cuacode-doctor.next.exe` and replaces itself before the next `doctor`
 launch, because Windows cannot overwrite a running executable.
 
@@ -106,3 +109,10 @@ protocol requested by the Unix builds. The Windows frontends skip that optional
 request instead of failing at startup. `Ctrl+J` inserts a newline in the
 composer; a modified Enter may not be distinguishable from plain Enter in every
 Windows terminal.
+
+The console input API also has no bracketed paste, so a paste arrives as one key
+event per character, newlines included. `quik` asks the console whether more key
+presses are queued behind the key it just read: an Enter with the rest of a
+block waiting behind it is a line in the message, while an Enter with an empty
+queue sends it. That keeps a multi-line paste in one message without guessing
+from timing.
