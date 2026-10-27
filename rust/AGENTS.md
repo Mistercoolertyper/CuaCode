@@ -58,7 +58,9 @@ knows which profile owns which file.
   about origin that answers "is this code out of date". Fetches, so it is asked
   on a thread and never from a frame.
 - `src/doctor.rs` - `cuacode doctor`: the build, the tree, and how far behind it
-  is; `--upgrade` is the same answer acted on, pull then rebuild. Its tiny
+  is; `--upgrade` is the same answer acted on: fetch the branch the remote names
+  as its default, fast-forward onto it, then rebuild. It does not use the local
+  branch's upstream, which a fork can leave pointing at the fork. Its tiny
   `cuacode-doctor` binary keeps Windows from having to overwrite a running
   frontend. Prints and exits, before any window is made.
 - `fastrs/view.rs` - what a row looks like on the page, in cells.

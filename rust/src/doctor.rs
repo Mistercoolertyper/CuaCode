@@ -23,8 +23,9 @@ struct Options {
 /// Print the build, checkout, update, worker, and state-root report.
 ///
 /// A leading `doctor` is accepted so a launcher can forward its whole command
-/// line without having to remove the subcommand first. `--upgrade` pulls with
-/// `--ff-only` and then rebuilds the platform's frontends.
+/// line without having to remove the subcommand first. `--upgrade` fetches the
+/// branch the remote names as its default, fast-forwards onto it, and then
+/// rebuilds the platform's frontends.
 pub fn run(args: &[String]) -> i32 {
     let options = match parse_args(args) {
         Ok(options) => options,
@@ -97,9 +98,7 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     };
     println!();
-    // `git pull --ff-only` rather than a merge or a rebase: a machine holding
-    // this much uncommitted work must be told so, not merged into.
-    if let Err(code) = step(&root, "git", &["pull", "--ff-only"]) {
+    if let Err(code) = update(&root) {
         return code;
     }
     if let Err(code) = rebuild(&root) {
@@ -135,7 +134,8 @@ fn print_help() {
          Usage: cuacode doctor [--upgrade]\n\
          \n\
          Print the build, checkout, update, worker, and state-root report.\n\
-         --upgrade pulls with --ff-only and rebuilds the frontends.\n\
+         --upgrade fast-forwards the remote's default branch and rebuilds the\n\
+         frontends.\n\
          -h, --help shows this help."
     );
 }
@@ -369,6 +369,29 @@ fn find_vs_dev_cmd() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Fast-forward this checkout from the remote's default branch.
+///
+/// Not `git pull`: that follows the local branch's configured upstream, and a
+/// checkout cloned from a fork keeps pointing at the fork after its work has
+/// landed upstream. The remote itself names the branch to follow, and an
+/// explicit fetch and `--ff-only` merge asks that branch, leaves the working
+/// tree alone when it cannot be fast-forwarded, and never rebases or merges.
+fn update(root: &Path) -> Result<(), i32> {
+    let (remote, branch) = match version::upstream(root) {
+        Ok(target) => target,
+        Err(why) => {
+            eprintln!("cuacode: cannot find the branch to update from: {why}");
+            return Err(1);
+        }
+    };
+    println!("updating from {remote}/{branch}");
+    if let Err(code) = step(root, "git", &["fetch", "--quiet", &remote]) {
+        return Err(code);
+    }
+    let target = format!("{remote}/{branch}");
+    step(root, "git", &["merge", "--ff-only", &target])
 }
 
 /// Run one step of the upgrade in the tree, with its output going straight to

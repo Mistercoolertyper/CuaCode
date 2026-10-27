@@ -79,15 +79,14 @@ fn ask() -> News {
         return News::Unknown("no git checkout above this directory or binary".into());
     };
     let remotes = git(&root, &["remote"]).unwrap_or_default();
-    let Some(remote) = remotes.lines().find(|r| *r == "origin").or_else(|| remotes.lines().next())
-    else {
+    let Some(remote) = choose_remote(&remotes) else {
         return News::Unknown("this checkout has no remote to ask".into());
     };
     // One round trip and no objects: `ls-remote --symref` answers both questions
     // at once, the remote's default branch and its tip. Up to date is the answer
     // most launches get, and it must not cost a fetch - a fetch negotiates and
     // can pull a pack to answer what comparing two shas already answered.
-    let said = match git(&root, &["ls-remote", "--symref", remote, "HEAD"]) {
+    let said = match git(&root, &["ls-remote", "--symref", &remote, "HEAD"]) {
         Ok(said) => said,
         Err(why) => return News::Unknown(why),
     };
@@ -103,7 +102,7 @@ fn ask() -> News {
     }
     // Behind, or ahead of it, and only now is a count worth a fetch: the number
     // is the thing a fetch is for.
-    if let Err(why) = git(&root, &["fetch", "--quiet", remote]) {
+    if let Err(why) = git(&root, &["fetch", "--quiet", &remote]) {
         return News::Unknown(why);
     }
     let target = format!("{remote}/{branch}");
@@ -115,6 +114,34 @@ fn ask() -> News {
             Err(_) => News::Unknown(format!("git said {count:?}, which is not a count")),
         },
     }
+}
+
+/// Which remote updates come from: `origin` first, then the only other name
+/// a checkout might have. A fork renames its upstream, and a tree with one
+/// remote needs no guessing.
+///
+/// This is deliberately separate from the local branch's upstream. A checkout
+/// cloned from a fork keeps tracking that fork after its work is merged
+/// upstream; a bare `git pull` then asks the fork, which says there is nothing
+/// new while the screen correctly counts commits behind the real upstream.
+fn choose_remote(remotes: &str) -> Option<String> {
+    remotes
+        .lines()
+        .find(|name| *name == "origin")
+        .or_else(|| remotes.lines().next())
+        .map(str::to_string)
+}
+
+/// The remote and branch an upgrade should fast-forward from, as named by the
+/// remote itself rather than by this checkout's branch configuration.
+pub fn upstream(root: &Path) -> Result<(String, String), String> {
+    let remotes = git(root, &["remote"])?;
+    let remote = choose_remote(&remotes)
+        .ok_or_else(|| "this checkout has no remote to ask".to_string())?;
+    let said = git(root, &["ls-remote", "--symref", &remote, "HEAD"])?;
+    let (branch, _) = parse_symref(&said)
+        .ok_or_else(|| format!("{remote} said nothing about its head"))?;
+    Ok((remote, branch))
 }
 
 /// `ls-remote --symref <remote> HEAD` says a branch line and a sha line. A
@@ -215,6 +242,74 @@ mod tests {
     fn the_checkout_is_found() {
         let root = root().expect("no checkout above the crate");
         assert!(root.join("rust").is_dir(), "found {} which is not the tree", root.display());
+    }
+
+    /// The remote choice is what makes an upgrade ignore a fork the branch
+    /// happens to track: origin is the project unless there is no origin.
+    #[test]
+    fn origin_is_the_upstream_and_a_lone_remote_still_answers() {
+        assert_eq!(choose_remote("fork\norigin\n"), Some("origin".into()));
+        assert_eq!(choose_remote("fork\n"), Some("fork".into()));
+        assert_eq!(choose_remote(""), None);
+    }
+
+    /// A checkout cloned from a fork tracks the fork, but an upgrade must follow
+    /// the remote that owns the project. This is the bug in full: origin's main
+    /// is the answer even while the local branch points at fork/main.
+    #[test]
+    fn upstream_follows_the_remote_default_not_the_tracked_fork() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("cuacode-upstream-{stamp}"));
+        let remote = base.join("remote.git");
+        let fork = base.join("fork.git");
+        let work = base.join("work");
+        let checkout = base.join("checkout");
+        std::fs::create_dir_all(&base).unwrap();
+        let run = |dir: &Path, args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(
+            &base,
+            &["init", "--bare", "--initial-branch=main", remote.to_str().unwrap()],
+        );
+        run(
+            &base,
+            &["init", "--bare", "--initial-branch=main", fork.to_str().unwrap()],
+        );
+        run(&base, &["init", "--initial-branch=main", work.to_str().unwrap()]);
+        run(
+            &work,
+            &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "one"],
+        );
+        run(&work, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        run(&work, &["remote", "add", "fork", fork.to_str().unwrap()]);
+        run(&work, &["push", "origin", "main"]);
+        run(&work, &["push", "fork", "main"]);
+        run(
+            &base,
+            &["clone", remote.to_str().unwrap(), checkout.to_str().unwrap()],
+        );
+        run(&checkout, &["remote", "add", "fork", fork.to_str().unwrap()]);
+        run(&checkout, &["fetch", "fork"]);
+        run(&checkout, &["branch", "--set-upstream-to=fork/main", "main"]);
+        assert_eq!(
+            upstream(&checkout),
+            Ok(("origin".to_string(), "main".to_string()))
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// The one round trip is read as the two answers it carries, and only off

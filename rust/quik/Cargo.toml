@@ -16,3 +16,8 @@ serde_json = "1"
 # A terminal column is not a char. This is the table ratatui itself lays a line
 # out by, so what the wrap counts is what the screen paints.
 unicode-width = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# The console queue is what tells a pasted newline from a sent enter on Windows:
+# crossterm's Windows backend has no bracketed paste to do it.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console"] }
