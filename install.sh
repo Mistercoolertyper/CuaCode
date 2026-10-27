@@ -86,10 +86,43 @@ if [ "$build" -eq 1 ]; then
     fi
 fi
 
+# --- command -----------------------------------------------------------------
+# A `cuacode` on PATH that is this checkout, so nobody has to remember where they
+# cloned it or write the shim by hand on every new machine. Written rather than
+# symlinked: run.sh finds the tree from its own location, and a symlink would make
+# that location the bin directory instead.
+#
+# CUACODE_ROOT overrides the tree. Not CUACODE_HOME: that one is the worker's state
+# root (~/.cuacode), so pointing it at a checkout would move every session and key
+# into the repo.
+BIN_DIR="${CUACODE_BIN:-$HOME/.local/bin}"
+if mkdir -p "$BIN_DIR" 2>/dev/null && [ -w "$BIN_DIR" ]; then
+    say "installing the cuacode command into $BIN_DIR"
+    cat > "$BIN_DIR/cuacode" <<SHIM
+#!/usr/bin/env bash
+# Written by $(pwd)/install.sh. Launch this checkout's frontends from anywhere.
+#   cuacode           the quik TUI
+#   cuacode cuacode   the GUI
+#   cuacode --list    the frontends in this tree
+#   cuacode doctor    what this build is, and how far behind origin it is
+#   cuacode --usage   token usage report
+# CUACODE_ROOT overrides the tree.
+set -euo pipefail
+exec "\${CUACODE_ROOT:-$(pwd)}/run.sh" "\$@"
+SHIM
+    chmod +x "$BIN_DIR/cuacode"
+    case ":$PATH:" in
+        *":$BIN_DIR:"*) ;;
+        *) warn "$BIN_DIR is not on PATH -- add it to your shell rc, or set CUACODE_BIN to a directory that is" ;;
+    esac
+else
+    warn "could not write to $BIN_DIR, so there is no cuacode command -- set CUACODE_BIN to somewhere writable"
+fi
+
 # --- done --------------------------------------------------------------------
 echo
 say "done"
-echo "  run a frontend:   ./run.sh fastrs     (builds on first run)"
-echo "  list frontends:   ./run.sh"
+echo "  run it:           cuacode          (or ./run.sh <frontend>)"
+echo "  frontends:        cuacode --list"
 echo "  api keys/models:  ~/.cuacode/config.json, written on first launch"
 [ "$build" -eq 1 ] || echo "  build later:      ./build.sh"
