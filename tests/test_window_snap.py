@@ -97,6 +97,32 @@ check("no handle anywhere falls back to the name", _window.park_self("WindowsTer
 check("...using the name the caller passed",
       backend.snapped == [("WindowsTerminal", 0.0, 0.3, False)], backend.snapped)
 
+class ParkBackend:
+    """A backend that records what a park was asked to do."""
+
+    def __init__(self):
+        self.calls = []
+
+    def gui_apps(self):
+        return {"demo": 11}
+
+    def wait_for_window(self, hwnd):
+        return True
+
+    def snap_region(self, handle, x0, x1, focus=False):
+        self.calls.append((handle, focus))
+        return True
+
+
+_window._BACKEND = None
+park = ParkBackend()
+_window._BACKEND = park
+_window._seeded = True
+_window._seen = {}
+_window._parked = {}
+_window.park_new("cuacode", focus=True)
+check("a newly parked app is raised, not just resized", park.calls == [(11, True)], park.calls)
+
 _window._BACKEND = None
 print()
 print("failed:", len(FAILS))

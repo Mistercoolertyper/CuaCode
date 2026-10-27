@@ -47,22 +47,25 @@ def run(args: dict, ctx) -> dict:
 
     # Same guarantee for apps the agent just opened: a process shows up in the app list
     # before it has a window, so parking is redone here on the next call, and
-    # already-parked windows drift back into place.
+    # already-parked windows drift back into place. A launched app is raised as well
+    # as placed: resizing a window behind the terminal leaves the person watching a
+    # frame they cannot see into, and leaves the keyboard pointed at the terminal.
     opened = []
     try:
-        opened = _window.park_new(self_name, focus=False)
+        opened = _window.park_new(self_name, focus=True)
         _window.park_known(self_name)
     except Exception:
         pass
 
     # The window in front is the one the agent is looking at, whether it was
     # opened by app_open or had already been running. Park it on the right even
-    # when no baseline ever saw it appear. Without self_name the foreground could
-    # be the terminal itself, so leave it alone rather than guessing.
+    # when no baseline ever saw it appear, and keep it in front so the next
+    # keystroke goes there. Without self_name the foreground could be the
+    # terminal itself, so leave it alone rather than guessing.
     active_app = ""
     if self_name:
         try:
-            active_app = _window.park_active(self_name, focus=False)
+            active_app = _window.park_active(self_name, focus=True)
         except Exception:
             active_app = ""
 

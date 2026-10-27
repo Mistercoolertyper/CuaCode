@@ -104,6 +104,9 @@ When snapping, the terminal occupies the left 30% of the usable desktop and the
 window being driven occupies the right 70%; both stop above the taskbar. The
 terminal is identified by the console this session is attached to, not by its
 executable name, so a second terminal running the same app is left where it is.
+A window the agent parks is also brought to the front, not merely resized: the
+computer-use tools act on the window a person can see, and the keyboard follows
+focus.
 
 ## Terminal notes
 

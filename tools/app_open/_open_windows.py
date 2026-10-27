@@ -1,4 +1,4 @@
-import os, subprocess, time, ctypes, win32gui, win32process, win32con, psutil
+import os, subprocess, time, ctypes, win32api, win32gui, win32process, win32con, psutil
 from ctypes import wintypes
 
 _SPI_GETWORKAREA = 0x0030
@@ -138,6 +138,45 @@ def open_app(app: str) -> int | None:
         if found: return found
     return None
 
+def _focus(hwnd: int) -> bool:
+    """Bring a window to the front, past the foreground lock.
+
+    A background process calling SetForegroundWindow is refused and the taskbar
+    button flashes instead: Windows only lets a process take the foreground when
+    it is already allowed to. Attaching to the input queue of the window that
+    does hold the foreground for the length of the call is the documented way
+    around that, and this agent is acting on the person's behalf either way.
+    """
+    try:
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        if win32gui.GetForegroundWindow() == hwnd:
+            return True
+        current = win32api.GetCurrentThreadId()
+        threads = {win32process.GetWindowThreadProcessId(hwnd)[0]}
+        front = win32gui.GetForegroundWindow()
+        if front:
+            threads.add(win32process.GetWindowThreadProcessId(front)[0])
+        attached = []
+        try:
+            for tid in threads:
+                if tid and tid != current:
+                    try:
+                        win32process.AttachThreadInput(current, tid, True)
+                        attached.append(tid)
+                    except Exception:
+                        pass
+            win32gui.BringWindowToTop(hwnd)
+            win32gui.SetForegroundWindow(hwnd)
+        finally:
+            for tid in attached:
+                try: win32process.AttachThreadInput(current, tid, False)
+                except Exception: pass
+        return win32gui.GetForegroundWindow() == hwnd
+    except Exception:
+        return False
+
+
 def snap_region(hwnd_or_name: int | str | None, x_start_frac: float, x_end_frac: float, focus: bool = False) -> bool:
     """See _open_macos.snap_region. focus defaults to False so repositioning a
     window does not decide what has keyboard focus."""
@@ -170,8 +209,7 @@ def snap_region(hwnd_or_name: int | str | None, x_start_frac: float, x_end_frac:
         # focus back when the caller asked not to steal it.
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE if restore else win32con.SW_SHOWNOACTIVATE)
         if focus:
-            try: win32gui.SetForegroundWindow(hwnd)
-            except Exception: pass
+            _focus(hwnd)
         elif restore and before and before != hwnd:
             try: win32gui.SetForegroundWindow(before)
             except Exception: pass
