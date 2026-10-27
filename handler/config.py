@@ -11,20 +11,86 @@ DEFAULTS = {"active": "ollama", "vision": "", "providers": {}, "always_skills": 
 
 def path() -> Path: return store.home() / "config.json"
 
-def _seed() -> dict:
-    """The file written on first run: every registered provider as a blank entry, so it reads as a
-    fill-in-the-blank template. Blank is not absent: settings() skips an empty model and api_key()
-    falls through an empty key. vision is not seeded, and quirks and effort_map are learned.
+def blank() -> dict:
+    """Everything a config can hold, at the value each reader already assumes.
+
+    Written on first run and filled into a file that already exists, so the file
+    reads as the whole set of options rather than only the ones somebody touched:
+    a setting nobody knew about is a setting nobody uses.
+
+    Blank is not absent, and every value here is what the code does when the key is
+    missing -- `permission: {"mode": "ask"}` is the mode an empty config runs,
+    `steps: {"provider": ""}` still falls back to vision, `compact: null` is the
+    automatic ratio. That is what makes writing them in a no-op for behaviour.
+
+    Three things are deliberately not here: `vision` inside a provider entry, which
+    is consulted *instead of* the model's own capabilities when no model is named
+    (so a seeded `true` would claim a blind model can see); and `quirks` and
+    `effort_map`, which are learned by asking the endpoint and mean nothing as
+    blanks.
     """
-    return {"active": DEFAULTS["active"], "vision": "", "always_skills": [], "effort": "",
-            "providers": {name: {"model": "", "api_key": "", "params": {}}
-                          for name in sorted(providers.PROVIDERS)}}
+    return {
+        "active": DEFAULTS["active"],
+        "effort": "",
+        "vision": {"provider": "", "model": ""},
+        "steps": {"provider": "", "model": ""},
+        "permission": {"mode": "ask", "provider": "", "model": ""},
+        "compact": None,
+        "always_skills": [],
+        "providers": {name: {"model": "", "api_key": "", "params": {}, "model_params": {}}
+                      for name in sorted(providers.PROVIDERS)},
+    }
+
+# The settings that take two spellings: a bare string, or the object that says more.
+# `vision: "ollama"` names the looking provider and nothing about which model looks.
+_SIDES = {"vision": "provider", "steps": "provider", "permission": "mode"}
+
+def _spelled(cfg: dict) -> tuple[dict, bool]:
+    """The two-spelling settings as the object, which is the superset.
+
+    Nothing is reinterpreted: `steps: "ollama"` means one provider and no model, and
+    `permission: "auto"` means that mode with nobody named to decide. The file simply
+    carries the form that can show the fields beside them, so opening it names every
+    option rather than half of one.
+    """
+    out, changed = dict(cfg), False
+    for key, field in _SIDES.items():
+        value = out.get(key)
+        if not isinstance(value, str):
+            continue
+        if key == "permission":
+            out[key] = {"mode": value or "ask", "provider": "", "model": ""}
+        else:
+            out[key] = {field: value, "model": ""}
+        changed = True
+    return out, changed
+
+def _fill(have: dict, want: dict) -> tuple[dict, bool]:
+    """`have` with every key `want` names that it is missing, and whether that added
+    anything. Nested objects fill the same way, so a provider entry gains its blanks
+    too. A key that is there keeps its value whatever it is: a config somebody
+    hand-edited says what they meant, and a default must never overwrite it."""
+    out, added = dict(have), False
+    for key, value in want.items():
+        if key not in out:
+            out[key] = value
+            added = True
+        elif isinstance(value, dict) and isinstance(out[key], dict) and value:
+            out[key], more = _fill(out[key], value)
+            added = added or more
+    return out, added
 
 def load() -> dict:
     """A missing or unparseable config seeds itself on disk rather than living
-    only in memory, so the file is there to hand-edit from first boot."""
+    only in memory, so the file is there to hand-edit from first boot. One that
+    exists gains any option it has not heard of and the long spelling of the three
+    settings that take two, and is written back when that changed anything: the file
+    a person opens is the whole template."""
     cfg = store.read_json(path())
-    return {**DEFAULTS, **cfg} if cfg else save(_seed())
+    if not cfg: return save(blank())
+    full, added = _fill({**DEFAULTS, **cfg}, blank())
+    full, respelled = _spelled(full)
+    return save(full) if added or respelled else full
 
 def save(cfg: dict) -> dict:
     store.write_json(path(), cfg)
