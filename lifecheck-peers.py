@@ -45,6 +45,10 @@ elsewhere.commit()
 peers.become(mine.id)
 peers.become(colleague.id)
 
+# Regression: on Windows os.kill(pid, 0) sends CTRL_C_EVENT rather than probing
+# liveness, which killed the worker when roster init checked its own pid.
+check("a live pid is probed without signalling it", peers.alive(mine.id), True)
+
 print("roster")
 r = peers.roster(mine.id)
 colleagues_name = r[0]["name"]
@@ -170,11 +174,13 @@ check("init is one call not two tools", set(tools).issuperset({"roster"}) and "a
 
 print("the same directory written another way")
 # The bug this covers: cwd used to be compared as a string. A session opened from
-# `.../documents/work` and one from `.../Documents/Work` are one directory on this
-# filesystem and were two projects, so the roster offered nobody. The inode is the
-# truth and the spelling is not.
+# `.../documents/work` and one from `.../Documents/Work` are one directory on a
+# case-insensitive filesystem and were two projects, so the roster offered nobody.
+# The inode is the truth; the case check below follows what this filesystem does.
 check("the same path two ways is one directory", peers._same_dir(here, here.lower()) if here != here.lower() else peers._same_dir(here, here), True)
-check("case does not make two directories", peers._same_dir(here, here.upper()), True)
+case_insensitive = os.path.exists(here.upper())
+check("case matching follows the filesystem",
+      peers._same_dir(here, here.upper()), case_insensitive)
 check("different directories are not", peers._same_dir(here, "/tmp/somewhere-else"), False)
 check("an empty cwd matches only itself", peers._same_dir("", here), False)
 # And the roster still marks spelling apart from an exact match, because what the

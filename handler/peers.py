@@ -72,11 +72,23 @@ def alive(sid: str) -> bool:
     A signalling check, not a proof: a recycled pid reads as alive. The cost of
     being wrong is one message to a mailbox nobody reads, which the sender is
     warned about anyway.
+
+    Windows has no signal-zero probe. os.kill(pid, 0) there sends CTRL_C_EVENT
+    to the caller's console and can terminate the worker (and its frontend)
+    instead of asking whether the process exists. psutil.pid_exists is the
+    non-signalling check on that platform; the Unix call below keeps its
+    permission-error behaviour.
     """
     try:
         pid = int(pid_path(sid).read_text().strip())
     except (OSError, ValueError):
         return False
+    if os.name == "nt":
+        try:
+            import psutil
+            return bool(psutil.pid_exists(pid))
+        except Exception:
+            return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

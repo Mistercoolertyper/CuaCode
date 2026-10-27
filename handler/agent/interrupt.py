@@ -4,7 +4,7 @@ past the call, which is what makes a missing result fine; detached keeps the thr
 for the background registry. A tool that ignores the token in ctx is abandoned rather than
 stopped, which is why these threads are daemons: a socket read must never block app exit.
 """
-import queue, socket, threading
+import queue, socket, sys, threading
 
 POLL = 0.02          # how often the flags are read while a call is in flight
 
@@ -99,7 +99,14 @@ def abort(source) -> None:
         network = ((getattr(response, "extensions", None) or {}).get("network_stream")
                    if response is not None else None)
         sock = network.get_extra_info("socket") if network is not None else None
-        if sock is not None: sock.shutdown(socket.SHUT_RDWR)
+        if sock is not None:
+            sock.shutdown(socket.SHUT_RDWR)
+            # Windows does not reliably wake a blocking recv() on shutdown() alone,
+            # especially through an SSL wrapper. Closing the handle is what makes
+            # the producer thread return there; elsewhere the graceful shutdown
+            # is enough and lets an in-flight write finish.
+            if sys.platform == "win32":
+                sock.close()
     except Exception:
         pass
 

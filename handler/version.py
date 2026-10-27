@@ -21,7 +21,8 @@ ROOT = Path(__file__).resolve().parent.parent
 def _git(*args) -> str | None:
     try:
         out = subprocess.run(
-            ["git", *args], cwd=ROOT, capture_output=True, text=True, timeout=5
+            ["git", *args], cwd=ROOT, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=5
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
