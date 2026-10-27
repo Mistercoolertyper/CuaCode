@@ -111,13 +111,22 @@ def trigger(settings: dict, cfg: dict = None) -> int:
     an unrecognized model has no way to fold on purpose before it hits the wall.
     A window nobody knows with no override means no trigger: guessing the size of
     the window is guessing when to throw away the user's context.
+
+    `compact` is the default for every model; `model_params[<model>].compact` is
+    that model's own answer and wins. A large-window model and a small-window one
+    do not have to share a threshold, which is what a single global count forced.
     """
     from handler import config
-    override = (cfg if cfg is not None else config.load()).get("compact")
+    cfg = cfg if cfg is not None else config.load()
+    name = settings.get("provider", "")
+    model = settings.get("model") or config.model_for(name, cfg)
+    override = config.local_param(name, model, "compact", cfg)
+    if override is None:
+        override = cfg.get("compact")
     fixed = isinstance(override, (int, float)) and not isinstance(override, bool)
     if fixed and override <= 0: return 0
     if fixed and override > 1: return int(override)      # a token count
-    window = config.context_window(settings.get("provider", ""), settings.get("model", ""), cfg)
+    window = config.context_window(name, model, cfg)
     if not window: return 0
     r = override if fixed else ratio(window)            # a share of the window
     return int(window * r)
@@ -264,8 +273,16 @@ def tokens(records: list) -> int:
     """What this costs in the window. Records or wire messages, either will do:
     both are json, and the difference between the two shapes is a few hundred
     characters of key names against a window measured in hundreds of thousands.
+
+    An encoded image is not text and must not be measured as any. One screenshot is
+    most of a megabyte of base64: read as characters it costs a hundred thousand
+    tokens of prose, more than a whole tool-using turn. `context.strip_images` cuts
+    them out and they are charged flat instead, the same way /context charges them,
+    so a computer-use transcript is measured at what it really costs.
     """
-    return context.tokens_for_chars(sum(len(json.dumps(r, default=str)) for r in records))
+    clean, images = context.strip_images(records)
+    chars = sum(len(json.dumps(r, default=str)) for r in clean)
+    return context.tokens_for_chars(chars) + images * context.IMAGE_TOKENS
 
 
 def check():
@@ -349,6 +366,12 @@ def check():
     fold(turn, dict(q, summary="s"))
     assert len(turn) == n2 - q["folded"] + 1
     assert turn[q["start"]].get("request", "").startswith("SECOND REQUEST")
+
+    # A screenshot costs one image, not the hundred thousand tokens its base64 would
+    # read as: counting it as prose is what folded a computer-use session every round
+    # while the provider was reporting 80k of a 300k window.
+    shot = {"t": "tool", "name": "screen", "result": {"image_base64": "A" * 400_000}}
+    assert tokens([shot]) < 2_000, tokens([shot])
     print("compact: ok")
 
 

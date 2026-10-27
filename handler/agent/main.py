@@ -459,6 +459,11 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
     # Rounds lost to a connection that dropped before producing anything: the one
     # failure that retries invisibly, so a per-round counter would retry forever.
     stream_retries = 0
+    # The prompt size the provider last charged for, carried across rounds. `usage`
+    # belongs to the round it arrived in and is cleared with it, so a trigger read
+    # off that was always zero and the fallback -- a character count over the whole
+    # history -- was the only number it ever saw.
+    usage, measured = {}, 0
     # Whether a peer message is waiting. Asked on the idle poll for the whole round, because
     # a worker sits through a long tool call with nothing on stdout and the main loop that
     # would drain the mailbox is parked in here for all of it. Answered at the round seam
@@ -475,6 +480,10 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
         mark = len(messages)
         yield {"type": "round"}
         thinking, content, calls, last = "", "", [], None
+        # Carried before it is cleared: this round's request contains everything the
+        # last one did and more, and the prompt the provider actually charged for is
+        # better evidence of its size than any count of ours.
+        measured = int((usage or {}).get("in") or 0) or measured
         # Per round, not per run: the count on the next request already includes
         # everything this one added, so old numbers would only be a stale round's.
         usage = {}
@@ -494,13 +503,16 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
         # every round, and a computer-use one is mostly base64.
         images.evict(messages, keep=int(settings.get("keep_images", images.DEFAULT_KEEP)))
         # Before the request, and only once per round: a conversation over its trigger
-        # folds now rather than waiting for the provider to refuse it. The figure is
-        # the last measured prompt when there is one, because a character count over
-        # a conversation full of tool results is the least reliable number here.
+        # folds now rather than waiting for the provider to refuse it.
         limit = compact.trigger(settings)
         if limit:
-            used = int((usage or {}).get("in") or 0) or compact.tokens(messages)
+            # The larger of the two: the measured prompt is exact but a round old,
+            # and the estimate covers what has been appended since. Neither alone is
+            # the size of the request in hand.
+            used = max(measured, compact.tokens(messages))
             folded = _compact_now(messages, used, limit, ctx=ctx)
+            # Whatever it was, it describes a history that no longer exists.
+            if folded: measured = 0
             # Both halves of the fold go out before the notice: start, then done,
             # then what it bought.
             for ev in outbox: yield ev
@@ -543,7 +555,7 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
             # long as each fold is still freeing something. MAX_FOLDS is the backstop
             # against a fold that frees nothing looping forever.
             if _status_of(payload) == 413 and folds < MAX_FOLDS:
-                before = compact.tokens(messages)
+                before = max(measured, compact.tokens(messages))
                 if folds == 0:
                     yield {"type": "notice", "text": "over the window: compressing before retrying",
                            "compacted": True}
@@ -554,6 +566,7 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
                 for ev in outbox: yield ev
                 outbox.clear()
                 folds += 1
+                measured = 0
                 after = compact.tokens(messages)
                 # Progress is the only reason to go round again. A fold that frees
                 # nothing would ask the same provider the same question forever.

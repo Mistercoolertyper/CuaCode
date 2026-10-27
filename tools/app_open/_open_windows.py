@@ -1,4 +1,4 @@
-import os, subprocess, time, ctypes, win32gui, win32process, win32con, psutil
+import os, subprocess, time, ctypes, win32api, win32gui, win32process, win32con, psutil
 from ctypes import wintypes
 
 _SPI_GETWORKAREA = 0x0030
@@ -138,6 +138,45 @@ def open_app(app: str) -> int | None:
         if found: return found
     return None
 
+def _focus(hwnd: int) -> bool:
+    """Bring a window to the front, past the foreground lock.
+
+    A background process calling SetForegroundWindow is refused and the taskbar
+    button flashes instead: Windows only lets a process take the foreground when
+    it is already allowed to. Attaching to the input queue of the window that
+    does hold the foreground for the length of the call is the documented way
+    around that, and this agent is acting on the person's behalf either way.
+    """
+    try:
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        if win32gui.GetForegroundWindow() == hwnd:
+            return True
+        current = win32api.GetCurrentThreadId()
+        threads = {win32process.GetWindowThreadProcessId(hwnd)[0]}
+        front = win32gui.GetForegroundWindow()
+        if front:
+            threads.add(win32process.GetWindowThreadProcessId(front)[0])
+        attached = []
+        try:
+            for tid in threads:
+                if tid and tid != current:
+                    try:
+                        win32process.AttachThreadInput(current, tid, True)
+                        attached.append(tid)
+                    except Exception:
+                        pass
+            win32gui.BringWindowToTop(hwnd)
+            win32gui.SetForegroundWindow(hwnd)
+        finally:
+            for tid in attached:
+                try: win32process.AttachThreadInput(current, tid, False)
+                except Exception: pass
+        return win32gui.GetForegroundWindow() == hwnd
+    except Exception:
+        return False
+
+
 def snap_region(hwnd_or_name: int | str | None, x_start_frac: float, x_end_frac: float, focus: bool = False) -> bool:
     """See _open_macos.snap_region. focus defaults to False so repositioning a
     window does not decide what has keyboard focus."""
@@ -170,8 +209,7 @@ def snap_region(hwnd_or_name: int | str | None, x_start_frac: float, x_end_frac:
         # focus back when the caller asked not to steal it.
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE if restore else win32con.SW_SHOWNOACTIVATE)
         if focus:
-            try: win32gui.SetForegroundWindow(hwnd)
-            except Exception: pass
+            _focus(hwnd)
         elif restore and before and before != hwnd:
             try: win32gui.SetForegroundWindow(before)
             except Exception: pass
@@ -244,7 +282,117 @@ def foreground_app() -> dict | None:
         return None
 
 
-def wait_for_window(hwnd: int, timeout: float = 8) -> bool:
-    """The handle came out of an enumeration of live windows; confirm it still is."""
+def _pid_of(hwnd) -> int:
+    """The process that owns a window, or 0 when the handle is already gone."""
+    try:
+        _, pid = win32process.GetWindowThreadProcessId(int(hwnd))
+        return int(pid or 0)
+    except Exception:
+        return 0
+
+
+def _class_of(hwnd) -> str:
+    try: return win32gui.GetClassName(hwnd)
+    except Exception: return ""
+
+
+def _console_window() -> int:
+    """The window this process's console is attached to, or 0 when it has none."""
+    try: return int(ctypes.windll.kernel32.GetConsoleWindow() or 0)
+    except Exception: return 0
+
+
+def _console_title() -> str:
+    """What this console calls itself, which a terminal window usually repeats."""
+    try:
+        size = 1024
+        buf = ctypes.create_unicode_buffer(size)
+        if ctypes.windll.kernel32.GetConsoleTitleW(buf, size):
+            return buf.value.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _visible_window(pid: int, hint: str = "") -> int | None:
+    """The window a process owns that a person would call its window.
+
+    Programmatic windows are skipped: an invisible window is not on screen, and a
+    tool window is a helper rather than the frame around the content. When more
+    than one is left, a title matching the console's own wins, because a terminal
+    names its window after the tab that is showing.
+    """
+    found = []
+    def cb(hwnd, _):
+        if _pid_of(hwnd) != pid: return
+        try:
+            if not win32gui.IsWindowVisible(hwnd): return
+            if win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE) & win32con.WS_EX_TOOLWINDOW: return
+        except Exception:
+            return
+        cls = _class_of(hwnd)
+        title = win32gui.GetWindowText(hwnd).strip()
+        if not title or cls in _SHELL_CLASSES:
+            return
+        if cls in ("ConsoleWindowClass", "PseudoConsoleWindow"):
+            return
+        found.append((hwnd, title))
+    try:
+        win32gui.EnumWindows(cb, None)
+    except Exception:
+        return None
+    if not found:
+        return None
+    if hint:
+        low = hint.lower()
+        for hwnd, title in found:
+            title_l = title.lower()
+            if low == title_l or low in title_l or title_l in low:
+                return hwnd
+    return found[0][0]
+
+
+def _parent_pid(pid: int) -> int:
+    try: return int(psutil.Process(pid).ppid() or 0)
+    except Exception: return 0
+
+
+def self_window() -> int | None:
+    """The window hosting this process, not just a window of the same app.
+
+    Two terminals are two windows of one executable, so asking for a window by
+    process name snaps whichever the enumeration reaches first - an elevated
+    session could move a plain one. The console this process is attached to is
+    the identity that tells them apart: a classic console window is the answer
+    itself, and under Windows Terminal the console handle is the tab's hidden
+    pseudo-console, so the walk continues out through the processes that own it
+    until one of them has the visible frame.
+    """
+    console = _console_window()
+    if console and _class_of(console) == "ConsoleWindowClass":
+        return console
+    hint = _console_title()
+    pid = _pid_of(console) if console else 0
+    if not pid:
+        pid = os.getpid()
+    seen = set()
+    for _ in range(16):
+        if not pid or pid in seen:
+            break
+        seen.add(pid)
+        found = _visible_window(pid, hint)
+        if found:
+            return found
+        pid = _parent_pid(pid)
+    return None
+
+
+def window_exists(hwnd) -> bool:
+    """Whether a handle still names a window, which is all a stale handle needs to fail."""
     try: return bool(hwnd) and bool(win32gui.IsWindow(int(hwnd)))
     except Exception: return False
+
+
+def wait_for_window(hwnd: int, timeout: float = 8) -> bool:
+    """The handle came out of an enumeration of live windows; confirm it still is."""
+    return window_exists(hwnd)

@@ -5,9 +5,11 @@ def run(args: dict, ctx) -> dict:
     app = args["app"]
     m = _window.backend()
 
-    # Park the agent's own window by name, not whatever is frontmost: mid-run that
-    # is usually the app being driven, and the two swap places.
-    self_snapped = _window.park_self(getattr(ctx, "self_identity", None))
+    # Park this session's own window, not whatever is frontmost: mid-run that is
+    # usually the app being driven, and the two swap places. A handle identifies
+    # the window; a name only identifies the executable it belongs to.
+    self_snapped = _window.park_self(getattr(ctx, "self_identity", None),
+                                getattr(ctx, "self_handle", None))
 
     # Taken before the launch so anything it drags up (a helper process, a second
     # app it hands the request to) reads as new, not as always having been there.

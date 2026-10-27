@@ -144,6 +144,10 @@ def set_compact(value) -> dict:
     knows ("keep it under 200k"); a share is the thing that survives a model swap.
     Storing whichever was said and reading it by size means /compress takes both
     without a second setting to keep in step with the first.
+
+    This is the default for every model. A model with a different window can name
+    its own count under `model_params[<model>].compact`, which wins for that model
+    and leaves the rest alone.
     """
     cfg = load()
     if value is None: cfg.pop("compact", None)
@@ -214,7 +218,7 @@ def model_for(name: str, cfg: dict = None) -> str:
 
 # Params that describe how this pairing is *described*, not what is sent. Read
 # by name where needed, stripped from everything bound for the wire.
-LOCAL_KEYS = frozenset({"context_window"})
+LOCAL_KEYS = frozenset({"context_window", "compact"})
 
 def local_param(name: str, model: str, key: str, cfg: dict = None):
     """A LOCAL_KEY for this provider/model pair, per-model over provider-wide."""
