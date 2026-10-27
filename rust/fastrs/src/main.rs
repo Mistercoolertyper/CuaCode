@@ -1753,6 +1753,28 @@ impl App {
                         self.prompt = Some(asked);
                         return true;
                     }
+                    // A new line in the answer, in the spellings a terminal
+                    // actually sends: shift-enter where it reports a shifted key,
+                    // alt-enter where it maps the key to `1b 0d`, and ctrl-j
+                    // everywhere, since raw mode makes 0x0A a key of its own.
+                    // Enter is the answer, so a break is only ever a modified
+                    // form -- and it is what makes a two-paragraph answer one.
+                    KeyCode::Enter if shift || alt => {
+                        if !asked.on_custom() {
+                            asked.picked = asked.options.len();
+                        }
+                        asked.typed.push('\n');
+                        self.prompt = Some(asked);
+                        return true;
+                    }
+                    KeyCode::Char('j') if ctrl => {
+                        if !asked.on_custom() {
+                            asked.picked = asked.options.len();
+                        }
+                        asked.typed.push('\n');
+                        self.prompt = Some(asked);
+                        return true;
+                    }
                     KeyCode::Enter => {
                         if asked.on_custom() {
                             // The typed answer, or nothing worth sending.
@@ -2370,6 +2392,139 @@ fn run(mut app: App) -> io::Result<()> {
     result
 }
 
+/// How many rows of a typed answer the panel shows: the tail, because typing
+/// appends at the end, and a cap is what keeps a pasted paragraph from pushing
+/// the question off the top of its own box.
+const ANSWER_ROWS: usize = 4;
+
+/// `text` wrapped to `inner` columns and cut to `room` rows, the last one
+/// ellipsized when there was more of it than the room. A box that just stopped
+/// mid sentence read as the text being broken rather than as the panel being
+/// short.
+fn head_lines(text: &str, inner: usize, room: usize, style: Style) -> Vec<Line<'static>> {
+    let wrapped = wrap_text(text, inner);
+    let cut = wrapped.len() > room;
+    wrapped
+        .into_iter()
+        .take(room)
+        .enumerate()
+        .map(|(i, line)| {
+            let line = if cut && i + 1 == room {
+                let mut short: String = line.chars().take(inner.saturating_sub(1)).collect();
+                while short.ends_with(' ') {
+                    short.pop();
+                }
+                short.push('\u{2026}');
+                short
+            } else {
+                line
+            };
+            Line::from(Span::styled(line, style))
+        })
+        .collect()
+}
+
+/// The question's panel, as rows wrapped into `inner` columns and fitted to the
+/// `room` a pane can give it.
+///
+/// Measured after the wrapping rather than guessed from the options: the height
+/// used to be "options plus five", so a question that wrapped to four lines --
+/// and every answer typed past one line -- pushed the answer row out of the
+/// bottom of a box whose height had been worked out without them. That is the
+/// "some of it is hidden" it looked like. What cannot be missing is built
+/// first: the answer row and its hint, then whatever the question and its
+/// detail have left over.
+///
+/// ponytail: a question taller than the whole pane loses its tail rather than
+/// growing a scrollbar. It is a question, not a document; give the panel an
+/// offset of its own if one ever needs more room than the pane has.
+fn ask_panel(asked: &Ask, inner: usize, room: usize) -> Vec<Line<'static>> {
+    let bright = Style::new().fg(ink::code());
+    let dim = Style::new().fg(ink::quiet());
+    let on_mark = bright.add_modifier(Modifier::BOLD);
+    let off_mark = Style::new().fg(ink::rule());
+    let indent = inner.saturating_sub(5).max(1);
+
+    let typing = asked.on_custom() && !asked.typed.is_empty();
+    // The answer and its hint sit two columns in, so two columns less is the room
+    // they have -- the same measure the row is drawn on, not the options'.
+    let field = inner.saturating_sub(2).max(1);
+    let mut fixed: Vec<Line> = vec![Line::from("")];
+    for (i, option) in asked.options.iter().enumerate() {
+        let on = i == asked.picked;
+        let style = if on { on_mark } else { off_mark };
+        // Wrapped, with the lead repeating on every row the option needs: a
+        // choice is often a whole sentence, and one that ran off the border read
+        // as the list cutting it off rather than as a long choice.
+        for (n, text) in wrap_text(option, indent).into_iter().enumerate() {
+            fixed.push(Line::from(vec![
+                Span::styled(
+                    if n == 0 {
+                        format!("{} {}. ", if on { "\u{276f}" } else { " " }, i + 1)
+                    } else {
+                        " ".repeat(5)
+                    },
+                    if n == 0 { style } else { dim },
+                ),
+                Span::styled(text, style),
+            ]));
+        }
+    }
+    // The answer row. Three states, each visibly different or the box reads as
+    // broken: the cursor is here and nothing is typed (a block caret), the cursor
+    // is here and something is typed (the text, wrapped, with the caret at its
+    // end), or the cursor is up in the list (a quiet row saying this one exists).
+    let answer = if typing {
+        wrap_text(&format!("{}\u{2588}", asked.typed), field)
+    } else if asked.on_custom() {
+        vec!["\u{2588}".to_string()]
+    } else if asked.has_choices() {
+        vec!["or type your own\u{2026}".to_string()]
+    } else {
+        vec![String::new()]
+    };
+    let from = answer.len().saturating_sub(ANSWER_ROWS);
+    for (n, text) in answer[from..].iter().enumerate() {
+        fixed.push(Line::from(vec![
+            Span::styled(
+                if n == 0 && asked.on_custom() { "\u{276f} " } else { "  " },
+                Style::new().fg(if asked.on_custom() { ink::code() } else { ink::rule() }),
+            ),
+            Span::styled(
+                text.clone(),
+                Style::new().fg(if asked.on_custom() { ink::code() } else { ink::quiet() }),
+            ),
+        ]));
+    }
+    if typing {
+        // Enter is what sends it, and the one thing a typed answer needs said:
+        // the answer takes new lines, so the key that sends has to be told apart
+        // from the one that breaks the line.
+        for text in wrap_text("enter sends it \u{b7} shift-enter a new line \u{b7} esc clears", field) {
+            fixed.push(Line::from(Span::styled(format!("  {text}"), dim)));
+        }
+    }
+
+    let head_room = room.saturating_sub(fixed.len());
+    let mut lines = head_lines(
+        &asked.question,
+        inner,
+        head_room.max(usize::from(room > 0)),
+        bright.add_modifier(Modifier::BOLD),
+    );
+    let left = room.saturating_sub(lines.len());
+    if !asked.detail.is_empty() && left > 1 {
+        lines.push(Line::from(""));
+        lines.extend(head_lines(&asked.detail, inner, left - 1, dim));
+    }
+    lines.extend(fixed);
+    // A pane with less room than the question and its list need: the tail goes,
+    // which is the hint and then the last of the options. Nothing is ever drawn
+    // past its own box, where the row after it would cut it in half.
+    lines.truncate(room.max(1));
+    lines
+}
+
 fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let head = app.header();
@@ -2497,75 +2652,22 @@ fn draw(f: &mut Frame, app: &mut App) {
     // `opened` because the keyboard is answering it while it is up, and a panel
     // that shared the scroll keys with the answer would be fighting itself.
     if let Some(asked) = app.prompt.as_ref().filter(|a| a.is_question()) {
-        let want = asked.options.len() as u16 + 5
-            + u16::from(!asked.detail.is_empty()) * 2
-            + u16::from(asked.on_custom() && !asked.typed.is_empty());
-        let height = want.min(body.height.saturating_sub(1)).max(5);
         // Capped rather than stretched: a two-word question in a 200-column border
-        // reads as a wall. Wide questions still get the room they need.
-        let width = body.width.saturating_sub(4).min(72).max(24);
+        // reads as a wall. Never wider than the pane it sits in, or the panel runs
+        // off the edge of the screen.
+        let width = body.width.saturating_sub(4).min(72).max(24).min(body.width).max(1);
+        let inner = width.saturating_sub(2).max(1) as usize;
+        // The height is the rows the wrapping actually produced, not an estimate
+        // off the option count: that estimate is what let a question of four
+        // wrapped lines push the answer row out of the bottom of its own box.
+        let lines = ask_panel(asked, inner, body.height.saturating_sub(2) as usize);
+        let height = (lines.len() as u16 + 2).min(body.height).max(2);
         let popup = Rect {
             x: body.x + (body.width.saturating_sub(width)) / 2,
             y: body.y + body.height.saturating_sub(height),
             width,
             height,
         };
-        let inner = width.saturating_sub(2).max(1) as usize;
-        let mut lines: Vec<Line> = Vec::new();
-        for text in wrap_text(&asked.question, inner) {
-            lines.push(Line::from(Span::styled(text, Style::new().fg(ink::code()).bold())));
-        }
-        if !asked.detail.is_empty() {
-            lines.push(Line::from(""));
-            for text in wrap_text(&asked.detail, inner).into_iter().take(6) {
-                lines.push(Line::from(Span::styled(text, Style::new().fg(ink::quiet()))));
-            }
-        }
-        lines.push(Line::from(""));
-        for (i, option) in asked.options.iter().enumerate() {
-            let on = i == asked.picked;
-            let style = if on {
-                Style::new().fg(ink::code()).add_modifier(Modifier::BOLD)
-            } else {
-                Style::new().fg(ink::rule())
-            };
-            lines.push(Line::from(vec![
-                Span::styled(if on { "\u{276f} " } else { "  " }, style),
-                Span::styled(format!("{}. ", i + 1), Style::new().fg(ink::quiet())),
-                Span::styled(option.clone(), style),
-            ]));
-        }
-        // The answer row: a text field when nothing was offered, and one more
-        // choice when something was. The list is never a cage, and when there is
-        // no list it is the only thing there is.
-        // The answer row. Three states, and each has to be visibly different from
-        // the others or the box reads as broken: the cursor is here and it is
-        // empty (a block caret in the field), the cursor is here and something is
-        // typed (the text, a caret, and a hint about enter), or the cursor is up
-        // in the list (a quiet prompt saying this row exists).
-        let on = asked.on_custom();
-        let typing = on && !asked.typed.is_empty();
-        let body = if typing {
-            format!("{}\u{2588}", asked.typed)
-        } else if on {
-            "\u{2588}".to_string()
-        } else if asked.has_choices() {
-            "or type your own\u{2026}".to_string()
-        } else {
-            String::new()
-        };
-        lines.push(Line::from(vec![
-            Span::styled(if on { "\u{276f} " } else { "  " },
-                         Style::new().fg(if on { ink::code() } else { ink::rule() })),
-            Span::styled(body, Style::new().fg(if on { ink::code() } else { ink::quiet() })),
-        ]));
-        if typing {
-            // Enter is what sends it, and the one thing a typed answer needs said.
-            lines.push(Line::from(Span::styled(
-                "  enter sends it \u{b7} esc clears",
-                Style::new().fg(ink::quiet()),
-            )));
-        }
         f.render_widget(Clear, popup);
         f.render_widget(
             Paragraph::new(lines).block(
@@ -2820,6 +2922,18 @@ fn plenty(n: i64) -> String {
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+
+    /// One frame drawn into a test buffer and read back as text: the layout and
+    /// the characters, without a terminal.
+    fn frame_of(app: &mut App, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, app)).unwrap();
+        let buf = term.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     fn seed(app: &mut App) {
         for line in [
@@ -3820,15 +3934,7 @@ mod tests {
     /// still shows `allow ... ? y / n`.
     #[test]
     fn a_question_draws_a_question_and_a_permission_still_draws_permission() {
-        let frame = |app: &mut App, w: u16, h: u16| {
-            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-            term.draw(|f| draw(f, app)).unwrap();
-            let buf = term.backend().buffer();
-            (0..h)
-                .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
+        let frame = frame_of;
 
         // 1. A question with no options: a text box, and nothing about allowing.
         let mut app = App::new(None);
@@ -3890,6 +3996,91 @@ mod tests {
         let mut app = App::new(None);
         app.feed(wire::parse(r#"{"type":"permission","id":"q3","data":{"name":"ask_user","args":{"question":"still a question?"},"question":"still a question?"}}"#).unwrap());
         assert!(app.prompt.as_ref().is_some_and(|a| a.is_question()), "old envelope misread");
+    }
+
+    /// A question too long for one row, a choice too long for one line, and an
+    /// answer typed across several: all of it inside the box, and the box as tall
+    /// as what it holds.
+    ///
+    /// The bug this pins: the height was "options plus five", worked out before
+    /// anything was wrapped, so the wrapped question's own rows pushed the answer
+    /// row and the hint out of the bottom of the box -- and a choice longer than
+    /// the border was cut off at it, mid word.
+    #[test]
+    fn a_long_question_and_a_long_answer_stay_inside_their_box() {
+        let long = "should the panel keep the whole question when the wrapping needs more rows than the option count ever suggested";
+        let choice = "keep the question whole and let the box grow to the rows it needs";
+        let mut app = App::new(None);
+        let said = serde_json::json!({
+            "type": "permission",
+            "id": "q",
+            "data": {
+                "name": "ask_user",
+                "kind": "question",
+                "question": long,
+                "options": [choice, "cut it off and say nothing"],
+            },
+        });
+        app.feed(wire::parse(&said.to_string()).unwrap());
+        let shown = frame_of(&mut app, 80, 24);
+        if std::env::var("SHOW_QUESTION_PANEL").is_ok() {
+            println!("{shown}");
+        }
+        for word in long.split(' ').chain(choice.split(' ')) {
+            assert!(shown.contains(word), "a word of it was cut off: {word}\n{shown}");
+        }
+
+        // Typed across two lines through both newline keys, since a terminal that
+        // reports a shifted enter and one that maps the key to `1b 0d` send a
+        // different event for it, and ctrl-j is the one that arrives everywhere.
+        for c in "one line".chars() {
+            app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        app.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        for c in "and a second".chars() {
+            app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(
+            app.prompt.as_ref().unwrap().typed,
+            "one line\n\nand a second",
+            "a newline key did not break the line"
+        );
+
+        let shown = frame_of(&mut app, 80, 24);
+        if std::env::var("SHOW_QUESTION_PANEL").is_ok() {
+            println!("{shown}");
+        }
+        assert!(shown.contains("and a second"), "the answer's last line is not drawn:\n{shown}");
+        assert!(shown.contains('\u{2588}'), "the caret left the box:\n{shown}");
+        assert!(
+            shown.contains("esc clears"),
+            "the hint is the box's last row and it was clipped:\n{shown}"
+        );
+
+        // And the fitting itself, measured rather than read off a frame: never
+        // more rows than the room it was given, never a row wider than the box.
+        let asked = app.prompt.clone().unwrap();
+        for (w, h) in [(66usize, 20usize), (40, 12), (34, 5)] {
+            let lines = ask_panel(&asked, w, h);
+            assert!(lines.len() <= h, "{w}x{h}: {} rows in {h}", lines.len());
+            for line in &lines {
+                assert!(
+                    line.width() <= w,
+                    "{w}x{h}: {:?} is {} wide",
+                    line.to_string(),
+                    line.width()
+                );
+            }
+        }
+
+        // A long answer shows its tail, which is where the caret is: the head of
+        // it going off the top is the field scrolling, not the box losing rows.
+        let mut many = asked.clone();
+        many.typed = "one\ntwo\nthree\nfour\nfive\nsix".to_string();
+        let lines: Vec<String> = ask_panel(&many, 40, 20).iter().map(Line::to_string).collect();
+        assert!(!lines.iter().any(|l| l.contains("one")), "the head of a long answer is drawn: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains("six")), "the caret's own row is not drawn: {lines:?}");
     }
 
     /// A character typed at a question goes into the answer, not into a dead arm.
