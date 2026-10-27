@@ -251,6 +251,27 @@ world.requests.clear()
 drive("carry on", long, world)
 check("a later round does not refuse again", all(not r for _, r in world.requests), world.requests[:3])
 
+# 7. _compact_now's own report. `records` is folded in place, so the count has to be
+#    read before fold() slices it; reading it after reported 75 records to -487.
+import re as _re
+recs = [{"t": "user", "text": "the request " * 40}]
+recs += [{"t": "assistant", "content": "work " * 400, "calls": []} for _ in range(40)]
+recs += [{"t": "user", "text": "and then the last thing"}]
+sess = FakeSession()
+sess._records = list(recs)
+limit = compact.tokens(recs) * 2 // 3
+real_summarize = compact.summarize
+compact.summarize = lambda rs, words, ctx=None: {"summary": "the middle, in short. " * 20}
+try:
+    said = agent_main._compact_now([], used=compact.tokens(recs), limit=limit,
+                                   ctx={"session": sess})
+finally:
+    compact.summarize = real_summarize
+m = _re.search(r"compacted (\d+) records to (\d+)", said or "")
+check("the report names the count that went in and the count that came out",
+      bool(m) and int(m.group(1)) == len(recs) and int(m.group(2)) == len(sess._records),
+      (said, len(recs), len(sess._records)))
+
 print()
 if FAILS:
     print("FAILED: " + ", ".join(FAILS))
