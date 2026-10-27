@@ -132,6 +132,23 @@ pub mod ink {
     pub fn call() -> Color {
         Color::Rgb(0xe0, 0x78, 0x50)
     }
+    /// A call in flight, and the bright end of the sweep over the step's name while one
+    /// is running. Blue because the two halves of a round have to be told apart at a
+    /// glance and the thought's sweep is warm white: the same shape of highlight in two
+    /// families, which is what makes the difference readable as a colour and not as a
+    /// change of subject. This is the band only -- the name it passes over rests at
+    /// `running_dim`, exactly as it does under the warm one, so the row keeps the tone
+    /// it always had and what arrives is a blue pass through it.
+    pub fn running() -> Color {
+        Color::Rgb(0x74, 0xa9, 0xd8)
+    }
+    /// Where that name rests while the tools have the worker: `dim` cooled by a step,
+    /// not recoloured. A blue band through a warm grey reads as two things on one row;
+    /// this is the same grey with the blue's own shadow in it, and it measures 7.7:1
+    /// on the page against `dim`'s 7.6:1, so nothing about the row gets louder.
+    pub fn running_dim() -> Color {
+        Color::Rgb(0xa2, 0xa6, 0xad)
+    }
 }
 
 /// The dot, the tick, the cross, the prompt, and what hangs in front of a head line
@@ -156,7 +173,15 @@ const HEAD_LEAD: &str = "\u{25cf} ";
 /// dropped from and the arm runs into the text beside it. U+250C is the same
 /// corner the other way up, and reads as the detail having fallen off the
 /// bottom of the head.
-const BODY_LEAD: &str = "\u{2514} ";
+const BODY_LEAD: &str = "  \u{2514} ";
+/// An opened step's detail. Four columns, which is where a call's own text starts
+/// (`  \u{25cf} `), so a thought and the calls under it share one left edge and the
+/// single corner above them stays the summary's mark alone.
+/// The lead on a thought inside an opened step. A rail rather than a mark: a
+/// thought is several lines of somebody's working, and a mark at the top of it
+/// said nothing about the lines under it. The calls beside it wear a dot, so a
+/// column of rails and a column of dots is two kinds of thing at a glance.
+const THOUGHT_LEAD: &str = "  \u{2502} ";
 
 /// How much room a code block needs before its box is worth drawing at all. Below
 /// this the frame is more of it than the code is.
@@ -239,6 +264,10 @@ pub struct Piece {
     /// One entry per line the text itself had, so a thought's paragraphs stay
     /// paragraphs.
     pub lines: Vec<Vec<Run>>,
+    /// Whether the lead opens every line or only the first. A rail is part of the
+    /// quote -- a paragraph that wraps must still look quoted on the line it
+    /// wrapped to -- where a mark belongs to the piece once, at the front.
+    pub rail: bool,
 }
 
 impl Piece {
@@ -275,6 +304,7 @@ fn plain(lead: impl Into<String>, lead_style: Style, text: &str, style: Style) -
         lead_style,
         air_above: false,
         air_below: false,
+        rail: false,
         lines: text
             .split('\n')
             .map(|line| vec![(line.to_string(), style)])
@@ -296,6 +326,7 @@ fn prose(
         lead_style,
         air_above: false,
         air_below: false,
+        rail: false,
         lines: formatted(text, style, room),
     }
 }
@@ -330,7 +361,7 @@ pub fn draw(pieces: &[Held], width: usize) -> Drawn {
                 // A continuation is indented by as many columns as the lead draws
                 // in, not by as many characters as it is written with: a lead is
                 // two columns wide and two characters long only while it is ASCII.
-                let indent = if n == 0 && k == 0 {
+                let indent = if piece.rail || (n == 0 && k == 0) {
                     piece.lead.to_string()
                 } else {
                     " ".repeat(lead)
@@ -594,13 +625,16 @@ fn clusters(rows: &[Row]) -> Vec<Cluster> {
 /// The one definition of what a row looks like: `draw` wraps these for the
 /// screen and `--print` writes them out unwrapped, so the two cannot drift.
 /// `expanded` answers whether a step shows its detail, which is the reader's
-/// folding rather than anything about the conversation. `figures` is what the
-/// worker reported for a row's own round, if it reported anything. `writing` is
-/// the row being written right now, `flash` is which half of its blink is on, and
-/// `width` is how wide a row draws, which a rule and a table are sized to.
+/// folding rather than anything about the conversation, and `unfolded` answers the
+/// same for one thought inside an opened step: a step shows its calls, and each
+/// thought in it is a line until the reader asks for the text. `figures` is what
+/// the worker reported for a row's own round, if it reported anything. `writing`
+/// is the row being written right now, `flash` is which half of its blink is on,
+/// and `width` is how wide a row draws, which a rule and a table are sized to.
 pub fn pieces(
     rows: &[Row],
     expanded: &dyn Fn(usize, &Row) -> bool,
+    unfolded: &dyn Fn(usize) -> bool,
     figures: &dyn Fn(usize) -> Option<Round>,
     writing: Option<usize>,
     flash: bool,
@@ -620,8 +654,14 @@ pub fn pieces(
             Cluster::Row(i) => (i, None, Vec::new(), Vec::new()),
         };
         if think.is_some() || !calls.is_empty() {
-            let open = expanded(i, &rows[i]);
-            out.extend(step(think, &earlier, &calls, rows, open, figures, writing, flash, width, i));
+            // The step's own first row, which does not move when a later round
+            // joins it and renames it. Folding has to be remembered against that:
+            // keyed on the name, an opened step closed itself every time the work
+            // moved on to its next thought.
+            let start = earlier.first().copied().or(think).unwrap_or(i);
+            let start = step_start(rows, start);
+            let open = expanded(start, &rows[start]);
+            out.extend(step(think, &earlier, &calls, shimmer, rows, open, unfolded, figures, writing, flash, width, start));
             continue;
         }
         let row = &rows[i];
@@ -665,6 +705,7 @@ pub fn pieces(
                             formatted(text, Style::new().fg(ink::dim()), room),
                             ink::dim(),
                             ink::text(),
+                            Motion::Pass,
                             phase,
                         ),
                         None => formatted(text, Style::new().fg(ink::dim()), room),
@@ -674,6 +715,7 @@ pub fn pieces(
                         lead_style: Style::new().fg(ink::branch()),
                         air_above: false,
                         air_below: true,
+                        rail: false,
                         lines,
                     } });
                 }
@@ -700,7 +742,7 @@ pub fn pieces(
                 ink::text(),
                 text,
                 width.saturating_sub(columns(HEAD_LEAD)).max(1),
-            ) }),
+            ).air(true, true) }),
             Row::Error(text) => out.push(Held { row: i, head: i, piece: led(Mark::Cross, ink::failed(), ink::failed(), text) }),
             // Thought and call rows never reach here: `clusters` has already put
             // them in a step, and `step` draws the lot.
@@ -715,23 +757,45 @@ pub fn pieces(
 /// it.
 ///
 /// `head` is the row the fold is remembered against, which is the thought when
-/// there is one and the first call when there is not.
+/// there is one and the first call when there is not. `unfolded` is the reader's
+/// own fold, per thought: what it says yes to shows its text, and everything else
+/// in the step is one line.
 #[allow(clippy::too_many_arguments)]
 fn step(
     think: Option<usize>,
     earlier: &[usize],
     calls: &[usize],
+    shimmer: Option<usize>,
     rows: &[Row],
     open: bool,
+    unfolded: &dyn Fn(usize) -> bool,
     figures: &dyn Fn(usize) -> Option<Round>,
     writing: Option<usize>,
     flash: bool,
     width: usize,
     head: usize,
 ) -> Vec<Held> {
+    // The step's newest row, and whether the tools are what the worker is on: a call
+    // that has not reported yet is one in flight, and one that has reported with no
+    // thought after it is the wait between the tool and the model starting again.
+    // Both are blue; a thought after them is the model thinking, and warm. Read off
+    // the record rather than off `writing`, which still points at the thought it
+    // streamed into while the tool it asked for is running.
+    let newest = earlier
+        .iter()
+        .chain(think.iter())
+        .chain(calls.iter())
+        .copied()
+        .max()
+        .unwrap_or(head)
+        .max(head);
+    let in_tools = matches!(&rows[newest], Row::Tool { .. });
     // `writing` is None when nothing is being written, and `think` is None for a
     // step with no thought: comparing the two directly would call every calls-only
-    // step live, which is a colour and a blink that say the wrong thing.
+    // step live, which is a colour and a blink that say the wrong thing. Nothing
+    // more is needed for the tools: while a call runs, and in the wait after it
+    // before the model starts again, `writing` is still the thought the worker
+    // streamed into before it asked for the call, so the step is already live.
     let live = think.is_some_and(|t| writing == Some(t))
         || calls.iter().any(|&c| {
             writing == Some(c) && matches!(&rows[c], Row::Tool { result: None, .. })
@@ -758,12 +822,27 @@ fn step(
     // merged run usually ends on a thought with nothing after it -- the wrap-up
     // before the answer -- and that one is a sentence about being finished, not a
     // name for the work.
+    // Which thought names the step, in order of preference: one the small model
+    // has already named, then one with a call after it (a merged run usually ends
+    // on a wrap-up sentence, which is about being finished and not a name), then
+    // the step's opening words. Never the newest text for its own sake: a head that
+    // re-derived itself from whatever reasoning had arrived last was a head that
+    // changed while you were reading it.
     let named = earlier
         .iter()
         .copied()
         .chain(think)
         .rev()
-        .find(|&t| calls.last().is_some_and(|&c| c > t))
+        .find(|&t| matches!(&rows[t], Row::Thinking { name: Some(_), .. }))
+        .or_else(|| {
+            earlier
+                .iter()
+                .copied()
+                .chain(think)
+                .rev()
+                .find(|&t| calls.last().is_some_and(|&c| c > t))
+        })
+        .or_else(|| earlier.first().copied())
         .or(think);
     let said = match named {
         Some(t) => {
@@ -779,10 +858,34 @@ fn step(
         }
         None => group_head(rows, calls),
     };
+    // The words on the head, which is what a detail line is compared against: a
+    // thought whose whole text is already the head is not drawn again under it.
+    let name = said.first().map(|(t, _)| t.clone()).unwrap_or_default();
+    // The row being worked carries the band, over its own words: the name is what
+    // the eye is on while a round runs, and a band that skipped it and ran under it
+    // on a second line was the wrong line shimmering. Which of the two ramps it
+    // runs in is `in_tools`, above: one shape of highlight in two families and two
+    // motions -- warm and turning back on itself through a thought, blue and passing
+    // left to right while the tools have the worker. The name itself rests at `dim`
+    // under the warm one and a cooler grey under the blue, which is the same tone
+    // moved a step towards the band rather than a second colour.
+    let said = match (live, shimmer) {
+        (true, Some(phase)) => {
+            let (calm, hot, motion) = if in_tools {
+                (ink::running_dim(), ink::running(), Motion::Pass)
+            } else {
+                (ink::dim(), ink::text(), Motion::Back)
+            };
+            shimmer_runs(vec![said], calm, hot, motion, phase)
+                .pop()
+                .unwrap_or_default()
+        }
+        _ => said,
+    };
     out.push(Held {
         row: head,
         head,
-        piece: led_runs(format!("{DOT} "), Style::new().fg(lead), said),
+        piece: led_runs(format!("{DOT} "), Style::new().fg(lead), said).air(true, false),
     });
 
     // The line under it: what the thinking cost, what the calls were, and what
@@ -790,6 +893,9 @@ fn step(
     // reader needs to decide whether to open it, and nothing more.
     let mut meta: Vec<Run> = Vec::new();
     let said = |text: String, colour: Color, meta: &mut Vec<Run>| {
+        if text.is_empty() {
+            return;
+        }
         if !meta.is_empty() {
             meta.push(("  \u{b7}  ".to_string(), Style::new().fg(ink::branch())));
         }
@@ -806,13 +912,11 @@ fn step(
     // also the only way a failure says *what* failed without opening anything.
     // A run of calls cannot say all their results on one line, so it says what it
     // ran instead.
-    let mut said_result = false;
-    if calls.len() == 1 {
+    if calls.len() == 1 && !(open && think.is_some()) {
         if let Row::Tool { args, result: Some(r), .. } = &rows[calls[0]] {
             if !r.is_empty() {
                 let ink = if failed(r) { ink::failed() } else { ink::faint() };
                 said(call_result(args, r), ink, &mut meta);
-                said_result = true;
             }
         }
     }
@@ -827,18 +931,10 @@ fn step(
     if calls.len() > 1 && !calls.is_empty() && think.is_some() {
         said(ran(calls, rows), ink::faint(), &mut meta);
     }
-    for &c in &broken {
-        if matches!(&rows[c], Row::Tool { result: Some(_), .. }) {
-            let text = if said_result {
-                String::new()
-            } else {
-                format!("{} of {} failed", broken.len(), calls.len())
-            };
-            if !text.is_empty() {
-                said(text, ink::failed(), &mut meta);
-            }
-            break;
-        }
+    // One call said its own failure above, or says it on its own line when the
+    // step is opened. A run of them cannot, so it says how much of it broke.
+    if !broken.is_empty() && calls.len() > 1 {
+        said(format!("{} of {} failed", broken.len(), calls.len()), ink::failed(), &mut meta);
     }
     if !meta.is_empty() {
         out.push(Held {
@@ -849,64 +945,100 @@ fn step(
                 lead_style: Style::new().fg(ink::branch()),
                 air_above: false,
                 air_below: false,
+                rail: false,
                 lines: vec![meta],
             },
         });
     }
 
-    // Opened: the thoughts the step merged, then the one it is named for, then
-    // one line a call.
+    // Opened: the step's own rows, in the order they happened -- a thought, the
+    // calls that answered it, the thought that came after. That order is the
+    // record; drawing every thought and then every call was the transcript
+    // rearranged to suit the shape of the data, and it put reasoning above calls
+    // that had happened before it.
     if open {
-        for &t in earlier {
-            if let Row::Thinking { text, .. } = &rows[t] {
-                if !text.trim().is_empty() {
-                    out.push(Held {
-                        row: t,
-                        head,
-                        piece: prose(
-                            BODY_LEAD,
-                            Style::new().fg(ink::branch()),
-                            text,
-                            Style::new().fg(ink::dim()),
-                            width.saturating_sub(columns(BODY_LEAD)).max(1),
-                        ),
-                    });
+        let last = earlier
+            .iter()
+            .chain(think.iter())
+            .chain(calls.iter())
+            .copied()
+            .max()
+            .unwrap_or(head)
+            .max(head);
+        let mut after_thought = false;
+        for r in head..=last {
+            match &rows[r] {
+                Row::Thinking { text, .. } => {
+                    if text.trim().is_empty() || is_name(text, &name) {
+                        continue;
+                    }
+                    // Folded or not, the thought is a line of its own; what the
+                    // reader's own fold decides is whether that line is its text or
+                    // the triangle that opens it. A step full of reasoning used to be
+                    // a wall of it with the calls buried in between, and the calls are
+                    // what the step was opened for.
+                    let mut said = if unfolded(r) {
+                        thought(r, head, text, &name, width)
+                    } else {
+                        vec![folded_thought(r, head, text, &name, figures, width)]
+                    };
+                    if after_thought {
+                        // The seam between what it thought and what it ran: one
+                        // line, once per group, rather than between every pair.
+                        for piece in said.iter_mut().take(1) {
+                            piece.piece.air_above = true;
+                        }
+                    }
+                    out.extend(said);
+                    after_thought = true;
                 }
+                // The call the head is already named for is not drawn again: an
+                // opened one-call step would otherwise say the same thing twice.
+                Row::Tool { .. } if !(think.is_none() && calls.len() == 1) => {
+                    let mut line = call_line(r, head, rows, writing, flash, width);
+                    if after_thought {
+                        line.piece.air_above = true;
+                    }
+                    out.push(line);
+                    after_thought = false;
+                }
+                _ => {}
             }
         }
-        if let Some(t) = think {
-            if let Row::Thinking { text, .. } = &rows[t] {
-                // A thought short enough that its name is the whole of it is not
-                // drawn twice: the head said it, and the detail would be the same
-                // sentence one line down.
-                let whole = text.trim().trim_end_matches('.').trim();
-                let named = match &rows[t] {
-                    Row::Thinking { name, .. } => name.clone(),
-                    _ => None,
-                };
-                if !whole.is_empty() && named.as_deref().unwrap_or(&thought_name(text)) != whole {
-                    out.push(Held {
-                        row: t,
-                        head,
-                        piece: prose(
-                            BODY_LEAD,
-                            Style::new().fg(ink::branch()),
-                            text,
-                            Style::new().fg(ink::dim()),
-                            width.saturating_sub(columns(BODY_LEAD)).max(1),
-                        ),
-                    });
-                }
-            }
-        }
-        // The call the head is already named for is not drawn again: an opened
-        // one-call step would otherwise say the same thing twice.
-        let skip = usize::from(think.is_none() && calls.len() == 1);
-        for &c in calls.iter().skip(skip) {
-            out.push(call_line(c, head, rows, writing, flash));
+        // An opened step is a block and a closed one is a line, so the gap that
+        // separates two of them belongs only after a block: the lines of the list
+        // stay tight, and the block is not run into by the next head.
+        if let Some(last) = out.last_mut() {
+            last.piece.air_below = true;
         }
     }
     out
+}
+
+/// Whether this thought is the head's line already, word for word.
+///
+/// A thought short enough that its name is the whole of it is not drawn twice:
+/// the head said it, and the detail under it would be the same sentence again.
+fn is_name(text: &str, name: &str) -> bool {
+    let whole = text.trim().trim_end_matches('.').trim();
+    !whole.is_empty() && whole == name.trim().trim_end_matches('.').trim()
+}
+
+/// The row a step started on, given any row inside it.
+///
+/// A step's rows are contiguous -- thoughts and calls, nothing else -- so walking
+/// back over them finds its start without building the clusters again. That start
+/// is what a fold is remembered against, because the head it is named for moves
+/// when a later round joins it.
+pub fn step_start(rows: &[Row], at: usize) -> usize {
+    let mut i = at;
+    while i > 0 {
+        match &rows[i - 1] {
+            Row::Thinking { .. } | Row::Tool { .. } => i -= 1,
+            _ => break,
+        }
+    }
+    i
 }
 
 /// What a step's rounds cost, as one figure: the tokens summed, and a rate only
@@ -924,12 +1056,116 @@ fn rounds(
     if all.is_empty() {
         return None;
     }
-    let alone = all.len() == 1;
+    // The rate of a step with several rounds is the rate of all of it: the tokens
+    // of the rounds that timed themselves, over the time they took. Summing their
+    // rates would be a number about nothing; leaving the rate out for every merged
+    // step meant it never showed at all, because most steps merge.
+    let timed: Vec<Round> = all.iter().copied().filter(|r| r.tps > 0.0 && r.tokens > 0).collect();
+    let seconds: f64 = timed.iter().map(|r| r.tokens as f64 / r.tps).sum();
+    let tokens: i64 = timed.iter().map(|r| r.tokens).sum();
     Some(Round {
         tokens: all.iter().map(|r| r.tokens).sum(),
-        tps: if alone { last_tps } else { 0.0 },
+        tps: if seconds > 0.0 { tokens as f64 / seconds } else { last_tps },
         estimated: all.iter().any(|r| r.estimated) || last_est,
     })
+}
+
+/// A thought with its text folded away, as an opened step draws it: the rail and a
+/// triangle, and enough words to tell whether it is worth opening.
+///
+/// The words are the thought's own name, which is the same name the head carries
+/// when this is the thought the step is named for. That one line says what the
+/// round cost instead: a row whose whole text is the line above it has said
+/// nothing, and the figure is a fact about this thought rather than the step.
+fn folded_thought(
+    index: usize,
+    head: usize,
+    text: &str,
+    name: &str,
+    figures: &dyn Fn(usize) -> Option<Round>,
+    width: usize,
+) -> Held {
+    let own = thought_name(text);
+    let label = if own == name {
+        match figures(index) {
+            Some(round) if round.tokens > 0 => {
+                format!("{} tokens", tokens(round.tokens, round.estimated))
+            }
+            _ => "thinking".to_string(),
+        }
+    } else {
+        own
+    };
+    let room = width.saturating_sub(columns(THOUGHT_LEAD) + 2).max(1);
+    Held {
+        row: index,
+        head,
+        piece: Piece {
+            rail: true,
+            lead: THOUGHT_LEAD.to_string(),
+            lead_style: Style::new().fg(ink::branch()),
+            air_above: false,
+            air_below: false,
+            lines: vec![vec![
+                ("\u{25b8} ".to_string(), Style::new().fg(ink::branch())),
+                (clip(&label, room), Style::new().fg(ink::faint())),
+            ]],
+        },
+    }
+}
+
+/// A thought as the opened step draws it: a paragraph per rail, so a long piece of
+/// working reads as quoted reasoning rather than as prose that happens to be grey,
+/// and the paragraphs inside it keep the blank lines they were written with.
+fn thought(index: usize, head: usize, text: &str, name: &str, width: usize) -> Vec<Held> {
+    let room = width.saturating_sub(columns(THOUGHT_LEAD)).max(1);
+    let mut out: Vec<Held> = Vec::new();
+    for (n, paragraph) in text
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .enumerate()
+    {
+        // The head already says this paragraph's first words: a block that opens by
+        // repeating its own name has said nothing twice.
+        if n == 0 && is_name(paragraph, name) {
+            continue;
+        }
+        let lines = formatted(paragraph, Style::new().fg(ink::dim()), room);
+        if lines.is_empty() {
+            continue;
+        }
+        // The seam between two paragraphs is a rail with nothing after it, not a
+        // blank line: the rail is what says this is all one piece of reasoning, and
+        // a gap with no rail in it breaks the column in two.
+        if !out.is_empty() {
+            out.push(Held {
+                row: index,
+                head,
+                piece: Piece {
+                    rail: true,
+                    lead: THOUGHT_LEAD.to_string(),
+                    lead_style: Style::new().fg(ink::branch()),
+                    air_above: false,
+                    air_below: false,
+                    lines: vec![Vec::new()],
+                },
+            });
+        }
+        out.push(Held {
+            row: index,
+            head,
+            piece: Piece {
+                rail: true,
+                lead: THOUGHT_LEAD.to_string(),
+                lead_style: Style::new().fg(ink::branch()),
+                air_above: false,
+                air_below: false,
+                lines,
+            },
+        });
+    }
+    out
 }
 
 /// The head of a step with no thought in it: the tool it ran, and how many calls
@@ -952,48 +1188,66 @@ fn group_head(rows: &[Row], calls: &[usize]) -> Vec<Run> {
         }
         return said;
     }
-    let mut verbs: Vec<String> = Vec::new();
-    for &c in calls {
-        if let Row::Tool { name, args, call, .. } = &rows[c] {
-            let (verb, _) = call_name(name, args, call);
-            if !verbs.contains(&verb) {
-                verbs.push(verb);
-            }
-        }
-    }
-    vec![
-        (verbs.join(", "), Style::new().fg(ink::call())),
-        (format!(" ×{}", calls.len()), Style::new().fg(ink::faint())),
-    ]
+    vec![(tally(&verbs(calls, rows)), Style::new().fg(ink::call()))]
 }
 
-/// What a step ran, in the words the line uses: `Ran shell`, `Ran 3 shell tools`,
-/// `Ran 3 calls · read, shell`. Verbs, not tool names: a call's head is its verb,
-/// and the line under a thought has to speak the same vocabulary.
+/// What a step ran, in the words the line uses: `Ran shell`, `Ran read ×4`,
+/// `Ran 5 tools · read ×4, shell ×1`. Verbs, not tool names: a call's head is its
+/// verb, and the line under a thought has to speak the same vocabulary.
 fn ran(calls: &[usize], rows: &[Row]) -> String {
-    let verbs: Vec<String> = calls
+    let verbs = verbs(calls, rows);
+    match verbs.len() {
+        0 => String::new(),
+        1 => format!("Ran {}", verbs[0]),
+        // One verb, so the count is the whole of it: `Ran read ×4` says it once,
+        // where "Ran 4 tools" in front of it would say four twice.
+        _ if verbs.iter().all(|v| *v == verbs[0]) => format!("Ran {}", tally(&verbs)),
+        n => format!("Ran {n} tools · {}", tally(&verbs)),
+    }
+}
+
+/// The verbs of a run, in the order they were run.
+fn verbs(calls: &[usize], rows: &[Row]) -> Vec<String> {
+    calls
         .iter()
         .filter_map(|&c| match &rows[c] {
             Row::Tool { name, args, call, .. } => Some(call_name(name, args, call).0),
             _ => None,
         })
-        .collect();
-    let one_tool = verbs.windows(2).all(|w| w[0] == w[1]);
-    match verbs.len() {
-        0 => String::new(),
-        1 => format!("Ran {}", verbs[0]),
-        n if one_tool => format!("Ran {n} {} tools", verbs[0]),
-        n => {
-            let mut tools: Vec<String> = verbs.clone();
-            tools.dedup();
-            format!("Ran {n} calls · {}", tools.join(", "))
+        .collect()
+}
+
+/// How many of each, most frequent first: `read ×4, shell ×1`.
+///
+/// Five verbs with two repeats in them is a list you count yourself, and the count
+/// is the thing worth knowing at a glance. Ties go by name so the line does not
+/// shuffle between two draws of the same run.
+fn tally(verbs: &[String]) -> String {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for verb in verbs {
+        match counts.iter_mut().find(|(name, _)| name == verb) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((verb.clone(), 1)),
         }
     }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    counts
+        .iter()
+        .map(|(name, n)| format!("{name} ×{n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// One call, on the single line an opened step gives it: what it ran on, and what
 /// came back. The panel behind ctrl-o is where the rest of it is.
-fn call_line(index: usize, head: usize, rows: &[Row], writing: Option<usize>, flash: bool) -> Held {
+fn call_line(
+    index: usize,
+    head: usize,
+    rows: &[Row],
+    writing: Option<usize>,
+    flash: bool,
+    width: usize,
+) -> Held {
     let Row::Tool { name, args, call, result, .. } = &rows[index] else {
         return Held { row: index, head, piece: plain("", Style::new(), "", Style::new()) };
     };
@@ -1004,15 +1258,32 @@ fn call_line(index: usize, head: usize, rows: &[Row], writing: Option<usize>, fl
     };
     let (verb, hint) = call_name(name, args, call);
     let colour = arg_ink(result.as_deref());
-    let mut said = vec![(verb, Style::new().fg(ink::call()))];
+    // A call is one row by design: the panel has the whole of it, and a row that
+    // wraps takes a second line that reads like a second result. So the arguments
+    // and the result are both cut to what the line has left, not wrapped.
+    let lead_width = columns(&format!("  {DOT} "));
+    let tail = result
+        .as_deref()
+        .filter(|r| !r.is_empty())
+        .map(|r| call_result(args, r))
+        .unwrap_or_default();
+    let hint_room = width
+        .saturating_sub(lead_width + columns(&verb) + 2 + columns("  \u{b7}  ") + columns(&tail))
+        .max(8);
+    let hint = hint.map(|h| clip(&h, hint_room));
+    let mut said = vec![(verb.clone(), Style::new().fg(ink::call()))];
+    let mut head_width = columns(&verb);
     if let Some(hint) = hint {
         said.push(("(".to_string(), Style::new().fg(colour)));
         said.extend(arg_runs(&hint, colour));
         said.push((")".to_string(), Style::new().fg(colour)));
+        head_width += columns(&hint) + 2;
     }
     if let Some(r) = result.as_deref().filter(|r| !r.is_empty()) {
         let ink = if failed(r) { ink::failed() } else { ink::faint() };
-        said.push((format!("  \u{b7}  {}", call_result(args, r)), Style::new().fg(ink)));
+        let used = lead_width + head_width + columns("  \u{b7}  ");
+        let room = width.saturating_sub(used).max(8);
+        said.push((format!("  \u{b7}  {}", clip(&tail, room)), Style::new().fg(ink)));
     }
     Held {
         row: index,
@@ -1104,6 +1375,7 @@ fn led_runs(lead: String, lead_style: Style, runs: Vec<Run>) -> Piece {
         lead_style,
         air_above: false,
         air_below: false,
+        rail: false,
         lines: vec![runs],
     }
 }
@@ -1125,20 +1397,20 @@ fn led_prose(mark: Mark, colour: Color, lead: Color, text: &str, room: usize) ->
 /// the row's own colour at this distance, so what travels along a line is a soft
 /// highlight and not a block of white stepping through the text. The whole highlight is
 /// twice this wide, and this number is what the stride below is spaced against.
-const SHIMMER: usize = 5;
+const SHIMMER: usize = 7;
 
 /// How far the highlight moves between two frames, in characters.
 ///
 /// Read by the app as well as here: one number decides how the sweep looks, and a
 /// second copy of it in the app is how a shimmer ends up moving at two speeds.
-pub const SHIMMER_STEP_MS: u128 = 40;
+pub const SHIMMER_STEP_MS: u128 = 90;
 
 /// How many characters of travel one step buys.
 ///
 /// A band of five creeping a character at a time would need a hundred and twenty
 /// steps to cross a message, which is four seconds of the row moving while somebody
 /// is trying to read it.
-const SHIMMER_STRIDE: usize = 3;
+const SHIMMER_STRIDE: usize = 1;
 
 /// When a just-arrived peer message is drawn at all: a landed message is worth a
 /// second's glance. It fades by not being drawn, which is what keeps a settled screen
@@ -1164,6 +1436,23 @@ fn mix(base: Color, top: Color, t: f64) -> Color {
     Color::Rgb(blend(br, tr), blend(bg, tg), blend(bb, tb))
 }
 
+/// How the highlight travels along a row.
+///
+/// One shape of highlight in two motions, because the two halves of a round are not
+/// doing the same thing with it: a model thinking is going nowhere and a call is one
+/// step of the work going past.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Motion {
+    /// In from the left, out past the right, and round again, with the row dark at
+    /// both ends of the cycle. A pass: the work is advancing, and a band that has left
+    /// the row is what says one has finished and the next is coming.
+    Pass,
+    /// Right, then back left, always on the words: it turns around inside the line
+    /// instead of leaving it. Thinking does not go anywhere, and a band that left the
+    /// row would say it had.
+    Back,
+}
+
 /// A soft highlight travelling along a line of text.
 ///
 /// The colour, not the characters: the words are the peer's and are drawn as written, and a
@@ -1172,21 +1461,40 @@ fn mix(base: Color, top: Color, t: f64) -> Color {
 /// it is from the highlight's centre, and everything outside keeps the colour it would have
 /// had. `top` is the caller's, because the two things this sweeps are not the same
 /// loudness: a peer's own words go to `ink::text`, the status line only to `ink::dim`.
-fn shimmer_runs(lines: Vec<Vec<Run>>, base: Color, top: Color, phase: usize) -> Vec<Vec<Run>> {
+fn shimmer_runs(
+    lines: Vec<Vec<Run>>,
+    base: Color,
+    top: Color,
+    motion: Motion,
+    phase: usize,
+) -> Vec<Vec<Run>> {
     // How far the band has to travel to have crossed the whole row. Read off the
-    // longest line rather than wrapped on a fixed period: a period shorter than the
-    // line puts two or three bands on it at once, which is a row of stripes and not a
+    // longest line rather than wrapped on a fixed period: a period shorter than the line
+    // puts two or three bands on it at once, which is a row of stripes and not a
     // highlight passing over it.
     let longest = lines
         .iter()
         .map(|l| l.iter().map(|(t, _)| t.chars().count()).sum::<usize>())
         .max()
         .unwrap_or(0);
-    let span = longest + SHIMMER;
-    let head = (phase * SHIMMER_STRIDE) % span.max(1);
     // Where the highlight is centred, which is what each character's distance is
-    // measured from. The ramp reaches `SHIMMER` characters either side of this.
-    let centre = head as isize + (SHIMMER / 2) as isize;
+    // measured from. The ramp reaches `SHIMMER` characters either side of it.
+    let centre = match motion {
+        // A whole ramp of travel either side of the words, so the sweep starts with
+        // nothing lit, rises off the first character and sets past the last, and the
+        // wrap lands on darkness rather than snapping the band onto the left edge.
+        Motion::Pass => {
+            let span = longest + 2 * SHIMMER;
+            ((phase * SHIMMER_STRIDE) % span.max(1)) as isize - SHIMMER as isize
+        }
+        // A triangle over the words themselves: right to the last character, then left
+        // again, so the band is never off the row and never jumps when it turns.
+        Motion::Back => {
+            let travel = longest.saturating_sub(1).max(1);
+            let p = (phase * SHIMMER_STRIDE) % (2 * travel).max(1);
+            (if p <= travel { p } else { 2 * travel - p }) as isize
+        }
+    };
     lines
         .into_iter()
         .map(|runs| {
@@ -1215,32 +1523,6 @@ fn shimmer_runs(lines: Vec<Vec<Run>>, base: Color, top: Color, phase: usize) -> 
             }
             out
         })
-        .collect()
-}
-
-/// The status line's own text, swept: the same characters in the same columns, with the
-/// same ramp the transcript's highlight travels on.
-///
-/// The line is this screen's asides rather than a row, so its highlight runs from
-/// `ink::quiet` up to `ink::dim` and no further: a peer's own words get the bright sweep,
-/// and a status line at full white would out-shout the row it is reporting on. Nothing
-/// here changes a character or a column -- only the tone each one is drawn in -- so a
-/// swept line takes exactly the room it took before.
-pub fn sweep(text: &str, phase: usize) -> Line<'static> {
-    // Brighter at the peak than the line's own colour: a band that only reached
-    // `dim` was invisible on a status line that is already quiet grey, which is a
-    // highlight nobody can see.
-    Line::from(shimmer(text, phase, ink::quiet(), ink::text()))
-}
-
-/// The same band as spans, for text that is part of a line rather than all of it.
-pub fn shimmer(text: &str, phase: usize, base: Color, top: Color) -> Vec<Span<'static>> {
-    let runs = vec![vec![(text.to_string(), Style::new().fg(base))]];
-    shimmer_runs(runs, base, top, phase)
-        .pop()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(text, style)| Span::styled(text, style))
         .collect()
 }
 
@@ -1912,7 +2194,11 @@ pub fn call_result(args: &str, summary: &str) -> String {
     let said = format!("{key} ");
     summary
         .split(" \u{b7} ")
-        .filter(|part| !part.starts_with(&said))
+        // The directory a call ran in is the header's business, and the panel has
+        // the whole result object: on a row it is the longest part of the line and
+        // the least worth a column of it, and a path long enough to wrap turns one
+        // row into two that read like separate results.
+        .filter(|part| !part.starts_with(&said) && !part.trim_start().starts_with("cwd "))
         .collect::<Vec<_>>()
         .join(" \u{b7} ")
 }
@@ -2591,12 +2877,12 @@ pub fn keys() -> Opened {
             "stop the round in flight, or empty what you typed",
         ),
         ("/ $ @", "the menus: commands, skills, files"),
-        ("ctrl-t", "every thought unfolded at once"),
+        ("ctrl-t", "every step's calls; its thinking one line each"),
         ("ctrl-o", "the calls, to open one in full"),
         ("ctrl-b", "push the running call into the background"),
         (
             "double click",
-            "one row: a call in full, a thought unfolded",
+            "one row: a call in full, a thinking opened or shut",
         ),
         ("ctrl-c", "quit"),
     ];
@@ -2642,72 +2928,27 @@ fn failed(result: &str) -> bool {
 ///
 /// `ms` is this screen's own age, so the spinner turns at the same rate however
 /// often the loop happens to come round.
-pub fn turn(t: &Turn, ms: u128, phase: Option<usize>, tools: bool) -> Line<'static> {
+pub fn turn(t: &Turn, ms: u128) -> Line<'static> {
     let mut said = Vec::new();
     if let Some(n) = t.tokens {
         said.push(format!("{} tok", tokens(n, t.estimated)));
     }
     said.push(format!("{:.1}s", t.secs()));
-    // While it works: a word for what it is doing, rotating, with the band over
-    // it. A round that ended: a dot, so the line stops moving and says it is over
-    // without a word about it.
-    if t.ended.is_none() {
-        let word = activity(ms, tools);
-        let mut out = match phase {
-            Some(phase) => shimmer(word, phase, ink::quiet(), ink::text()),
-            None => vec![Span::styled(word, Style::new().fg(ink::quiet()))],
-        };
-        if !said.is_empty() {
-            out.push(Span::styled(" \u{b7} ", Style::new().fg(ink::quiet())));
-            out.push(Span::styled(said.join(" \u{b7} "), Style::new().fg(ink::quiet())));
-        }
-        return Line::from(out);
-    }
+    // Spinning while it works, a dot once it is done: one slot either way, so
+    // nothing on the line moves when the round ends.
+    let mark = if t.ended.is_none() {
+        Span::styled(
+            SPINNER[ms as usize / 80 % SPINNER.len()],
+            Style::new().fg(ink::text()),
+        )
+    } else {
+        Span::styled(DOT, Style::new().fg(ink::done()))
+    };
     Line::from(vec![
-        Span::styled(DOT, Style::new().fg(ink::done())),
+        mark,
         Span::raw(" "),
-        Span::styled(said.join(" \u{b7} "), Style::new().fg(ink::dim())),
+        Span::styled(said.join(" \u{b7} "), Style::new().fg(ink::text())),
     ])
-}
-
-/// Words for what a round is doing, one at a time, for the readout.
-///
-/// A spinner says a thing is running and nothing about what; a state name says
-/// what only in the worker's own vocabulary. A word that changes every few seconds
-/// reads as a person narrating the job, and it also answers the question a still
-/// word stops answering: is it still going?
-const THINKING: [&str; 8] = [
-    "thinking",
-    "weighing",
-    "mulling",
-    "working",
-    "reading",
-    "turning",
-    "looking",
-    "considering",
-];
-const TOOLING: [&str; 6] = ["running", "poking", "checking", "digging", "trying", "probing"];
-
-/// The word for this moment, and the one after it. Off the screen's own clock so
-/// it changes whether or not anything arrives, which is the point of it.
-fn activity(ms: u128, tools: bool) -> &'static str {
-    // Four seconds a word: long enough to read, short enough that a round sitting
-    // on one call does not look stuck.
-    let tick = (ms / 4000) as usize;
-    let words: &[&str] = if tools { &TOOLING } else { &THINKING };
-    words[tick % words.len()]
-}
-
-/// The most room the readout can want this round.
-///
-/// The word changes every few seconds, so the room the box has to keep back
-/// follows the longest one: reserving the width of the word showing now would
-/// re-wrap the message in the field every time the word grew.
-pub fn turn_room(t: &Turn, tools: bool) -> usize {
-    let words: &[&str] = if tools { &TOOLING } else { &THINKING };
-    let widest = words.iter().map(|w| w.chars().count()).max().unwrap_or(0);
-    let now = activity(0, tools).chars().count();
-    widest + turn(t, 0, None, tools).width().saturating_sub(now)
 }
 
 /// A token count: `~2.2k`, `1.5k`, `845`. One decimal, because a round's count is
@@ -2741,6 +2982,11 @@ mod tests {
         |_, _| true
     }
 
+    /// Every thought unfolded too, which is the reader who opened the lot.
+    fn all_unfolded() -> impl Fn(usize) -> bool {
+        |_| true
+    }
+
     /// No figures filed: the screen at rest.
     fn no_figures() -> impl Fn(usize) -> Option<Round> {
         |_| None
@@ -2749,7 +2995,9 @@ mod tests {
     /// The width a row draws at, unless the test is about the width.
     const ROOM: usize = 80;
 
-    /// `pieces` at the width and the screen the tests do not care about.
+    /// `pieces` at the width and the screen the tests do not care about. The
+    /// thinking is open here: what an opened step holds is what these are about,
+    /// and the folded line it opens as has its own test.
     fn pieces_at(
         rows: &[Row],
         expanded: &dyn Fn(usize, &Row) -> bool,
@@ -2757,11 +3005,24 @@ mod tests {
         writing: Option<usize>,
         flash: bool,
     ) -> Vec<Held> {
-        pieces(rows, expanded, figures, writing, flash, ROOM, None)
+        pieces(rows, expanded, &all_unfolded(), figures, writing, flash, ROOM, None)
     }
 
     /// A piece with no row behind it, for the tests that are about `draw` and not
     /// about where a piece came from.
+    /// The band, for the demo that prints the peer rows as a terminal would.
+    fn band(text: &str, phase: usize) -> Line<'static> {
+        let runs = vec![vec![(text.to_string(), Style::new().fg(ink::quiet()))]];
+        Line::from(
+            shimmer_runs(runs, ink::quiet(), ink::text(), Motion::Pass, phase)
+                .pop()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(text, style)| Span::styled(text, style))
+                .collect::<Vec<_>>(),
+        )
+    }
+
     fn held(piece: Piece) -> Held {
         Held { row: 0, head: 0, piece }
     }
@@ -3487,6 +3748,7 @@ mod tests {
             lead_style: Style::new(),
             air_above: false,
             air_below: false,
+            rail: false,
             lines: vec![vec![("\u{8868}".repeat(10), Style::new())]],
         };
         let drawn = draw(&[held(wide)], 10);
@@ -3510,6 +3772,7 @@ mod tests {
             lead_style: Style::new(),
             air_above: false,
             air_below: false,
+            rail: false,
             lines: vec![vec![("    abcdefghij".to_string(), Style::new())]],
         };
         for line in &draw(&[held(indented)], 8).lines {
@@ -3599,6 +3862,29 @@ mod tests {
         assert_eq!(bare[0].text(), "hm");
     }
 
+    /// A merged step's rate is the rate of all of it: tokens over the time they
+    /// took. Summing the rounds' own rates would say a step that spent two seconds
+    /// at 50 and three at 100 was doing 150 a second.
+    #[test]
+    fn a_merged_step_reports_its_whole_rate() {
+        let stream = rows(&[
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"first"}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"shell","args":{"command":"ls"}}]}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"shell","index":0,"result":{"result":{"exit_code":0,"stdout":"a\n"}}}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"second"}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"shell","args":{"command":"pwd"}}]}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"shell","index":0,"result":{"result":{"exit_code":0,"stdout":"/\n"}}}}"#,
+        ]);
+        // Rows: thought, call, thought, call.
+        let mine = |i: usize| match i {
+            0 => Some(Round { tokens: 100, tps: 50.0, estimated: false }),
+            2 => Some(Round { tokens: 300, tps: 100.0, estimated: false }),
+            _ => None,
+        };
+        let ps = pieces_at(&stream, &|_: usize, _: &Row| false, &mine, None, true);
+        assert_eq!(ps[1].text(), "Reasoning | 400 tokens, 80 tok/s  \u{b7}  Ran shell \u{d7}2");
+    }
+
     /// The thought under a reasoning row is drawn dimmer than the answer. It is
     /// worth reading, and it is not what was asked for: at full white it
     /// out-shouts the reply it was thinking towards.
@@ -3624,6 +3910,210 @@ mod tests {
         );
     }
 
+    /// A step opened is its calls. Its thinking is one line each -- the thought's
+    /// own opening words, which is what says whether it is worth opening -- so a
+    /// long stretch of work is a column of calls with the reasoning behind a rail
+    /// rather than a wall of prose with the calls buried in it.
+    #[test]
+    fn an_opened_step_folds_its_thinking_to_one_line_each() {
+        let stream = rows(&[
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"Look at the loader first. Then read the file."}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"shell","args":{"command":"ls"}}]}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"shell","index":0,"result":{"result":{"exit_code":0,"stdout":"a\n"}}}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"Now the loader is clear. Write the patch."}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"shell","args":{"command":"pwd"}}]}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"shell","index":1,"result":{"result":{"exit_code":0,"stdout":"/\n"}}}}"#,
+        ]);
+        // Rows: thought, call, thought, call. The step is open -- ctrl-t -- and the
+        // thinking inside it is not.
+        let folded = pieces(&stream, &all_open(), &|_| false, &no_figures(), None, true, ROOM, None);
+        let said: Vec<String> = folded.iter().map(|p| p.text()).collect();
+        assert!(said[0].starts_with("Now the loader is clear"), "{said:?}");
+        assert_eq!(folded[2].text(), "\u{25b8} Look at the loader first", "{said:?}");
+        // The step is named for the second thought, so the line under it cannot say
+        // the same words again: with nothing filed about that round it says what it
+        // is and lets the triangle say the rest.
+        assert_eq!(folded[4].text(), "\u{25b8} thinking", "{said:?}");
+        // This is a column to scroll rather than a page to read: one line each,
+        // whatever the thought's length, and the calls still a line each.
+        for piece in &folded[1..] {
+            assert_eq!(piece.lines.len(), 1, "{:?}", piece.text());
+        }
+
+        // The head's own thought says what its round cost, since whose words are on
+        // the head above it is already answered.
+        let mine = |i: usize| {
+            (i == 2).then_some(Round {
+                tokens: 820,
+                tps: 0.0,
+                estimated: false,
+            })
+        };
+        let cost = pieces(&stream, &all_open(), &|_| false, &mine, None, true, ROOM, None);
+        let said: Vec<String> = cost.iter().map(|p| p.text()).collect();
+        assert!(said.iter().any(|t| t == "\u{25b8} 820 tokens"), "{said:?}");
+
+        // Opened on the reader's own fold, the text is there again.
+        let open = pieces_at(&stream, &all_open(), &no_figures(), None, true);
+        let all: String = open.iter().map(|p| p.text()).collect::<Vec<_>>().join("\n");
+        assert!(all.contains("Then read the file"), "{all}");
+        assert!(!all.contains('\u{25b8}'), "an opened thought is not a triangle: {all}");
+    }
+
+    /// The count is of tools. A run of one kind says its own count instead, where
+    /// "Ran 2 tools" in front of "read ×2" would say two twice.
+    #[test]
+    fn a_run_of_tools_is_counted_as_tools() {
+        let stream = rows(&[
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"Look, then read."}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"shell","args":{"command":"ls"}}]}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"shell","result":{"result":{"exit_code":0,"stdout":"a\n"}}}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"file","args":{"action":"read","path":"a.py"}}]}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"file","result":{"result":{"content":"x"}}}}"#,
+        ]);
+        assert_eq!(ran(&[1, 2], &stream), "Ran 2 tools · read ×1, shell ×1");
+        assert_eq!(ran(&[1, 1], &stream), "Ran shell ×2");
+    }
+
+    /// The sweep over a step's name runs in one of two ramps: warm while the model
+    /// is thinking, blue while a tool is in flight. The two halves of a round are
+    /// then told apart at a glance instead of by reading what the row says.
+    #[test]
+    fn the_sweep_is_blue_while_a_tool_runs() {
+        let think = rows(&[
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"Reading the loader first. Then the patch."}}"#,
+        ]);
+        // The name is under the warm ramp, turned back on itself: at the top of the
+        // cycle the band is centred on its first character, and the far end of the same
+        // row is the tone the row always had.
+        let warm = pieces(&think, &all_open(), &|_| false, &no_figures(), Some(0), true, ROOM, Some(0));
+        assert_eq!(warm[0].lines[0][0].1.fg, Some(ink::text()), "the band starts on the name");
+        assert_eq!(
+            warm[0].lines[0].last().expect("a name").1.fg,
+            Some(ink::dim()),
+            "the thought's own ramp"
+        );
+
+        // The call it asked for, with nothing back yet: the blue one, resting at the
+        // cooled grey rather than the warm one.
+        let tool = rows(&[
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"Reading the loader first. Then the patch."}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"shell","args":{"command":"ls"}}]}}"#,
+        ]);
+        // `writing` is still the thought: the worker streams a thought, then asks for
+        // the call, and the row it was writing is not closed until the answer starts.
+        let cold = pieces(&tool, &all_open(), &|_| false, &no_figures(), Some(0), true, ROOM, Some(0));
+        assert_eq!(cold[0].lines[0][0].1.fg, Some(ink::running_dim()), "the name cools with the band");
+        // And that the step is live at all: the dot blinks, which a step the
+        // frontend could not see being written was not doing.
+        assert_eq!(cold[0].lead_style.fg, Some(blink(true)));
+
+        // The band itself is the blue one, and only the band: a quarter of a cycle in,
+        // the highlight is centred on the first character of the name.
+        let lit = pieces(&tool, &all_open(), &|_| false, &no_figures(), Some(0), true, ROOM, Some(SHIMMER));
+        let runs = &lit[0].lines[0];
+        assert_eq!(runs[0].1.fg, Some(ink::running()), "the band is not at the blue");
+        assert_eq!(
+            runs.last().expect("a name").1.fg,
+            Some(ink::running_dim()),
+            "the band lit the whole name"
+        );
+
+        // And it sets past the right before the cycle takes it round again: the frame
+        // before the wrap is the name's own colour, which is what keeps the pass from
+        // snapping the band back onto the left edge.
+        let name = lit[0].text().chars().count();
+        let setting = pieces(
+            &tool,
+            &all_open(),
+            &|_| false,
+            &no_figures(),
+            Some(0),
+            true,
+            ROOM,
+            Some(name + 2 * SHIMMER - 1),
+        );
+        assert!(
+            setting[0].lines[0].iter().all(|(_, s)| s.fg == Some(ink::running_dim())),
+            "the band is still on the name when the cycle ends: {:?}",
+            setting[0].lines[0]
+        );
+
+        // A call that has reported, with no thought after it yet: the wait between the
+        // tool and the model. Still the tools' blue, because the worker is still in
+        // them rather than thinking.
+        let back = rows(&[
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"Reading the loader first. Then the patch."}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"shell","args":{"command":"ls"}}]}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"shell","result":{"result":{"exit_code":0,"stdout":"a\n"}}}}"#,
+        ]);
+        let wait = pieces(&back, &all_open(), &|_| false, &no_figures(), Some(0), true, ROOM, Some(SHIMMER));
+        assert_eq!(
+            wait[0].lines[0][0].1.fg,
+            Some(ink::running()),
+            "the wait after a tool is not blue"
+        );
+
+        // Nothing in flight and nothing streaming: no sweep at all, and the name is
+        // the white it always was.
+        let idle = pieces(&tool, &all_open(), &|_| false, &no_figures(), None, true, ROOM, Some(40));
+        assert_eq!(idle[0].lines[0][0].1.fg, Some(ink::text()));
+    }
+
+    /// Not an assertion: what a frame costs on a long conversation, so the clock the
+    /// loop runs on is a decision rather than a guess. `QUIK_BENCH_ROUNDS` is how long
+    /// the conversation is, four rows a round. Run with
+    ///   cargo test -p cuacode-quik -- --ignored --nocapture measure_a_frame
+    #[test]
+    #[ignore]
+    fn measure_a_frame() {
+        let rounds: usize = std::env::var("QUIK_BENCH_ROUNDS")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(60);
+        let mut log = Vec::new();
+        for i in 0..rounds {
+            log.push(format!(
+                r#"{{"type":"token","id":"a","data":{{"state":"thinking","token":"Round {i}. Looking at the loader before the patch, because the last one was the wrong file and this one is the right one."}}}}"#
+            ));
+            log.push(format!(
+                r#"{{"type":"token","id":"a","data":{{"state":"tool_calls","token":[{{"name":"shell","args":{{"command":"grep -n \"match(\" lumen/router.py"}}}}]}}}}"#
+            ));
+            log.push(format!(
+                r#"{{"type":"token","id":"a","data":{{"state":"tool_output","token":"shell","result":{{"result":{{"exit_code":0,"stdout":"line {i}\n"}}}}}}}}"#
+            ));
+            log.push(format!(
+                r#"{{"type":"token","id":"a","data":{{"state":"content","token":"Answer {i}: the router compiles a pattern per segment and the tests cover one of them."}}}}"#
+            ));
+        }
+        let lines: Vec<&str> = log.iter().map(String::as_str).collect();
+        let rows = rows(&lines);
+        let (width, frames) = (100usize, 60);
+        for (what, open) in [("folded", false), ("opened", true)] {
+            let expanded = |_: usize, _: &Row| open;
+            let mut made = std::time::Duration::ZERO;
+            let mut drawn = std::time::Duration::ZERO;
+            let start = std::time::Instant::now();
+            for phase in 0..frames {
+                let at = std::time::Instant::now();
+                let ps = pieces(&rows, &expanded, &|_| false, &no_figures(), Some(0), true, width, Some(phase));
+                made += at.elapsed();
+                let at = std::time::Instant::now();
+                let _ = draw(&ps, width);
+                drawn += at.elapsed();
+            }
+            let each = start.elapsed() / frames as u32;
+            println!(
+                "{:>6}: {:?} a frame at {width} columns, {} rows (pieces {:?}, draw {:?})",
+                what,
+                each,
+                rows.len(),
+                made / frames as u32,
+                drawn / frames as u32
+            );
+        }
+    }
+
     /// Not an assertion: prints the peer rows as a terminal would draw them, and the
     /// shimmer at four points along its sweep. Run with
     ///   cargo test -p cuacode-quik -- --ignored --nocapture show_the_peer_rows
@@ -3641,6 +4131,7 @@ mod tests {
             let ps = pieces(
                 std::slice::from_ref(row),
                 &open,
+                &|_| true,
                 &no_figures(),
                 None,
                 true,
@@ -3658,7 +4149,7 @@ mod tests {
         );
         let msg = std::slice::from_ref(&log[1]);
         for (n, phase) in [0usize, 9, 18, 27].into_iter().enumerate() {
-            let ps = pieces(msg, &all_open(), &no_figures(), None, true, 68, Some(phase));
+            let ps = pieces(msg, &all_open(), &|_| true, &no_figures(), None, true, 68, Some(phase));
             // Every cell as the red channel it will be painted, so the falloff is visible
             // in a plain pipe: a block would be a run of one value beside a run of another.
             let d = draw(&ps, 68);
@@ -3687,7 +4178,7 @@ mod tests {
         println!("the status line, swept at the same four moments (quiet 9a -> dim a8):");
         let said = " running  \u{b7}  ctx 12k/200k  \u{b7}  waiting on work: clearing rust code";
         for (n, phase) in [0usize, 9, 18, 27].into_iter().enumerate() {
-            let line = sweep(said, phase);
+            let line = band(said, phase);
             let reds: Vec<String> = line
                 .spans
                 .iter()
@@ -3702,7 +4193,7 @@ mod tests {
             println!("  t{:<2} {}", n, reds.join(" "));
         }
         // The text is the same text, whatever the highlight is doing to its colour.
-        let plain: String = sweep(said, 0)
+        let plain: String = band(said, 0)
             .spans
             .iter()
             .map(|s| s.content.as_ref())
@@ -3748,7 +4239,7 @@ mod tests {
             r#"{"type":"token","id":"a","data":{"state":"peer","token":"peer message from work: building a\nfunction_a looks valid"}}"#,
         ]);
         let body = |phase: Option<usize>| {
-            pieces(&msg, &all_open(), &no_figures(), None, true, ROOM, phase)[1]
+            pieces(&msg, &all_open(), &|_| true, &no_figures(), None, true, ROOM, phase)[1]
                 .lines
                 .clone()
         };
@@ -3777,11 +4268,12 @@ mod tests {
                 .join("\n")
         };
 
-        // Two phases far enough apart that the wrap cannot land them on the same spot:
-        // the band travels a stride per step and wraps at the end of the line, so two
-        // phases a multiple of the line's length apart would be the same picture.
-        let a = body(Some(0));
-        let b = body(Some(4));
+        // Two phases where the highlight is over a character rather than off the end: a
+        // pass starts a whole ramp off the left of the words, so the first phases after
+        // the wrap light nothing at all. A stride per step, so these land two characters
+        // apart on the first line.
+        let a = body(Some(SHIMMER));
+        let b = body(Some(SHIMMER + 4));
         assert!(lit(&a) > 0 && lit(&b) > 0, "the band is lit at both phases");
         assert!(lit(&a) < all(&a), "and the rest of the line is not");
         // The band travels rather than the same cells blinking.
@@ -3826,22 +4318,13 @@ mod tests {
 
     /// The worker's small model names the step, and its name is what the row says.
     /// The thought's own first words are only the stand-in until it arrives.
-    /// The readout says what the round is doing, in a word, and the word changes
-    /// while nothing else on the screen does. A spinner says a thing is running; a
-    /// word says what, and one that moves says it is still running.
+    /// A call's row does not spend its columns on the directory it ran in.
     #[test]
-    fn the_readout_says_what_it_is_doing_in_a_word() {
-        let mut t = Turn::starting();
-        t.tokens = Some(12345);
-        t.estimated = true;
-        assert_eq!(turn(&t, 0, None, false).to_string(), "thinking \u{b7} ~12.3k tok \u{b7} 0.0s");
-        assert_eq!(turn(&t, 4000, None, false).to_string().split(' ').next(), Some("weighing"));
-        assert_eq!(turn(&t, 0, None, true).to_string().split(' ').next(), Some("running"));
-        // Ended: a dot and the figures, and no word about what it is doing.
-        t.ended = Some(std::time::Instant::now());
-        assert!(turn(&t, 0, None, false).to_string().starts_with(DOT));
-        // The box reserves the widest the word can get, not the one showing.
-        assert!(turn_room(&t, false) >= turn(&t, 4000, None, false).width());
+    fn a_call_result_leaves_out_the_directory_it_ran_in() {
+        assert_eq!(
+            call_result(r#"{"command":"wc -l x"}"#, "bytes 30 \u{b7} cwd /Users/me/work/thing \u{b7} 0.4s"),
+            "bytes 30 \u{b7} 0.4s"
+        );
     }
 
     /// The band is a band: a few characters brighter than the line they cross, and
@@ -3849,8 +4332,16 @@ mod tests {
     /// would be a colour change, not a highlight moving.
     #[test]
     fn the_band_lights_a_few_characters_and_leaves_the_rest() {
-        let line = shimmer("the status line", 2, ink::quiet(), ink::text());
-        let colours: Vec<Color> = line.iter().filter_map(|s| s.style.fg).collect();
+        let line = shimmer_runs(
+            vec![vec![("the status line".to_string(), Style::new().fg(ink::quiet()))]],
+            ink::quiet(),
+            ink::text(),
+            Motion::Pass,
+            2,
+        )
+        .pop()
+        .unwrap_or_default();
+        let colours: Vec<Color> = line.iter().filter_map(|(_, s)| s.fg).collect();
         assert!(colours.iter().any(|c| *c == ink::quiet()), "{colours:?}");
         assert!(colours.iter().any(|c| *c != ink::quiet()), "{colours:?}");
     }
@@ -3926,19 +4417,11 @@ mod tests {
             "{:?}",
             drawn.lines
         );
-        // The head, then the corner leading the first line of the detail straight
-        // under it: nothing between the two, because the corner is what joins them.
-        // Every continuation lines up with the text it follows, so the whole width
-        // is the text's to wrap in.
-        // The corner leads the detail under the head, and every continuation
-        // lines up with the text it follows, so the whole width is the text's.
-        let at = drawn
-            .lines
-            .iter()
-            .position(|l| l.spans[0].content.as_ref() == "\u{2514} ")
-            .expect("no detail under the head");
-        for line in &drawn.lines[at + 1..] {
-            assert_eq!(line.spans[0].content.as_ref(), "  ");
+        // A railed piece keeps its rail on every line it takes, including the ones
+        // it wrapped to: a paragraph that stops looking quoted halfway down is a
+        // paragraph you read as prose.
+        for line in &drawn.lines[1..] {
+            assert_eq!(line.spans[0].content.as_ref(), "  \u{2502} ", "{:?}", drawn.lines);
         }
     }
 
@@ -4031,10 +4514,12 @@ mod tests {
             screen,
             vec![
                 "\u{25cf} shell(date)",
-                "\u{2514} stdout:7B \u{b7} +1",
+                "  \u{2514} stdout:7B \u{b7} +1",
+                "",
                 "\u{25cf} it is Friday",
+                "",
                 "\u{25cf} shell(ls)",
-                "\u{2514} stdout:10B \u{b7} +1",
+                "  \u{2514} stdout:10B \u{b7} +1",
             ]
         );
 

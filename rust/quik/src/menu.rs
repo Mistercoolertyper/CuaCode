@@ -15,7 +15,7 @@ use ratatui::text::{Line, Span};
 
 use cuacode::transcript::Row;
 
-use crate::view::{call_ink, call_lead, call_result, clip, clip_runs, ink, runs_width, Run};
+use crate::view::{call_ink, call_lead, call_result, clip, clip_runs, ink, runs_width, thought_name, Run};
 
 /// How many rows a menu shows at once. Past this the window follows the
 /// selection rather than the menu growing: the field it sits above has to stay
@@ -203,6 +203,15 @@ pub fn calls(rows: &[Row]) -> Vec<Item> {
                     Item::painted(lead, lead_style, said, help, i.to_string())
                         .tinted(call_ink(result.as_deref())),
                 )
+            }
+            // A thought is in the list too, because a step with its thinking opened
+            // is a thing you want to close again, and hunting for the row on the
+            // screen to double-click is not a way to close anything.
+            Row::Thinking { text, .. } => {
+                let said = vec![(thought_name(text), Style::new().fg(ink::text()))];
+                Some(Item::painted(format!("\u{25cf} "), Style::new().fg(ink::done()), said,
+                                   "thinking".to_string(), i.to_string())
+                    .tinted(ink::done()))
             }
             _ => None,
         })
