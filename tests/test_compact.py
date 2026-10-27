@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from handler.agent import compact
 from handler.agent import main as agent_main
 from handler.agent import providers as registry
+from handler import context
 
 FAILS = []
 
@@ -271,6 +272,23 @@ m = _re.search(r"compacted (\d+) records to (\d+)", said or "")
 check("the report names the count that went in and the count that came out",
       bool(m) and int(m.group(1)) == len(recs) and int(m.group(2)) == len(sess._records),
       (said, len(recs), len(sess._records)))
+
+# 8. A screenshot is one image, not a hundred thousand tokens of prose. This is the
+#    whole reason a computer-use session folded at 80k of a 300k window: tokens()
+#    serialised the base64 and charged it as text, so two captures in the history
+#    read as a quarter of a million tokens and the trigger fired on every round.
+shot = "A" * 800_000
+pictured = ([{"role": "user", "content": "the request " * 20}] +
+            [{"role": "assistant", "content": "step " + "x" * 200} for _ in range(60)] +
+            [{"role": "tool", "tool_call_id": "c0", "content": [
+                {"type": "text", "text": "captured"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + shot}}]}])
+as_text = context.tokens_for_chars(len(json.dumps(pictured, default=str)))
+check("an encoded screenshot is charged as an image, not as prose",
+      compact.tokens(pictured) < 20_000, (compact.tokens(pictured), as_text))
+check("...which is the difference between folding and not at a 50k trigger",
+      as_text > 50_000 and compact.tokens(pictured) < 50_000,
+      (compact.tokens(pictured), as_text))
 
 print()
 if FAILS:

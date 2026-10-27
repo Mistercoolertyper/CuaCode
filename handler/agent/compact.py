@@ -273,8 +273,16 @@ def tokens(records: list) -> int:
     """What this costs in the window. Records or wire messages, either will do:
     both are json, and the difference between the two shapes is a few hundred
     characters of key names against a window measured in hundreds of thousands.
+
+    An encoded image is not text and must not be measured as any. One screenshot is
+    most of a megabyte of base64: read as characters it costs a hundred thousand
+    tokens of prose, more than a whole tool-using turn. `context.strip_images` cuts
+    them out and they are charged flat instead, the same way /context charges them,
+    so a computer-use transcript is measured at what it really costs.
     """
-    return context.tokens_for_chars(sum(len(json.dumps(r, default=str)) for r in records))
+    clean, images = context.strip_images(records)
+    chars = sum(len(json.dumps(r, default=str)) for r in clean)
+    return context.tokens_for_chars(chars) + images * context.IMAGE_TOKENS
 
 
 def check():
@@ -358,6 +366,12 @@ def check():
     fold(turn, dict(q, summary="s"))
     assert len(turn) == n2 - q["folded"] + 1
     assert turn[q["start"]].get("request", "").startswith("SECOND REQUEST")
+
+    # A screenshot costs one image, not the hundred thousand tokens its base64 would
+    # read as: counting it as prose is what folded a computer-use session every round
+    # while the provider was reporting 80k of a 300k window.
+    shot = {"t": "tool", "name": "screen", "result": {"image_base64": "A" * 400_000}}
+    assert tokens([shot]) < 2_000, tokens([shot])
     print("compact: ok")
 
 
