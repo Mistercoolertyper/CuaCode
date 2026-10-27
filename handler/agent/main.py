@@ -503,9 +503,7 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
         # every round, and a computer-use one is mostly base64.
         images.evict(messages, keep=int(settings.get("keep_images", images.DEFAULT_KEEP)))
         # Before the request, and only once per round: a conversation over its trigger
-        # folds now rather than waiting for the provider to refuse it. The figure is
-        # the last measured prompt when there is one, because a character count over
-        # a conversation full of tool results is the least reliable number here.
+        # folds now rather than waiting for the provider to refuse it.
         limit = compact.trigger(settings)
         if limit:
             # The larger of the two: the measured prompt is exact but a round old,
