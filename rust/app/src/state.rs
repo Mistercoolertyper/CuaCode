@@ -1918,14 +1918,10 @@ pub fn caption(cwd: &str, project: Option<&Path>) -> Caption {
 
 /// The state root: `CUACODE_HOME` when it is set, `~/.cuacode` otherwise. The
 /// same resolution `handler/session/store.py` does, because pointing the window
-/// at a different root is how its own tests run against a scratch home.
-pub fn state_root() -> PathBuf {
-    if let Some(root) = std::env::var_os("CUACODE_HOME") {
-        return PathBuf::from(root);
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join(".cuacode")
-}
+/// at a different root is how its own tests run against a scratch home. It is
+/// the shared crate's one copy, so the window and `doctor` cannot disagree
+/// about which directory they are talking about.
+pub use cuacode::state_root;
 
 /// Whether a session's directory is the project's or under it.
 ///

@@ -7,7 +7,9 @@
 //! `doctor --upgrade` is the same answer acted on: pull, rebuild, restart, and
 //! print every step because a pull and a build that fail are things to read.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 
 use crate::version::{self, News};
 use crate::worker;
@@ -85,7 +87,7 @@ pub fn run(args: &[String]) -> i32 {
         ),
         Err(why) => println!("{:<8} {why}", "worker"),
     }
-    println!("{:<8} {}", "state", state_root().display());
+    println!("{:<8} {}", "state", crate::state_root().display());
 
     if !options.upgrade {
         return 0;
@@ -138,30 +140,6 @@ fn print_help() {
     );
 }
 
-/// The state root: `CUACODE_HOME` when set, `~/.cuacode` otherwise. This is the
-/// same resolution the Python worker uses.
-fn state_root() -> PathBuf {
-    if let Some(root) = std::env::var_os("CUACODE_HOME") {
-        return PathBuf::from(root);
-    }
-    home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".cuacode")
-}
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE")
-            .or_else(|| std::env::var_os("HOME"))
-            .map(PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
-}
-
 /// Rebuild the frontends this platform can run. Unix keeps the tree's own
 /// `build.sh`; Windows calls Cargo directly so neither WSL nor Git Bash is a
 /// dependency.
@@ -200,32 +178,19 @@ fn rebuild_windows(root: &Path) -> Result<(), i32> {
     };
     let dev_cmd = find_vs_dev_cmd();
 
-    // `--bin` at the workspace root only sees the root package, so name the
-    // frontends' packages too. This process is the doctor executable: never
-    // put its bin in a normal Cargo invocation, because Windows cannot replace
-    // the image of a running process.
-    let frontends = [
-        "--release",
-        "-p",
-        "cuacode-quik",
-        "--bin",
-        "quik",
-        "-p",
-        "cuacode-fastrs",
-        "--bin",
-        "fastrs",
-    ];
-    cargo_build(&cargo, dev_cmd.as_deref(), &rust, &frontends, None)?;
-
-    // Stage a fresh doctor in a separate target directory. The launcher swaps
-    // it in before the next doctor launch, after this process has exited.
+    // Doctor first, in a target directory of its own: cargo may not write the
+    // image of the process running this function on Windows, and the launcher
+    // swaps the staged copy in on the next launch. Doing it before the
+    // frontends matters - a frontend build that fails must not be the reason a
+    // tree stays stuck on an old doctor, since doctor is what reports the
+    // failure.
     if rust.join("src/bin/cuacode-doctor.rs").is_file() {
         let target = rust.join("target").join("doctor-next");
         cargo_build(
             &cargo,
             dev_cmd.as_deref(),
             &rust,
-            &["--release", "--bin", "cuacode-doctor"],
+            &["--release", "-p", "cuacode-rs", "--bin", "cuacode-doctor"],
             Some(&target),
         )?;
         let built = target.join("release").join("cuacode-doctor.exe");
@@ -245,6 +210,24 @@ fn rebuild_windows(root: &Path) -> Result<(), i32> {
         }
         println!("staged the next doctor at {}", next.display());
     }
+
+    // One package and one binary per call, which is the pairing every cargo
+    // version agrees on: a `-p` list beside a `--bin` list can be read as "the
+    // bins of the default package" and fail with "no bin target named `quik`".
+    cargo_build(
+        &cargo,
+        dev_cmd.as_deref(),
+        &rust,
+        &["--release", "-p", "cuacode-quik", "--bin", "quik"],
+        None,
+    )?;
+    cargo_build(
+        &cargo,
+        dev_cmd.as_deref(),
+        &rust,
+        &["--release", "-p", "cuacode-fastrs", "--bin", "fastrs"],
+        None,
+    )?;
     Ok(())
 }
 
@@ -260,7 +243,9 @@ fn cargo_build(
 
     // rustc finds link.exe, but it does not find the MSVC and Windows SDK
     // libraries unless the caller's environment names them. VsDevCmd supplies
-    // LIB/INCLUDE, and vswhere finds the installation with the C++ tools.
+    // LIB/INCLUDE, and vswhere finds the installation with the C++ tools. No
+    // `-arch` is passed: VsDevCmd then takes the host it is running on, which
+    // is the target cargo builds for by default, x64 or arm64 alike.
     let mut command = if let Some(dev_cmd) = dev_cmd {
         let mut command = std::process::Command::new("cmd.exe");
         // Pass the batch file as its own token. Putting the whole command in
@@ -269,7 +254,7 @@ fn cargo_build(
         command
             .args(["/d", "/c", "call"])
             .arg(dev_cmd)
-            .args(["-arch=x64", ">nul", "&&"])
+            .args([">nul", "&&"])
             .arg(cargo)
             .arg("build")
             .args(args);
@@ -297,7 +282,7 @@ fn find_cargo() -> Option<PathBuf> {
     if let Some(path) = on_path("cargo.exe") {
         return Some(path);
     }
-    let path = home_dir()?.join(".cargo").join("bin").join("cargo.exe");
+    let path = crate::home_dir()?.join(".cargo").join("bin").join("cargo.exe");
     path.is_file().then_some(path)
 }
 
