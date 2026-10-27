@@ -37,7 +37,6 @@ use gpui_kit::*;
 use gpui_kit::component::WindowExt as _;
 
 mod agent;
-mod doctor;
 mod md;
 mod motion;
 mod state;
@@ -80,7 +79,7 @@ fn real_main() {
     // the state root. It is what both frontends point at when they have news
     // about an update, so it has to work with the window being the problem.
     if args.first().map(String::as_str) == Some("doctor") {
-        std::process::exit(doctor::run(&args[1..]));
+        std::process::exit(cuacode::doctor::run(&args[1..]));
     }
     // The worker's own main.py, which is the parent of the tree this binary was
     // built from. `CUACODE_WORKER` wins when it is set, which is what `run.sh`

@@ -7,6 +7,10 @@ edition = "2024"
 name = "cuacode"
 path = "src/lib.rs"
 
+[[bin]]
+name = "cuacode-doctor"
+path = "src/bin/cuacode-doctor.rs"
+
 # The shared half of the frontend side, and nothing that draws: `wire` is the
 # format, `worker` is the process, `session` is the conversation's state, and
 # `transcript` is the conversation as rows. Both frontends are built from it,

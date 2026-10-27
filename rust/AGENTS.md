@@ -57,9 +57,10 @@ knows which profile owns which file.
 - `src/version.rs` - the build stamp `build.rs` gives it, and the one question
   about origin that answers "is this code out of date". Fetches, so it is asked
   on a thread and never from a frame.
-- `app/doctor.rs` - `cuacode doctor`: the build, the tree, and how far behind it
-  is; `--upgrade` is the same answer acted on, pull then `./build.sh`. Prints and
-  exits, before any window is made.
+- `src/doctor.rs` - `cuacode doctor`: the build, the tree, and how far behind it
+  is; `--upgrade` is the same answer acted on, pull then rebuild. Its tiny
+  `cuacode-doctor` binary keeps Windows from having to overwrite a running
+  frontend. Prints and exits, before any window is made.
 - `fastrs/view.rs` - what a row looks like on the page, in cells.
 - `fastrs/menu.rs` - the `/`, `$` and `@` menus: the rows, the filter, and
   what choosing one writes onto the message. The calls list behind ctrl-o is the

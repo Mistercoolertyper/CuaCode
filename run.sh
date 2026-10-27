@@ -34,19 +34,6 @@ rust_bin_dir() {
     rust_frontends | awk -F: -v want="$1" '$2 == want && !seen { print $1; seen = 1 }'
 }
 
-# Tripwire for a fresh clone: the worker's dependencies must exist before any
-# frontend is started, and a missing install should announce itself at the
-# front door instead of as a stack trace from inside the worker. One import
-# checks, install.sh is the only thing that fixes it, and the sentinel keeps
-# the check off every later launch (touching requirements.txt brings it back).
-sentinel="bin/.deps-ok"
-if [ ! -f "$sentinel" ] || [ requirements.txt -nt "$sentinel" ]; then
-    if ! "${CUACODE_PYTHON:-python3}" -c 'import openai' >/dev/null 2>&1; then
-        ./install.sh || exit 1
-    fi
-    mkdir -p bin && touch "$sentinel"
-fi
-
 # No argument means the TUI: the command is named after the app, so a bare
 # `cuacode` has to land in a conversation rather than print a usage error. The
 # list moved to --list, which is a question and exits 0.
@@ -57,8 +44,8 @@ if [ "$1" = "--list" ] || [ "$1" = "list" ]; then
     echo "       ./run.sh <frontend> --resume     carry on with an earlier conversation"
     echo "       ./run.sh --usage [--days N] [--json]"
     echo "frontends:"
-    rust_frontends | awk -F: '{ printf "  %s  (%s)\n", $2, $1 }'
-    echo "  doctor  (rust/app)   the build, the tree, and how far behind origin it is"
+    rust_frontends | awk -F: '$2 != "cuacode-doctor" { printf "  %s  (%s)\n", $2, $1 }'
+    echo "  doctor  (rust)       the build, the tree, and how far behind origin it is"
     exit 0
 fi
 
@@ -93,17 +80,32 @@ export CUACODE_WORKER="${CUACODE_WORKER:-$PWD/main.py}"
 export CUACODE_CWD="${CUACODE_CWD:-$launch_dir}"
 
 # Also not a frontend: `doctor` prints what this tree is and exits, so it never
-# starts a session to answer. It lives in the app crate's binary because that is
-# the one built from every part of the tree and shipped as one thing, so the
-# binary is built on demand the way a frontend is and then asked its question.
-# `cuacode doctor --upgrade` is the same command acting on the answer.
+# starts a session to answer. Its small binary lives in the shared crate, which
+# is also what Windows' bin\cuacode.cmd runs, so both platforms answer from the
+# same implementation without needing the GUI. `cuacode doctor --upgrade` is
+# the same command acting on the answer.
 if [ "$name" = "doctor" ]; then
-    crate="$(rust_bin_dir cuacode)"
-    bin="rust/target/release/cuacode"
-    if [ ! -x "$bin" ] || [ -n "$(find "$crate/src" "$crate/Cargo.toml" -newer "$bin" -print -quit)" ]; then
-        (cd "$crate" && cargo build --release --bin cuacode) >&2
+    bin="rust/target/release/cuacode-doctor"
+    [ "${OS:-}" = "Windows_NT" ] && bin="$bin.exe"
+    if [ ! -x "$bin" ] || [ -n "$(find rust/src rust/Cargo.toml -newer "$bin" -print -quit)" ]; then
+        (cd rust && cargo build --release --bin cuacode-doctor) >&2
     fi
-    exec "$bin" doctor "$@"
+    exec "$bin" "$@"
+fi
+
+# Tripwire for a fresh clone: the worker's dependencies must exist before any
+# frontend is started, and a missing install should announce itself at the
+# front door instead of as a stack trace from inside the worker. One import
+# checks, install.sh is the only thing that fixes it, and the sentinel keeps
+# the check off every later launch (touching requirements.txt brings it back).
+# Doctor is above this on purpose: it diagnoses a broken worker rather than
+# needing one.
+sentinel="bin/.deps-ok"
+if [ ! -f "$sentinel" ] || [ requirements.txt -nt "$sentinel" ]; then
+    if ! "${CUACODE_PYTHON:-python3}" -c 'import openai' >/dev/null 2>&1; then
+        ./install.sh || exit 1
+    fi
+    mkdir -p bin && touch "$sentinel"
 fi
 
 crate="$(rust_bin_dir "$name")"

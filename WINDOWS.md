@@ -29,13 +29,17 @@ at another interpreter, and it wins over the checkout's environment.
 cd rust
 cargo build --release -p cuacode-quik --bin quik
 cargo build --release -p cuacode-fastrs --bin fastrs
+cargo build --release -p cuacode-rs --bin cuacode-doctor
+cd ..
 ```
 
 The binaries are written to `rust\target\release\quik.exe` and
-`rust\target\release\fastrs.exe`.
+`rust\target\release\fastrs.exe`. The doctor binary is written to
+`rust\target\release\cuacode-doctor.exe`.
 
 `quik` is the compact terminal frontend. `fastrs` is the larger one. Both use
-the same worker and the same session files.
+the same worker and the same session files. The remaining commands assume you
+are back at the repository root.
 
 ## Launch from source
 
@@ -46,6 +50,27 @@ $env:CUACODE_PYTHON = "$PWD\.venv\Scripts\python.exe"
 $env:CUACODE_WORKER = "$PWD\main.py"
 .\rust\target\release\quik.exe
 ```
+
+For the `cuacode` command, put this checkout's `bin` directory on `PATH`:
+
+```powershell
+$env:PATH = "$PWD\bin;$env:PATH"
+cuacode
+```
+
+With no arguments the launcher starts `quik`. Diagnostics do not open a
+terminal UI:
+
+```powershell
+cuacode doctor
+cuacode doctor --upgrade
+```
+
+`doctor` prints the build, checkout, update, worker, and state-root status and
+exits. `--upgrade` performs a fast-forward pull and rebuilds the Windows
+frontends with Cargo; it does not require WSL or Git Bash. The running doctor is
+staged as `cuacode-doctor.next.exe` and replaces itself before the next `doctor`
+launch, because Windows cannot overwrite a running executable.
 
 `CUACODE_CWD` selects the directory stamped on a new session. If it is unset,
 the directory in which the frontend was started is used.
