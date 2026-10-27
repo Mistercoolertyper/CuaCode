@@ -242,24 +242,33 @@ fn cargo_build(
     println!("$ cargo build {}", args.join(" "));
 
     // rustc finds link.exe, but it does not find the MSVC and Windows SDK
-    // libraries unless the caller's environment names them. VsDevCmd supplies
-    // LIB/INCLUDE, and vswhere finds the installation with the C++ tools. No
-    // `-arch` is passed: VsDevCmd then takes the host it is running on, which
-    // is the target cargo builds for by default, x64 or arm64 alike.
+    // libraries unless something names them: VsDevCmd is what supplies LIB and
+    // INCLUDE. `-arch` has to be said out loud. VsDevCmd's own default is x86
+    // whatever the machine is, and that points LIB at the 32-bit libraries,
+    // which links nothing for a 64-bit target.
     let mut command = if let Some(dev_cmd) = dev_cmd {
         let mut command = std::process::Command::new("cmd.exe");
         // Pass the batch file as its own token. Putting the whole command in
         // one string makes Rust escape the embedded quotes for CreateProcess,
         // but cmd.exe does not understand backslash-escaped quotes.
+        command.args(["/d", "/c", "call"]).arg(dev_cmd);
+        if let Some(arch) = vs_arch() {
+            command.arg(format!("-arch={arch}"));
+        }
         command
-            .args(["/d", "/c", "call"])
-            .arg(dev_cmd)
             .args([">nul", "&&"])
             .arg(cargo)
             .arg("build")
             .args(args);
         command
     } else {
+        // No developer environment: cargo links with whatever libraries this
+        // process inherited, which on a plain shell is none, and the failure
+        // arrives two screens later as a linker complaint about msvcrt.lib.
+        // Say it here, where it is the answer.
+        eprintln!(
+            "cuacode: no Visual Studio developer environment found, so cargo runs with this shell's environment"
+        );
         let mut command = std::process::Command::new(cargo);
         command.arg("build").args(args);
         command
@@ -294,6 +303,17 @@ fn on_path(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// The arch VsDevCmd should set up: the one this binary was built for, which
+/// is what cargo builds for unless a target was named.
+#[cfg(windows)]
+fn vs_arch() -> Option<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Some("x64"),
+        "aarch64" => Some("arm64"),
+        _ => None,
+    }
+}
+
 #[cfg(windows)]
 fn find_vs_dev_cmd() -> Option<PathBuf> {
     let program_files_x86 = std::env::var_os("ProgramFiles(x86)")
@@ -303,28 +323,48 @@ fn find_vs_dev_cmd() -> Option<PathBuf> {
         .join("Microsoft Visual Studio")
         .join("Installer")
         .join("vswhere.exe");
-    if vswhere.is_file() {
-        let output = std::process::Command::new(vswhere)
-            .args([
-                "-all",
-                "-products",
-                "*",
-                "-requires",
-                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-                "-property",
-                "installationPath",
-            ])
+    if !vswhere.is_file() {
+        return None;
+    }
+    // The component id is Visual Studio 2022's. It is asked for first because it
+    // is the exact match, and a plain search for the batch file is the fallback,
+    // because a version that names its C++ workload differently answers nothing
+    // to the first query and the caller is then told there is no toolchain.
+    let queries: [&[&str]; 2] = [
+        &[
+            "-all",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+        ],
+        &["-all", "-products", "*", "-find", "**\\Common7\\Tools\\VsDevCmd.bat"],
+    ];
+    for args in queries {
+        let Some(output) = std::process::Command::new(&vswhere)
+            .args(args)
             .output()
-            .ok()?;
-        if output.status.success() {
-            for line in String::from_utf8_lossy(&output.stdout).lines() {
-                let candidate = PathBuf::from(line.trim())
-                    .join("Common7")
-                    .join("Tools")
-                    .join("VsDevCmd.bat");
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
+            .ok()
+            .filter(|output| output.status.success())
+        else {
+            continue;
+        };
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            // One query prints an install directory, the other a full path.
+            let named = PathBuf::from(line);
+            let candidate = if named.is_file() {
+                named
+            } else {
+                named.join("Common7").join("Tools").join("VsDevCmd.bat")
+            };
+            if candidate.is_file() {
+                return Some(candidate);
             }
         }
     }
