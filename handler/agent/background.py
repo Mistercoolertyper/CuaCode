@@ -4,6 +4,8 @@ already running, which is why this cannot be an input-schema flag, since by then
 started. Nothing is pushed at the model: a finished job waits for the background tool or the
 loop's one-line notice between rounds, a mid-round result landing mid-task.
 """
+from __future__ import annotations
+
 import itertools, threading, time
 
 from handler.agent.interrupt import Call
