@@ -318,8 +318,16 @@ def _todo_note(ctx) -> str:
     except Exception:
         return ""
     if not s: return ""
-    where = f"in progress: {s['current']}" if s["current"] else f"next: {s['next']}"
-    return (f"todo: {s['done']}/{s['total']} done, {s['open']} open, {where}\n\n"
+    # The head is a row, so it is short enough to draw whole: the counts and the step
+    # being worked on, cut at a word. The block below says it in full for the model;
+    # a frontend draws only this line, because that is all a person needs from it.
+    def cut(text) -> str:
+        t = " ".join(str(text or "").split())
+        return t if len(t) <= 40 else t[:40].rsplit(" ", 1)[0].rstrip(" ,;:-(") + "\u2026"
+    where = (f"in progress: {cut(s['current'])}" if s["current"]
+             else f"next: {cut(s['next'])}")
+    head = f"todo: {s['done']}/{s['total']} done, {s['open']} open, {where}"
+    return (f"{head}\n\n"
             "<todo_status>\n"
             f"{s['done']}/{s['total']} done, {s['open']} open, {where}.\n"
             "You have not touched the list in a while. Update it with the todo tool if you have\n"

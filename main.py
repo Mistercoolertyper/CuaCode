@@ -979,7 +979,7 @@ while True:
                         # the whole input a small model needs to name it, and the
                         # calls are about to run, which is the room the naming has.
                         stepname.maybe_name(ipc.send, chunk.get("thinking", ""),
-                                            chunk.get("tool_calls") or [])
+                                            chunk.get("tool_calls") or [], text)
                     elif typ == "cancelled":
                         # No rewind: the loop closed the round off and every
                         # tool_call has an interrupted result, so messages is resumable.
