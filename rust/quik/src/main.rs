@@ -2431,15 +2431,20 @@ fn waiting_words(name: &str) -> String {
 fn run(mut app: App) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    // The enhanced keyboard protocol is what makes a shifted enter reportable
+    // as itself: without it most terminals send the same byte plain enter
+    // sends, so shift-enter would send a half-written message. A terminal that
+    // does not know the sequence ignores it, and ctrl-j still gets a newline
+    // in everywhere. Crossterm's legacy Windows console backend does not
+    // implement the sequence, so Windows keeps its native key handling.
+    #[cfg(not(target_os = "windows"))]
     execute!(
         stdout,
-        EnterAlternateScreen,
-        // The enhanced keyboard protocol is what makes a shifted enter reportable
-        // as itself: without it most terminals send the same byte plain enter
-        // sends, so shift-enter would send a half-written message. A terminal that
-        // does not know the sequence ignores it, and ctrl-j still gets a newline
-        // in everywhere.
-        event::PushKeyboardEnhancementFlags(event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+        event::PushKeyboardEnhancementFlags(event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )?;
+    execute!(
+        stdout,
         // Rows fold on a double click, which a terminal only reports if it is
         // asked to. The cost is the terminal's own drag-to-select.
         EnableMouseCapture,
@@ -2510,9 +2515,10 @@ fn run(mut app: App) -> io::Result<()> {
         sess.close();
     }
     disable_raw_mode()?;
+    #[cfg(not(target_os = "windows"))]
+    execute!(term.backend_mut(), event::PopKeyboardEnhancementFlags)?;
     execute!(
         term.backend_mut(),
-        event::PopKeyboardEnhancementFlags,
         DisableMouseCapture,
         DisableBracketedPaste,
         LeaveAlternateScreen,

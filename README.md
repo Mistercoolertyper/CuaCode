@@ -55,9 +55,11 @@ no need to `activate` anything to run the app. A `venv/` or `.venv/` next to
   back black.
 - **Linux** - needs `xdotool` on PATH for clicks, keys and window titles
   (`apt install xdotool` / `pacman -S xdotool`). X11; Wayland is not handled.
-- **Windows** - `pywin32` and `psutil`, installed for you. If a frontend starts
-  but nothing ever happens, see [Worker discovery](#worker-discovery) - a
-  zero-byte `python3.exe` from the Microsoft Store is the usual reason.
+- **Windows** - native Win32 computer use, no WSL or VM required. `pywin32` and
+  `psutil` are installed for you. Setup and build notes are in
+  [CuaCode on Windows](WINDOWS.md). If a frontend starts but nothing ever
+  happens, see [Worker discovery](#worker-discovery) - a zero-byte
+  `python3.exe` from the Microsoft Store is the usual reason.
 
 ## First run
 

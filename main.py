@@ -28,7 +28,25 @@ class Ctx(dict):
     cwd = property(lambda s: s.get("cwd"))
 
 
-ctx = Ctx(ipc.terminal_info)
+def terminal_ctx(data) -> Ctx:
+    """Terminal facts, with the foreground app filled in on Windows.
+
+    The Rust frontend can only probe this cheaply on macOS; the worker already
+    has pywin32 and can name the terminal it is speaking to. Without a name,
+    screenshot cannot park the agent's own window and app_open cannot find it
+    when the two swap places.
+    """
+    info = dict(data or {})
+    if os.name == "nt" and not info.get("frontmost_app"):
+        try:
+            from tools.screenshot._capture_windows import active_app_name
+            info["frontmost_app"] = active_app_name()
+        except Exception:
+            pass
+    return Ctx(info)
+
+
+ctx = terminal_ctx(ipc.terminal_info)
 
 # A session exists from boot: its folder is born with the first record and an
 # unused one is dropped on exit. Effort starts at the account default.
@@ -540,7 +558,7 @@ while True:
         if env.type == "terminal":
             ipc.reply(env, "status", {"terminal": ipc.terminal_info})
             ipc.terminal_info = env.data
-            ctx = Ctx(ipc.terminal_info)
+            ctx = terminal_ctx(ipc.terminal_info)
             # The boot session predates this envelope, so its frontend and cwd
             # are stamped here; neither writes, so no folder is born yet.
             sess.set_frontend(ctx.get("term_program") or "")

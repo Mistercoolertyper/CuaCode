@@ -62,9 +62,16 @@ def _kill(proc):
     """The whole process group. Killing just the shell orphans whatever it
     spawned, which holds our pipe open and hangs the read."""
     try:
-        if WINDOWS: proc.kill()
+        if WINDOWS:
+            # Windows has no process-group signal here. taskkill /T walks the
+            # child tree, so a timeout or cancel does not leave a build holding
+            # the stdout pipe open after its PowerShell parent is gone.
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=5)
+            if proc.poll() is None: proc.kill()
         else: os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
+    except (ProcessLookupError, PermissionError, OSError, subprocess.TimeoutExpired):
         proc.kill()
 
 def _collect(proc, timeout: float, cancel) -> tuple[str, str, str]:
