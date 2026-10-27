@@ -67,11 +67,20 @@ impl Row {
         let mut lines = text.lines();
         let head = lines.next().unwrap_or("").trim().to_string();
         let rest = lines.filter(|l| !l.trim().is_empty()).count();
-        if tagged && rest > 0 {
-            Row::Notice { head, hidden: rest }
+        // A tag whose body is the head said again, plus an instruction addressed to
+        // the model: `todo_status` restates the plan that produced it, and the plan
+        // itself is rows on the screen already. Counting its lines would put "+4
+        // lines" beside a notice with nothing behind it to read.
+        let restated = rest > 0 && text.contains("<todo_status>");
+        // A tagged block whose body is boilerplate keeps its head and loses only the
+        // count; an untagged one is a single line of runtime words and is drawn as
+        // written.
+        let (head, hidden) = if tagged {
+            (head, if restated { 0 } else { rest })
         } else {
-            Row::Notice { head: text.trim().to_string(), hidden: 0 }
-        }
+            (text.trim().to_string(), 0)
+        };
+        Row::Notice { head, hidden }
     }
 
     /// A peer row, from the head line the worker sent and whatever it hid.
@@ -607,6 +616,22 @@ mod tests {
                 Row::Notice { head: "recall: 3 memories outside this scope".into(), hidden: 5 },
                 Row::Notice { head: "provider -> ollama".into(), hidden: 0 },
             ]
+        );
+    }
+
+    /// The todo note is a state the runtime handed the model, and its block says the
+    /// same thing again plus a nudge at the model. A row that counted it said
+    /// "+5 lines" beside a notice with nothing behind it, once per step of the run.
+    #[test]
+    fn the_todo_note_is_one_line_and_counts_nothing() {
+        let mut t = Transcript::default();
+        t.apply(&ev(r#"{"type":"token","id":"a","data":{"state":"notice","token":"todo: 2/7 done, 5 open, in progress: Improve the namer's input\n\n<todo_status>\n2/7 done, 5 open, in progress: Improve the namer's input.\nYou have not touched the list in a while. Update it with the todo tool if you have\nmoved on, or clear it if it no longer describes what you are doing.\n</todo_status>"}}"#));
+        assert_eq!(
+            t.rows,
+            vec![Row::Notice {
+                head: "todo: 2/7 done, 5 open, in progress: Improve the namer's input".into(),
+                hidden: 0,
+            }]
         );
     }
 

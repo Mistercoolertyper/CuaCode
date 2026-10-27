@@ -84,12 +84,18 @@ class Session:
 
     # Every record is stamped when it happens, so no second field is needed.
     # replay only reads the keys it knows, so `ts` never reaches the provider.
-    def add_user(self, text: str, images: list = None):
+    def add_user(self, text: str, images: list = None, note: bool = False):
         # Asked before the record is appended, and at all because add_user also carries
         # runtime notices: a background job finishing must not name the conversation.
         first = not any(r.get("t") == "user" for r in self._records) and \
                 not any(r.get("t") == "user" for r in self._pending)
         rec = {"t": "user", "ts": store.now_iso(), "text": text}
+        # Runtime text the worker put in front of the model rather than the person's own
+        # words: a stale todo, a steer note, a job that finished. Still a user record,
+        # because that is the turn the provider was handed -- but a reopened
+        # conversation has to draw it as the notice it was, and as a plain `user`
+        # record it read back as a line the person had typed.
+        if note: rec["note"] = True
         # Attachments ([{"name": "shot.png", "b64": "..."}]) ride the turn they arrived
         # with, part of what the user said; base64 becomes a blob ref on the way to disk.
         if images: rec["images"] = list(images)
