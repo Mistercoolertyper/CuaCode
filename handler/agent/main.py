@@ -459,10 +459,8 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
     # Rounds lost to a connection that dropped before producing anything: the one
     # failure that retries invisibly, so a per-round counter would retry forever.
     stream_retries = 0
-    # The prompt size the provider last charged for, carried across rounds. `usage`
-    # belongs to the round it arrived in and is cleared with it, so a trigger read
-    # off that was always zero and the fallback -- a character count over the whole
-    # history -- was the only number it ever saw.
+    # The prompt size the provider last charged for, carried across rounds: `usage` is
+    # cleared at the top of each one, which made a trigger read off it always zero.
     usage, measured = {}, 0
     # Whether a peer message is waiting. Asked on the idle poll for the whole round, because
     # a worker sits through a long tool call with nothing on stdout and the main loop that
@@ -480,9 +478,7 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
         mark = len(messages)
         yield {"type": "round"}
         thinking, content, calls, last = "", "", [], None
-        # Carried before it is cleared: this round's request contains everything the
-        # last one did and more, and the prompt the provider actually charged for is
-        # better evidence of its size than any count of ours.
+        # Carried before the clear: the provider's own count beats any estimate of ours.
         measured = int((usage or {}).get("in") or 0) or measured
         # Per round, not per run: the count on the next request already includes
         # everything this one added, so old numbers would only be a stale round's.
@@ -506,13 +502,11 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
         # folds now rather than waiting for the provider to refuse it.
         limit = compact.trigger(settings)
         if limit:
-            # The larger of the two: the measured prompt is exact but a round old,
-            # and the estimate covers what has been appended since. Neither alone is
-            # the size of the request in hand.
+            # The larger of the two: measured is exact but a round old, the estimate
+            # covers what has been appended since.
             used = max(measured, compact.tokens(messages))
             folded = _compact_now(messages, used, limit, ctx=ctx)
-            # Whatever it was, it describes a history that no longer exists.
-            if folded: measured = 0
+            if folded: measured = 0        # it described a history that no longer exists
             # Both halves of the fold go out before the notice: start, then done,
             # then what it bought.
             for ev in outbox: yield ev

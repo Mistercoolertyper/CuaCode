@@ -315,13 +315,8 @@ def _console_title() -> str:
 
 
 def _visible_window(pid: int, hint: str = "") -> int | None:
-    """The window a process owns that a person would call its window.
-
-    Programmatic windows are skipped: an invisible window is not on screen, and a
-    tool window is a helper rather than the frame around the content. When more
-    than one is left, a title matching the console's own wins, because a terminal
-    names its window after the tab that is showing.
-    """
+    """The visible, non-tool window a process owns, preferring a title that matches
+    the console's own: a terminal names its window after the tab that is showing."""
     found = []
     def cb(hwnd, _):
         if _pid_of(hwnd) != pid: return
@@ -358,15 +353,11 @@ def _parent_pid(pid: int) -> int:
 
 
 def self_window() -> int | None:
-    """The window hosting this process, not just a window of the same app.
+    """The window hosting this process, not just some window of the same app.
 
-    Two terminals are two windows of one executable, so asking for a window by
-    process name snaps whichever the enumeration reaches first - an elevated
-    session could move a plain one. The console this process is attached to is
-    the identity that tells them apart: a classic console window is the answer
-    itself, and under Windows Terminal the console handle is the tab's hidden
-    pseudo-console, so the walk continues out through the processes that own it
-    until one of them has the visible frame.
+    A classic console window is the answer itself; under Windows Terminal the console
+    handle is the tab's hidden pseudo-console, so the walk climbs the processes that
+    own it until one of them has the visible frame.
     """
     console = _console_window()
     if console and _class_of(console) == "ConsoleWindowClass":
@@ -387,12 +378,7 @@ def self_window() -> int | None:
     return None
 
 
-def window_exists(hwnd) -> bool:
-    """Whether a handle still names a window, which is all a stale handle needs to fail."""
-    try: return bool(hwnd) and bool(win32gui.IsWindow(int(hwnd)))
-    except Exception: return False
-
-
 def wait_for_window(hwnd: int, timeout: float = 8) -> bool:
     """The handle came out of an enumeration of live windows; confirm it still is."""
-    return window_exists(hwnd)
+    try: return bool(hwnd) and bool(win32gui.IsWindow(int(hwnd)))
+    except Exception: return False

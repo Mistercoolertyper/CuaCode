@@ -183,32 +183,17 @@ def park_active(self_name: str | None = None, focus: bool = False) -> str:
         return ""
 
 
-def park_self(self_name: str | None, self_handle=None) -> bool:
+def park_self(self_name: str | None) -> bool:
     """The agent's own terminal, in the left strip, never raised.
 
-    A handle beats a name here. Two terminals are two windows of the same
-    executable, and a name can only say "some window of this app": an elevated
-    session holding that name would move the other terminal instead of itself.
-    The frontend passes the window that was in front when this session started,
-    and Windows can also name the window from the console it is attached to.
-    The other backends keep the name they have always used.
+    Two terminals are two windows of one executable, so a name names the wrong one
+    half the time. The backend answers with the window this console is attached to
+    where it can (Windows); everywhere else the name is the answer.
     """
-    if self_handle:
-        try:
-            if backend().window_exists(self_handle) and _snap(self_handle, SELF_REGION, False):
-                return True
-        except Exception:                                       # noqa: BLE001
-            pass
-    try:
-        find = getattr(backend(), "self_window", None)
-        hwnd = find() if find else None
-    except Exception:                                           # noqa: BLE001
-        hwnd = None
-    if hwnd:
-        return _snap(hwnd, SELF_REGION, False)
-    if not self_name:
-        return False
-    return _snap(self_name, SELF_REGION, False)
+    try: hwnd = getattr(backend(), "self_window", lambda: None)()
+    except Exception: hwnd = None                               # noqa: BLE001
+    hwnd = hwnd or self_name
+    return _snap(hwnd, SELF_REGION, False) if hwnd else False
 
 
 def forget(name: str) -> None:

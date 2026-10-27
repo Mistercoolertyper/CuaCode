@@ -32,27 +32,25 @@ def run(args: dict, ctx) -> dict:
     grid_size = max(2, int(args.get("grid_size") or 100))
     session_dir = getattr(ctx, "session_dir", None) if ctx else None
     self_name = getattr(ctx, "self_identity", None)
-    self_handle = getattr(ctx, "self_handle", None)
 
     # Park the terminal in the left strip, without raising it, on every capture: nothing
     # else re-checks parking, and raising here would leave the terminal focused and eat
     # the agent's next click. A window-manager failure never propagates; losing the shot
     # is worse than a bad parking job.
     self_snapped = False
-    if self_name or self_handle:
+    if self_name:
         try:
-            self_snapped = _window.park_self(self_name, self_handle)
+            self_snapped = _window.park_self(self_name)
         except Exception:
             self_snapped = False
 
-    # Same guarantee for apps the agent just opened: a process shows up in the app list
-    # before it has a window, so parking is redone here on the next call, and
-    # already-parked windows drift back into place. A launched app is raised as well
-    # as placed: resizing a window behind the terminal leaves the person watching a
-    # frame they cannot see into, and leaves the keyboard pointed at the terminal.
+    # Raising is a Windows need: input there follows the foreground, so the window being
+    # driven has to hold it. On macOS activation decides the keyboard and can hop spaces,
+    # and this runs on every capture. park_known only corrects drift, so it stays quiet.
+    raise_it = _window.OS == "Windows"
     opened = []
     try:
-        opened = _window.park_new(self_name, focus=True)
+        opened = _window.park_new(self_name, focus=raise_it)
         _window.park_known(self_name)
     except Exception:
         pass
@@ -65,7 +63,7 @@ def run(args: dict, ctx) -> dict:
     active_app = ""
     if self_name:
         try:
-            active_app = _window.park_active(self_name, focus=True)
+            active_app = _window.park_active(self_name, focus=raise_it)
         except Exception:
             active_app = ""
 

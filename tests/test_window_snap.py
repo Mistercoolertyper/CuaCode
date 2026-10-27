@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """The agent's own window is the one its console is attached to.
 
-A process name is not an identity on Windows: two terminals are two windows of
-the same executable, and a session that looked itself up by name moved the
-neighbouring terminal instead. These checks pin the console walk, the boot-time
-handle, and the caller that has to prefer a handle over a name.
+A process name is not an identity on Windows: two terminals are two windows of the
+same executable, and looking itself up by name moved the neighbour instead.
 
     python tests/test_window_snap.py
 """
@@ -63,16 +61,12 @@ from tools import _window
 
 
 class Backend:
-    def __init__(self, hwnd, alive=True):
+    def __init__(self, hwnd):
         self.hwnd = hwnd
-        self.alive = alive
         self.snapped = []
 
     def self_window(self):
         return self.hwnd
-
-    def window_exists(self, hwnd):
-        return self.alive
 
     def snap_region(self, handle, x0, x1, focus=False):
         self.snapped.append((handle, x0, x1, focus))
@@ -81,19 +75,14 @@ class Backend:
 
 backend = Backend(888)
 _window._BACKEND = backend
-check("the boot handle wins over every name lookup", _window.park_self("WindowsTerminal", 555))
-check("...and is the only window moved",
-      backend.snapped == [(555, _window.SELF_REGION[0], _window.SELF_REGION[1], False)],
+check("the console window is moved, not a window of the name", _window.park_self("WindowsTerminal"))
+check("...and the name is never asked for",
+      backend.snapped == [(888, _window.SELF_REGION[0], _window.SELF_REGION[1], False)],
       backend.snapped)
-check("a handle is enough without a name", _window.park_self(None, 556))
 
-backend = Backend(777)
+backend = Backend(None)
 _window._BACKEND = backend
-check("a stale boot handle falls back to the console window", _window.park_self("WindowsTerminal", 555))
-
-backend = Backend(None, alive=False)
-_window._BACKEND = backend
-check("no handle anywhere falls back to the name", _window.park_self("WindowsTerminal", 0))
+check("no console window falls back to the name", _window.park_self("WindowsTerminal"))
 check("...using the name the caller passed",
       backend.snapped == [("WindowsTerminal", 0.0, 0.3, False)], backend.snapped)
 

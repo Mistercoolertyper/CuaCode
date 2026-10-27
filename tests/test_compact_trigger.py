@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Where a conversation folds when one model's window is not like the others.
 
-`compact` is a global default. A model reached through a bridge that publishes no
-window - a local OpenAI-compatible proxy, say - could only be given the same
-count as every other model, so a 300k model folded at a 180k default. A count
-under `model_params[<model>].compact` is that model's own answer.
+`compact` is the global default; `model_params[<model>].compact` is that model's own
+answer, so a 300k model behind a bridge that publishes no window need not fold at the
+180k default meant for a smaller one.
 
     python3 tests/test_compact_trigger.py
 """

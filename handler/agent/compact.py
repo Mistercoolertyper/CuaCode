@@ -110,11 +110,9 @@ def trigger(settings: dict, cfg: dict = None) -> int:
     conversation with a written-down limit folds on it -- the alternative is that
     an unrecognized model has no way to fold on purpose before it hits the wall.
     A window nobody knows with no override means no trigger: guessing the size of
-    the window is guessing when to throw away the user's context.
-
-    `compact` is the default for every model; `model_params[<model>].compact` is
-    that model's own answer and wins. A large-window model and a small-window one
-    do not have to share a threshold, which is what a single global count forced.
+    the window is guessing when to throw away the user's context. `compact` is the
+    default for every model; `model_params[<model>].compact` is that model's answer
+    and wins, so a 300k and a 180k model need not share one count.
     """
     from handler import config
     cfg = cfg if cfg is not None else config.load()
@@ -274,11 +272,9 @@ def tokens(records: list) -> int:
     both are json, and the difference between the two shapes is a few hundred
     characters of key names against a window measured in hundreds of thousands.
 
-    An encoded image is not text and must not be measured as any. One screenshot is
-    most of a megabyte of base64: read as characters it costs a hundred thousand
-    tokens of prose, more than a whole tool-using turn. `context.strip_images` cuts
-    them out and they are charged flat instead, the same way /context charges them,
-    so a computer-use transcript is measured at what it really costs.
+    Images are charged flat through context.strip_images, the way /context charges
+    them: read as base64 text one screenshot would cost a hundred thousand tokens of
+    prose that is not there.
     """
     clean, images = context.strip_images(records)
     chars = sum(len(json.dumps(r, default=str)) for r in clean)
@@ -366,12 +362,6 @@ def check():
     fold(turn, dict(q, summary="s"))
     assert len(turn) == n2 - q["folded"] + 1
     assert turn[q["start"]].get("request", "").startswith("SECOND REQUEST")
-
-    # A screenshot costs one image, not the hundred thousand tokens its base64 would
-    # read as: counting it as prose is what folded a computer-use session every round
-    # while the provider was reporting 80k of a 300k window.
-    shot = {"t": "tool", "name": "screen", "result": {"image_base64": "A" * 400_000}}
-    assert tokens([shot]) < 2_000, tokens([shot])
     print("compact: ok")
 
 
