@@ -1,0 +1,5 @@
+# Batch files are read by cmd.exe, which is the one parser that wants CRLF:
+# an LF-only .cmd breaks `goto :label` and multi-line `if (` blocks. The blob
+# stays normalised to LF in the repository; a checkout writes CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
