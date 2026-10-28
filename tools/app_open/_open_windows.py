@@ -2,10 +2,43 @@ import os, subprocess, time, ctypes, win32api, win32gui, win32process, win32con,
 from ctypes import wintypes
 
 _SPI_GETWORKAREA = 0x0030
+# A launched app gets no console of the one launching it: a console app would
+# otherwise write into the terminal the TUI is drawing in. DETACHED_PROCESS for
+# the app itself, CREATE_NO_WINDOW for the `cmd /c start` fallback that owns no
+# window of its own but would otherwise attach one.
+DETACHED_PROCESS = 0x00000008
+CREATE_NO_WINDOW = 0x08000000
 _SHELL_CLASSES = {
     "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
     "NotifyIconOverflowWindow", "TaskListThumbnailWnd",
 }
+# Processes whose windows are never the frame around a console. Explorer titles a
+# folder window after the folder, and every checkout of this project is called
+# cuacode, so without this a window titled ".cuacode - File Explorer" answers a
+# search for the terminal that is running it.
+#
+# ponytail: a list to maintain, and by process rather than by title. It fails
+# closed -- an unlisted shell just does not get moved -- where matching the title
+# at all fails open.
+_NEVER_SELF = {"explorer.exe"}
+# Prefixes Windows puts in front of a title without them being part of what the
+# console calls itself. An elevated shell is the usual one: the console answers
+# `cmd.exe` while its window says `Administrator: cmd.exe`, so an equality test
+# alone loses the window of the session that needs parking most.
+_TITLE_DECORATIONS = ("administrator: ", "run as administrator - ")
+
+
+def _strip_decorations(title: str) -> str:
+    """A window title with the prefix Windows added taken back off."""
+    low = title.strip()
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _TITLE_DECORATIONS:
+            if low.lower().startswith(prefix):
+                low = low[len(prefix):].strip()
+                changed = True
+    return low
 
 
 def _process_target(app: str) -> str:
@@ -125,10 +158,20 @@ def open_app(app: str) -> int | None:
     existing = _find_window(app)
     if existing:
         return existing
+    # Launched with no console of its own: a console app inherits the handle the
+    # TUI is drawing on, and its output then lands inside the composer mid-frame.
+    # DETACHED_PROCESS gives it none, and nothing here waits on its output anyway.
     try:
-        subprocess.Popen(app)
+        subprocess.Popen(app, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, creationflags=DETACHED_PROCESS)
     except Exception:
-        try: subprocess.Popen(["cmd", "/c", "start", "", app], shell=False)
+        # `start` runs the app under a fresh shell rather than beside the TUI, so
+        # the detached console still belongs to the app. Its own output is dropped
+        # by the pipes, which `start` would otherwise let through to the console.
+        try:
+            subprocess.Popen(["cmd", "/c", "start", "", app], shell=False,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
         except Exception: return None
 
     deadline = time.time() + 8
@@ -315,36 +358,95 @@ def _console_title() -> str:
 
 
 def _visible_window(pid: int, hint: str = "") -> int | None:
-    """The visible, non-tool window a process owns, preferring a title that matches
-    the console's own: a terminal names its window after the tab that is showing."""
-    found = []
+    """Deprecated shim. The climb this served cannot find the terminal: on
+    Windows 11 a shell started from Explorer has Explorer as its parent and the
+    terminal window is in no process ancestry at all. Kept so an old caller
+    does not silently start matching again."""
+    return None
+
+
+def _titled_windows(hint: str) -> list[int]:
+    """The one window titled after `hint`, or None when the answer is not unique.
+
+    Titles are compared one way only: the window's title must start with the
+    console's. The reverse -- a window whose title is a prefix of the console's
+    -- is what made a second terminal look like this one, because two sessions
+    of the same shell differ only past the end of the shorter title.
+
+    Exact beats prefix, and nothing beats a guess. Two sessions in one Windows
+    Terminal differ only by a `--resume` suffix, so the exact title is the only
+    thing that tells them apart -- and two windows that both merely start with
+    the console's title are a question this cannot answer. The caller moves what
+    it is given, so an unresolved question returns nothing.
+    """
+    if not hint:
+        return []
+    low = hint.strip().lower()
+    exact, prefixed = [], []
+
     def cb(hwnd, _):
-        if _pid_of(hwnd) != pid: return
         try:
-            if not win32gui.IsWindowVisible(hwnd): return
-            if win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE) & win32con.WS_EX_TOOLWINDOW: return
+            if not win32gui.IsWindowVisible(hwnd):
+                return
+            if win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE) & win32con.WS_EX_TOOLWINDOW:
+                return
+            if _class_of(hwnd) in _SHELL_CLASSES:
+                return
+            title = win32gui.GetWindowText(hwnd).strip()
+            if not title:
+                return
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            # The shell is never the frame around a console. Explorer titles a
+            # folder window after the folder, so a checkout named cuacode is a
+            # window whose title contains "cuacode" and nothing else about it
+            # is the terminal being read.
+            if psutil.Process(pid).name().lower() in _NEVER_SELF:
+                return
         except Exception:
             return
-        cls = _class_of(hwnd)
-        title = win32gui.GetWindowText(hwnd).strip()
-        if not title or cls in _SHELL_CLASSES:
-            return
-        if cls in ("ConsoleWindowClass", "PseudoConsoleWindow"):
-            return
-        found.append((hwnd, title))
+        title_l = title.lower()
+        # Compared after the decoration is off, so `Administrator: cmd.exe` is the
+        # window of a console titled `cmd.exe`. What is left is only ever compared
+        # forwards: a window that merely mentions the name is not this console.
+        bare = _strip_decorations(title_l)
+        if bare == low:
+            exact.append(hwnd)
+        elif bare.startswith(low):
+            prefixed.append(hwnd)
+
     try:
         win32gui.EnumWindows(cb, None)
     except Exception:
-        return None
-    if not found:
-        return None
-    if hint:
-        low = hint.lower()
-        for hwnd, title in found:
-            title_l = title.lower()
-            if low == title_l or low in title_l or title_l in low:
-                return hwnd
-    return found[0][0]
+        return []
+    if len(exact) == 1:
+        return exact
+    if not exact and len(prefixed) == 1:
+        return prefixed
+    return []
+
+
+def _frame_of(hwnd: int) -> int:
+    """The window that hosts a console window, or 0.
+
+    A pseudo-console is a child of the terminal frame that draws it --
+    `GetParent` answers with the CASCADIA frame directly -- so this is an exact
+    link and needs no title. That matters because titles collide: running the
+    same thing three times gives three windows with the same title, and no
+    amount of string matching separates them.
+    """
+    try:
+        hwnd = int(hwnd)
+        if not hwnd or not win32gui.IsWindow(hwnd):
+            return 0
+        parent = win32gui.GetParent(hwnd)
+        if parent:
+            return int(parent)
+        # Not every console window is a child; an owner is the same relationship
+        # in the other direction, and a top-level frame owns itself.
+        owner = win32gui.GetWindow(hwnd, win32con.GW_OWNER)
+        return int(owner or 0)
+    except Exception:
+        return 0
 
 
 def _parent_pid(pid: int) -> int:
@@ -355,27 +457,52 @@ def _parent_pid(pid: int) -> int:
 def self_window() -> int | None:
     """The window hosting this process, not just some window of the same app.
 
-    A classic console window is the answer itself; under Windows Terminal the console
-    handle is the tab's hidden pseudo-console, so the walk climbs the processes that
-    own it until one of them has the visible frame.
+    A classic console window is the answer itself. Under Windows Terminal the
+    console handle is the tab's hidden pseudo-console, and the shell's parent is
+    Explorer, so the process tree reaches the desktop without ever naming a
+    terminal -- ancestry cannot answer this.
+
+    The pseudo-console's parent window can. It is a child of the frame that
+    draws it, which is exact and survives identical titles; that is the answer
+    whenever it is available. The console's title is the fallback for a terminal
+    that does not parent its console window, and it is a poor one: three
+    sessions of the same command have the same title.
     """
     console = _console_window()
-    if console and _class_of(console) == "ConsoleWindowClass":
+    if not console:
+        return None
+    if _class_of(console) == "ConsoleWindowClass":
         return console
-    hint = _console_title()
-    pid = _pid_of(console) if console else 0
-    if not pid:
-        pid = os.getpid()
-    seen = set()
-    for _ in range(16):
-        if not pid or pid in seen:
-            break
-        seen.add(pid)
-        found = _visible_window(pid, hint)
-        if found:
-            return found
-        pid = _parent_pid(pid)
-    return None
+    frame = _frame_of(console)
+    if frame and frame != console:
+        return frame
+    found = _titled_windows(_console_title())
+    return found[0] if found else None
+
+
+def raise_window(hwnd: int) -> bool:
+    """Bring a window to the front of the z-order without giving it focus.
+
+    A terminal parked on the left is no use behind whatever else is open, and
+    taking focus for it would send the agent's next keystroke to the terminal
+    instead of the window it is driving. So this raises and does not activate:
+    the caller raises the driven window afterwards, and that one ends up both in
+    front and focused.
+    """
+    try:
+        hwnd = int(hwnd)
+        if not hwnd or not win32gui.IsWindow(hwnd):
+            return False
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        # HWND_TOP reorders only: SWP_NOACTIVATE is what keeps the keyboard where
+        # it was, and SWP_NOOWNERZORDER leaves dialogs above their owners.
+        win32gui.SetWindowPos(hwnd, win32con.HWND_TOP, 0, 0, 0, 0,
+                              win32con.SWP_NOMOVE | win32con.SWP_NOSIZE |
+                              win32con.SWP_NOACTIVATE | win32con.SWP_NOOWNERZORDER)
+        return True
+    except Exception:
+        return False
 
 
 def wait_for_window(hwnd: int, timeout: float = 8) -> bool:

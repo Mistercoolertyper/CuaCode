@@ -77,6 +77,14 @@ def _snap(handle, region, focus: bool) -> bool:
         return False
 
 
+def _raise(handle) -> bool:
+    try:
+        raise_it = getattr(backend(), "raise_window", None)
+        return bool(raise_it(handle)) if raise_it else False
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
 def _wait_for_window(handle) -> bool:
     """Give a just-launched app time to have a window worth moving."""
     try:
@@ -183,17 +191,39 @@ def park_active(self_name: str | None = None, focus: bool = False) -> str:
         return ""
 
 
-def park_self(self_name: str | None) -> bool:
-    """The agent's own terminal, in the left strip, never raised.
+def park_self(self_name: str | None, raise_it: bool = False) -> tuple[bool, bool]:
+    """The agent's own terminal, in the left strip. Returns (moved, raised).
 
-    Two terminals are two windows of one executable, so a name names the wrong one
-    half the time. The backend answers with the window this console is attached to
-    where it can (Windows); everywhere else the name is the answer.
+    The backend answers with the window this console is attached to. The name is
+    only a fallback for a backend that cannot answer at all -- and on Windows it
+    must not be used as one, because the name is a process (`WindowsTerminal`),
+    not a window, so it resolves to *some* terminal of that process. With three
+    sessions open that is a one-in-three chance of moving somebody else's, which
+    is the same bug as a title collision one step further out. Not knowing where
+    our own window is means not moving any.
+
+    Raising is separate from focusing. A terminal behind the window being driven is
+    one nobody can read, so it is brought forward in the z-order -- but the next
+    keystroke belongs to the window the agent is driving, so the terminal is never
+    given focus and the driven window is raised after it.
     """
-    try: hwnd = getattr(backend(), "self_window", lambda: None)()
-    except Exception: hwnd = None                               # noqa: BLE001
-    hwnd = hwnd or self_name
-    return _snap(hwnd, SELF_REGION, False) if hwnd else False
+    ask = getattr(backend(), "self_window", None)
+    if ask is not None:
+        try: hwnd = ask()
+        except Exception: hwnd = None                           # noqa: BLE001
+        # This backend can identify a window, so a None is "no answer", not
+        # "fall back to a name that names three of them".
+        if not hwnd:
+            return False, False
+    else:
+        hwnd = self_name
+    if not hwnd:
+        return False, False
+    moved = _snap(hwnd, SELF_REGION, False)
+    # Raised even when the snap found it already in place: a window can be exactly
+    # where it belongs and still be behind something.
+    raised = _raise(hwnd) if raise_it else False
+    return moved, raised
 
 
 def forget(name: str) -> None:
