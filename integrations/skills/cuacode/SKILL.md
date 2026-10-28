@@ -58,10 +58,71 @@ skills/<name>/   skills, each with a SKILL.md. `always: true` in one's
                  puts its body in the system prompt instead of behind the tool
 mcp/servers.json MCP servers the mcp tool can reach
 memory/          one fact per file, under global/ projects/<slug>/ apps/<name>/
+hosts.json       the other machines a worker can run on (see Boxes)
 ```
 
 `CUACODE_HOME` overrides that root. Files under `integrations/` in the repo are
 the bundled equivalents; a user file with the same name wins.
+
+## Boxes
+
+A box is another machine that runs the same worker over `ssh`: same `main.py`,
+same wire, and the only difference is that the worker's parent is `ssh`. When the
+user asks for a box to be added, or for CuaCode to run on another machine, this
+is the whole job, and no code changes:
+
+1. Prove the key needs nothing typed. `ssh -T -o BatchMode=yes <ssh> true` must
+exit 0 with no prompt. The wire is on stdin, so an `ssh` that stopped for a
+password would swallow the protocol and hang with nothing said.
+2. Prove the box can run a worker: `ssh <ssh> '<python> -V'` and
+`ssh <ssh> 'test -d <dir> && test -f <dir>/main.py'`. There has to be a checkout
+of CuaCode on that machine, and a Python that can run it (its own `venv/` is
+where `python` should point).
+3. Write the entry into `~/.cuacode/hosts.json`, which is a JSON list. Create the
+file with a list if there is none:
+
+```json
+[
+  {
+    "name": "fuzzy",
+    "ssh": "fuzzy",
+    "dir": "/home/fuzzy/Desktop/Work/cuacode",
+    "python": "/home/fuzzy/Desktop/Work/cuacode/venv/bin/python3",
+    "cwd": "/home/fuzzy/Desktop/Work",
+    "home": "/home/fuzzy/.cuacode"
+  }
+]
+```
+
+`name` is what the picker calls it and its identity; `ssh` is anything `ssh`
+accepts; `dir` is where `main.py` is over there; `python` defaults to `python3`,
+`cwd` to `dir`, and `home` to `$HOME/.cuacode` on that box. An entry missing
+`name`, `ssh` or `dir` is skipped silently, so a box that does not appear in the
+picker is one of those three.
+
+4. The user restarts the frontend: hosts are read once, at boot. Then the machine
+rows are the top group of the composer's first chip.
+
+What to tell the user, because it is what the feature actually does:
+
+- The box keeps its own `~/.cuacode`. Its sessions, memory, skills, subagents and
+provider keys are that machine's, and nothing is synced either way.
+- A session belongs to the box that wrote it. Choosing a box starts a new
+conversation there and the list is that box's own. In a terminal frontend the
+conversation picker leads with a `new session` row, whose help line is the
+directory that session would stand in; `/cwd <path>` sets that directory before
+the first message, and is refused after it.
+- Closing the frontend stops an attached worker (the `ssh` process is its parent).
+A **detached** run is the exception: `ctrl-d` in a terminal frontend sends the
+message to the box and starts `main.py --detach <file>` under `nohup`, so closing
+the terminal stops nothing. It runs with permissions `off` (nobody is there to
+answer a gate), writes only to that box's session record, and is read back from
+the box's session list.
+- `--detach` needs the **same tree on the box**. A box running an older checkout
+does not have it: the frontend checks before starting and says so rather than
+leaving a worker that ignored the argument and exited.
+- Nothing sends a path across. A frontend on this machine never passes its own
+directory to a worker elsewhere, because that path names nothing over there.
 
 ## How a turn works
 

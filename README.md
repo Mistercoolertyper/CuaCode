@@ -425,6 +425,90 @@ venv/bin/python3 main.py          # windows: venv\Scripts\python.exe main.py
 It should print one `{"state": "ready"}` line and then wait on stdin. Anything
 else is the error the frontend was not showing you.
 
+## Boxes
+
+A box is another machine that runs the same worker over `ssh`. Same Python, same
+wire, and the only difference is that the worker's parent process is `ssh`
+rather than a pipe, so every frontend treats it exactly like a local worker.
+`~/.cuacode/hosts.json` is the list of them, and no file means no boxes:
+
+```json
+[
+  {
+    "name": "fuzzy",
+    "ssh": "fuzzy",
+    "dir": "/home/fuzzy/Desktop/Work/cuacode",
+    "python": "/home/fuzzy/Desktop/Work/cuacode/venv/bin/python3",
+    "cwd": "/home/fuzzy/Desktop/Work",
+    "home": "/home/fuzzy/.cuacode"
+  }
+]
+```
+
+| key | what it is |
+| --- | --- |
+| `name` | what the picker calls it, and the identity of the entry |
+| `ssh` | anything `ssh` accepts: an alias from `~/.ssh/config`, `me@host`, a tailnet name |
+| `dir` | where `main.py` lives on that box |
+| `python` | the interpreter there; `python3` when left out |
+| `cwd` | where a session starts; `dir` when left out |
+| `home` | that box's state root; `$HOME/.cuacode` when left out |
+
+An entry missing `name`, `ssh` or `dir` is skipped rather than offered as a row
+that fails when chosen.
+
+### Adding a box
+
+1. Make the key work with nothing to type. `ssh -T -o BatchMode=yes <ssh> true`
+must exit 0 with no prompt: the wire arrives on stdin, so an `ssh` that stopped
+for a password would eat the protocol and then hang.
+2. Check the two things the entry claims: `ssh <ssh> '<python> -V'` and
+`ssh <ssh> 'test -f <dir>/main.py'`.
+3. Write the entry into `~/.cuacode/hosts.json`, which is a JSON list and is
+created if it is not there.
+4. Restart the frontend. Hosts are read once, at boot.
+5. Pick it in the machine rows, which are the top group of the composer's first
+chip.
+
+### What a box means
+
+A box keeps its own `~/.cuacode` and nothing is synced: its sessions, memory,
+skills, subagents and provider keys are that machine's. Three rules follow, and
+they are the whole of the feature:
+
+- **The path is the box's, not the frontend's.** The worker stamps the directory
+on its own sessions, and a frontend never sends a path from the machine it runs
+on. That is one guard in `rust/src/session.rs`: the terminal envelope is dropped
+for a remote worker, so a Mac path can no longer land on a session on a Linux
+box.
+- **A session belongs to the box that wrote it.** Choosing a box starts a new
+conversation on it, and the rail is that box's own list, answered by its own
+worker's `session.list`. It groups under each session's directory, because that
+box's `projects.json` was not read. In a terminal frontend the same question is
+the conversation picker, which leads with a `new session` row whose help line is
+the directory that session would stand in.
+- **`/cwd <path>` decides that directory before the first message.** It is the
+worker's own word for where a conversation stands: checked against the machine
+the worker is running on, so on a box it is a path on that box, and refused once
+the conversation has started, because the directory is stamped on the session and
+decides where every tool runs.
+- **Closing the frontend stops an attached worker, and nothing else.** There is no
+reattach: the `ssh` process is the worker's parent, so when the window or the
+terminal that opened it goes, the worker over there sees EOF, commits, and
+exits. A **detached** run is the other way: in the terminal frontends `ctrl-d`
+writes the message to that box and starts `main.py --detach <file>` there under
+`nohup`, so the terminal is not its parent and closing it stops nothing. A
+detached run asks nothing (`off`, since nobody is there to answer a gate), writes
+only to that box's session record, and is read back from the box's session list
+when its first round lands. It needs the **same tree** on that box: a box running
+an older checkout has no `--detach`, and the frontend says so rather than
+starting a worker that would ignore the argument and exit.
+
+The GUI draws a conversation from the bytes of a transcript, so on a box it
+fetches that tail over `ssh`, on a thread and once per change. The terminal
+frontends ask the worker to replay the conversation instead. A box's `todo.json`
+is not fetched, so its plan panel draws nothing.
+
 ## Extending it
 
 Four ways that need no rebuild and no restart - files are re-read every turn, so

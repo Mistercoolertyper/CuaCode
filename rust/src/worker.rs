@@ -17,7 +17,79 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use crate::hosts::Host;
 use crate::wire::{self, Envelope, Event};
+
+/// Where the worker runs.
+///
+/// `Remote` is not a transport of its own: it is one `ssh` process, and the wire
+/// on its stdin and stdout is the same wire as a local worker's. That is the
+/// whole feature -- a worker on another machine is a worker whose parent process
+/// happens to be `ssh`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Target {
+    /// This machine.
+    #[default]
+    Local,
+    /// Another one, out of `~/.cuacode/hosts.json`.
+    Remote(Host),
+}
+
+impl Target {
+    pub fn name(&self) -> &str {
+        match self {
+            Target::Local => "this machine",
+            Target::Remote(h) => &h.name,
+        }
+    }
+}
+
+/// Single-quote a word for a POSIX shell, embedded quotes included.
+///
+/// Public because a frontend that writes a command line for another machine needs
+/// the same quoting the worker's own `ssh` line does: two spellings of "a shell
+/// word" is how one of them ends up splitting a path with a space in it.
+pub fn sh(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
+
+/// The command line the remote `ssh` runs.
+///
+/// `BatchMode` on the ssh side is not tidiness: the wire is on stdin, so an ssh
+/// that stopped to ask for a password would eat the protocol and then hang with
+/// nothing said. A host that needs a password fails loudly instead, which is what
+/// the exit report is for.
+pub fn remote_command(h: &Host) -> String {
+    format!(
+        "cd {} && exec {} {}",
+        sh(h.cwd()),
+        h.python(),
+        sh(&h.worker())
+    )
+}
+
+/// The arguments `ssh` itself is given. Split out from `spawn` so the shape that
+/// matters -- the destination, and that nothing can stop and ask a question -- is
+/// assertable without a network or a process.
+pub fn ssh_argv(h: &Host) -> Vec<String> {
+    ssh_argv_for(h, &remote_command(h))
+}
+
+/// The same arguments, carrying somebody else's command: a read out of that box's
+/// state root is one command on the same transport, and it must not be able to stop
+/// and ask a question either.
+pub fn ssh_argv_for(h: &Host, command: &str) -> Vec<String> {
+    let mut argv = vec![
+        "-T".to_string(),
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "-o".to_string(),
+        "ConnectTimeout=10".to_string(),
+    ];
+    argv.push(h.ssh.clone());
+    argv.push(command.to_string());
+    argv
+}
 
 /// The longest single stdout line accepted. A tool_calls payload can run past
 /// bufio's 64 KiB default, and a line refused for length reads exactly like the
@@ -107,24 +179,41 @@ impl Worker {
     /// `home` is `CUACODE_HOME`: the state root to run against. `None` leaves
     /// the worker on its own default, which is `~/.cuacode`.
     pub fn spawn(
+        target: &Target,
         python: &Path,
         worker: &Path,
         home: Option<&Path>,
         cwd: Option<&Path>,
     ) -> Result<(Worker, Receiver<Event>), String> {
-        let mut cmd = Command::new(python);
-        cmd.arg(worker)
-            .stdin(Stdio::piped())
+        // ponytail: a remote worker keeps its own `~/.cuacode`. `home` is a path on
+        // this machine, and handing it over would point the worker at a directory
+        // that does not exist there. A per-host home is the upgrade, if a scratch
+        // root on another machine is ever wanted.
+        let mut cmd = match target {
+            Target::Local => {
+                let mut cmd = Command::new(python);
+                cmd.arg(worker);
+                if let Some(dir) = cwd {
+                    cmd.current_dir(dir);
+                }
+                if let Some(home) = home {
+                    cmd.env("CUACODE_HOME", home);
+                }
+                cmd
+            }
+            Target::Remote(h) => {
+                let mut cmd = Command::new("ssh");
+                cmd.args(ssh_argv(h));
+                cmd
+            }
+        };
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Some(dir) = cwd {
-            cmd.current_dir(dir);
-        }
-        if let Some(home) = home {
-            cmd.env("CUACODE_HOME", home);
-        }
 
-        let mut child = cmd.spawn().map_err(|e| format!("start {}: {e}", python.display()))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            format!("start {}: {e}", target.name())
+        })?;
         let stdin = child.stdin.take().ok_or("no stdin pipe")?;
         let stdout = child.stdout.take().ok_or("no stdout pipe")?;
         let stderr = child.stderr.take().ok_or("no stderr pipe")?;

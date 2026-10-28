@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use crate::attach;
 use crate::wire::{Envelope, Event, State};
-use crate::worker::{self, Worker};
+use crate::worker::{self, Target, Worker};
 
 /// Everything a status line draws, as of the last event.
 #[derive(Debug, Clone, Default)]
@@ -156,13 +156,24 @@ pub fn compact_state(snap: &mut Snapshot, stage: &str, folded: i64, freed: i64) 
 
 impl Session {
     pub fn start(home: Option<&Path>, cwd: Option<&Path>) -> Result<Session, String> {
+        Session::start_on(&Target::Local, home, cwd)
+    }
+
+    /// Start on one machine. `cwd` is a path on *that* machine and is ignored for
+    /// a remote worker, whose own entry names where it starts; `home` is only the
+    /// local one, for the same reason.
+    pub fn start_on(
+        target: &Target,
+        home: Option<&Path>,
+        cwd: Option<&Path>,
+    ) -> Result<Session, String> {
         let script = worker::worker_path()?;
         let python = worker::python(&script)?;
-        let (worker, events) = Worker::spawn(&python, &script, home, cwd)?;
+        let (worker, events) = Worker::spawn(target, &python, &script, home, cwd)?;
         Ok(Session {
             worker,
             snap: Snapshot::default(),
-            terminal: probe_terminal(),
+            terminal: terminal_for(target),
             sessions: Vec::new(),
             unhandled: 0,
             seq: 0,
@@ -411,6 +422,22 @@ impl Session {
     }
 }
 
+/// The terminal facts to send to a worker on `target`.
+///
+/// The cwd is where **this** machine was standing, and the worker stamps it on the
+/// session it holds, which is the fact recall matches on. A worker on another box
+/// holds a session whose folder is over there, so a path from here names nothing
+/// when it arrives: it is dropped rather than written down, and that box's own
+/// `hosts.json` entry says where the worker stands instead. The rest of the probe
+/// (which terminal, which app was in front) is true from either end of the pipe.
+pub fn terminal_for(target: &Target) -> TerminalInfo {
+    let mut t = probe_terminal();
+    if matches!(target, Target::Remote(_)) {
+        t.cwd.clear();
+    }
+    t
+}
+
 /// The terminal facts the worker records on a session: where this was run from,
 /// and which app was in front of it.
 pub fn probe_terminal() -> TerminalInfo {
@@ -474,6 +501,26 @@ mod tests {
         let t = probe_terminal();
         assert!(!t.cwd.is_empty(), "a session with no cwd cannot be recalled by directory");
         assert!(!t.is_empty());
+    }
+
+    /// The bug this pins: a session opened on another box recorded this machine's
+    /// directory, because the terminal envelope carried it and the worker stamped
+    /// it. One of `fuzzy`'s sessions said `/Users/.../personal` while its folder was
+    /// on that box, so the rail, the location and recall all pointed at a path that
+    /// does not exist there.
+    #[test]
+    fn a_remote_worker_is_not_told_where_this_one_stands() {
+        let host = crate::hosts::Host {
+            name: "box".into(),
+            ssh: "box".into(),
+            dir: "/srv/cuacode".into(),
+            ..Default::default()
+        };
+        let here = terminal_for(&Target::Local);
+        let there = terminal_for(&Target::Remote(host));
+        assert!(!here.cwd.is_empty(), "this machine's own worker is told where it stands");
+        assert!(there.cwd.is_empty(), "a path from here names nothing over there");
+        assert_eq!(there.term, here.term, "the rest of the probe is true either way");
     }
 
     /// A fold typed at the prompt is visible while it runs, and gone after.
