@@ -33,21 +33,24 @@ def run(args: dict, ctx) -> dict:
     session_dir = getattr(ctx, "session_dir", None) if ctx else None
     self_name = getattr(ctx, "self_identity", None)
 
-    # Park the terminal in the left strip, without raising it, on every capture: nothing
-    # else re-checks parking, and raising here would leave the terminal focused and eat
-    # the agent's next click. A window-manager failure never propagates; losing the shot
-    # is worse than a bad parking job.
+    # Park the terminal in the left strip, and on Windows bring it to the front
+    # without giving it focus. Order matters: the terminal is raised first and the
+    # windows being driven are raised after it, so the app the agent is looking at
+    # ends up both in front and holding the keyboard, and the terminal sits behind
+    # it on the left where it can still be read.
+    raise_it = _window.OS == "Windows"
     self_snapped = False
+    self_raised = False
     if self_name:
         try:
-            self_snapped = _window.park_self(self_name)
+            self_snapped, self_raised = _window.park_self(self_name, raise_it=raise_it)
         except Exception:
             self_snapped = False
+            self_raised = False
 
     # Raising is a Windows need: input there follows the foreground, so the window being
     # driven has to hold it. On macOS activation decides the keyboard and can hop spaces,
     # and this runs on every capture. park_known only corrects drift, so it stays quiet.
-    raise_it = _window.OS == "Windows"
     opened = []
     try:
         opened = _window.park_new(self_name, focus=raise_it)
@@ -113,6 +116,7 @@ def run(args: dict, ctx) -> dict:
     _archive(raw_copy, img, session_dir)
 
     out_meta = {"image_base64": b64, "width": lw, "height": lh, "grid_size": grid_size, "self_snapped": self_snapped}
+    if self_raised: out_meta["self_raised"] = True
     if opened: out_meta["opened_apps"] = opened
     if active_app: out_meta["parked_active_app"] = active_app
     if region:
