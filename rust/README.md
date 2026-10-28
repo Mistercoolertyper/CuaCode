@@ -171,6 +171,23 @@ files, and the worker's own provider registry through one `python3 -c` at boot.
 The worker is driven for liveness only (`agent.rs`): busy/stop, errors, and
 permission asks. The disk stays the transcript.
 
+**On a box.** A machine from `~/.cuacode/hosts.json` is a state root this window
+cannot open: its folders are on that machine. So a box is what the screen is a
+view of, and changing the machine swaps all of it - selection, cache, transcript,
+and the rail, which becomes that worker's own `session.list` grouped under each
+session's directory (that box's `projects.json` is not read). The location chip
+then names the directory that box's entry put the worker in, and is locked:
+every other path the chips know is a path on this machine and names nothing over
+there. Choosing a machine is stated as a new conversation by the picker itself,
+and that is what it now does.
+
+A conversation over there is still drawn from a transcript on a disk, so it is
+fetched: the tail of that box's `messages.jsonl`, through
+`Host::read_command` and `worker::ssh_argv_for`, on the same thread pair `git`
+and the catalogs use, one read per change of that box's `meta.json`. The plan
+panel has no such reader and draws nothing on a box, which is the honest way to
+say it was not read.
+
 **Why it is fast.** The render path does not touch the disk. Files are read on a
 clock keyed on a `(length, mtime)` stamp, the transcript is read from **the end**
 (the last 256KB, with the partial line it landed in dropped), the fold runs once
@@ -219,7 +236,8 @@ shaped lines, clipboard). The component library exists to spare that.
 **Files.** `state.rs` reads the root and owns no drawing; `view.rs` draws and owns
 no state; `theme.rs` is the palette and the numbers, with the contrast checks as
 tests; `motion.rs` is the hover clock and the pulse; `main.rs` is the window, the
-keys, the four composer menus and the cache; `agent.rs` drives one worker.
+keys, the four composer menus and the cache; `agent.rs` drives one worker, on this
+machine or on a box, and keeps the listing a box's worker answers with.
 `app.sh` builds it as a real macOS bundle into `~/Applications`.
 
 ## fastrs
@@ -246,7 +264,8 @@ The things in it that are decisions rather than transcription:
   to open one line at a time to read. A double click on a call opens it in the
   panel instead. Thoughts sit tight folded and are given air when open. escape
   stops the round in flight (ctrl-k does the same, and with nothing running escape
-  empties what has been typed). The click needs the terminal to report the mouse,
+  empties what has been typed; ctrl-y puts back what the last delete took, that
+  empty included). The click needs the terminal to report the mouse,
   which costs its own drag-to-select. Nothing on screen says any of it.
 - A call reads as a call: `● write(crates/fastrs/src/main.rs)`, not a clipped
   `path=…`. The row keeps the arguments exactly as the wire sent them, so the head
