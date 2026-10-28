@@ -438,8 +438,8 @@ pub enum Row {
     ///
     /// `secs` is the distance from the record that opened the turn to the one
     /// that ended it, and it is what the run's own line says: **"Worked for
-    /// 2m 13s"** rather than a count of calls. That is t3code's row, and the
-    /// reason it is better is that a count of calls is the agent's own bookkeeping
+    /// 2m 13s"** rather than a count of calls. The reason that is better: a count
+    /// of calls is the agent's own bookkeeping
     /// while a duration is the thing the person waiting actually felt. `None`
     /// when the records carry no stamps to measure with.
     Run { note: Option<String>, secs: Option<f64>, steps: Vec<Step> },
@@ -603,7 +603,7 @@ fn day_number(date: &str) -> Option<i64> {
     Some(era * 146_097 + doe - 719_468)
 }
 
-/// A duration, as words: the same ladder t3code's `formatDuration` walks.
+/// A duration, as words: the same ladder, from tenths to minutes.
 ///
 /// Tenths while it is short, because "8.0s" and "9s" are different feelings and
 /// the first few seconds are the ones a person is watching; whole seconds to a
@@ -641,8 +641,8 @@ pub fn duration(secs: f64) -> String {
 /// One entry in the transcript's minimap: which row a turn starts at, and the two
 /// lines it is remembered by.
 ///
-/// This is t3code's `TimelineMinimapItem`, and its rule is theirs: **a tick per
-/// turn**, not per row. A strip with one tick per record is a barcode in a long
+/// Its rule: **a tick per turn**, not per row. A strip with one tick per record is
+/// a barcode in a long
 /// session; one per thing the person said is a table of contents, and a table of
 /// contents is what you navigate by.
 #[derive(Clone, Debug)]

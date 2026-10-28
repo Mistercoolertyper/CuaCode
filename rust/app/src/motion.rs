@@ -260,10 +260,10 @@ mod tests {
 /// An elapsed time in words, or nothing when there is nothing to say. The
 /// `Option` is the point: a run with no clock is not a run of zero seconds.
 ///
-/// **Zero-padded**, which is t3code's own format: `12s`, `3m 07s`, `2h 05m`
-/// (`AgentElapsed.tsx:6`-`:17`). The padding is not decoration - a bare `3m 7s`
-/// reflows the row every time the seconds cross 10, and the row's own timestamp strip
-/// is drawn `tabular-nums` precisely so that does not happen (`11`, disagreement 3).
+/// **Zero-padded**: `12s`, `3m 07s`, `2h 05m`. The padding is not decoration - a
+/// bare `3m 7s` reflows the row every time the seconds cross 10, and the row's own
+/// timestamp strip is drawn `tabular-nums` precisely so that does not happen (`11`,
+/// disagreement 3).
 #[allow(dead_code)] // the readout for a run in flight, which this window has none of yet
 pub fn format_elapsed_opt(secs: i64) -> Option<String> {
     match secs {

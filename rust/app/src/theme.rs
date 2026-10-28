@@ -81,9 +81,9 @@ pub const ROW_PAD: f32 = (ROW - NAME_LINE) / 2.0;
 /// are numbers rather than literals in a builder.
 pub const NAME_LINE: f32 = 16.0;
 pub const CAPTION_LINE: f32 = 14.0;
-/// A session row, which is **one line**: t3code's row is `h-9` (36px) whatever it
-/// holds, and that is what makes a rail of forty sessions scannable instead of a
-/// wall. `ROW` is the same number and is kept for the rows that carry a caption.
+/// A session row, which is **one line**: 36px whatever it holds, and that is what
+/// makes a rail of forty sessions scannable instead of a wall. `ROW` is the same
+/// number and is kept for the rows that carry a caption.
 pub const ROW_SM: f32 = 36.0;
 /// A project's head: `py-1.5` around a 14px line.
 pub const ROW_HEAD: f32 = 30.0;
@@ -103,10 +103,10 @@ pub const CONTROL_SM: f32 = 28.0;
 
 /// The composer's field line: the text's own leading, 20px.
 ///
-/// The field is **two** of these at rest. t3code's editor is `min-h-[calc(2lh+
-/// --spacing(2))]` - a two-line floor - so an empty composer does not jump under the
-/// pointer on the first keystroke (`05-editor.md`). This comment used to say the source
-/// had no min-height on the editor at all; that was wrong, and the floor is back.
+/// The field is **two** of these at rest: a two-line floor, so an empty composer
+/// does not jump under the pointer on the first keystroke (`05-editor.md`). This
+/// comment used to say there was no floor at all; that was wrong, and the floor is
+/// back.
 pub const COMPOSER_LINE: f32 = 20.0;
 // The field's ceiling - 208px, `max-h-52`, past which it scrolls inside itself - is
 // **not** a token here. The palette's number set is closed at the three the spec adds
@@ -120,10 +120,10 @@ pub const COMPOSER_PAD_BOTTOM: f32 = 8.0;
 /// else. This was a 44px `min_h`, which is an empty row reserving height it did not use.
 pub const COMPOSER_FOOTER: f32 = 28.0;
 
-/// The minimap's own numbers, quoted from t3code's `MessagesTimeline`.
+/// The minimap's own numbers.
 ///
-/// Their strip is `h-0.5 w-6` - **2px tall and 24 wide** - spaced `8px` apart on a
-/// `bg-border/15` rail. 24 is as long as a strip gets: the one in view is that long, and
+/// A strip is **2px tall and 24 wide**, spaced `8px` apart on a faint rail. 24 is as
+/// long as a strip gets: the one in view is that long, and
 /// its neighbours are shortened rather than dimmed (`view::map_strip_w`).
 pub const MAP_STRIP_H: f32 = 2.0;
 pub const MAP_STRIP_W: f32 = 24.0;
@@ -180,8 +180,7 @@ pub const H1: f32 = 20.0;
 /// furniture of the conversation rather than as a sentence in it.
 pub const RUN_LINE: f32 = 26.0;
 
-/// How wide the conversation's text may get, which is t3code's own
-/// `--chat-content-max-width: 46rem` (736px).
+/// How wide the conversation's text may get: 46rem, 736px.
 ///
 /// This is the one number that decides whether a long answer is readable. At a
 /// full-window measure a sentence runs past the point where the eye finds the next

@@ -12,9 +12,9 @@
 //!
 //! Two decisions worth naming:
 //!
-//! - **A single newline is a line break**, which is what `remark-breaks` does in
-//!   t3code and what a chat needs: a model that writes three lines on three lines
-//!   meant three lines. Joining them into one paragraph reflows them away.
+//! - **A single newline is a line break**, which is what a chat needs: a model that
+//!   writes three lines on three lines meant three lines. Joining them into one
+//!   paragraph reflows them away.
 //! - **Nothing is invented.** A fence with no closing fence is still a code
 //!   block, because a streaming answer is an unterminated fence most of the time
 //!   it exists. A `**` with no closer stays literal text rather than swallowing

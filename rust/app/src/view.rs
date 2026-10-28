@@ -378,11 +378,11 @@ pub fn thumbnail(name: &str, icon: &Icon) -> Div {
     }
 }
 
-/// A session row's state: t3code's vocabulary, and its precedence.
+/// A session row's state: the vocabulary, and its precedence.
 ///
-/// Their `resolveSidebarThreadStatus` walks the same ladder and gives up the same
-/// thing: **one state per row**, the most urgent one, because a row showing two
-/// states shows neither. The order is theirs and it is argued from what the person
+/// The ladder gives up one thing per row: **one state per row**, the most urgent
+/// one, because a row showing two states shows neither. The order is argued from
+/// what the person
 /// can do about it - a question blocks the run, so it wins over everything; then a
 /// failure, which needs an answer before anything else moves; then a run in flight;
 /// then a turn that finished while you were elsewhere. `Settled` is the resting
@@ -416,9 +416,9 @@ pub enum State {
 impl State {
     /// The word a row shows for it.
     ///
-    /// t3code's own vocabulary, in its own title case: `Working`, `Approval`, `Done`,
-    /// `Failed` (`SidebarThreadRow.tsx:723`-`:778`). This is the file's largest finding -
-    /// the source draws a **word plus icon** and never a dot, because a dot cannot say
+    /// The vocabulary, in title case: `Working`, `Approval`, `Done`, `Failed`.
+    /// Every state is drawn as a **word plus icon** and never a dot, because a dot
+    /// cannot say
     /// which of three needs-you states it means and forty rows of coloured dots is a
     /// Christmas tree. `Settled` says nothing at all: it is the absence of a state, so
     /// the row keeps showing its age instead.
@@ -474,7 +474,7 @@ impl State {
 /// `held` is the one session the worker is holding and `busy`/`asking`/`failed` are
 /// its live state, so the first three rungs are only ever true of that row. `unseen`
 /// is this window's own memory of a turn that finished while you were elsewhere.
-/// The ladder is t3code's; see [`State`] for why it is ordered the way it is.
+/// See [`State`] for why the ladder is ordered the way it is.
 pub fn row_state(
     id: &str,
     held: &str,
@@ -502,11 +502,10 @@ pub fn row_state(
 
 /// A session's row.
 ///
-/// **One line, 36px, whatever it holds.** `flex h-9 items-center gap-2.5 px-2.5`
-/// (`SidebarThreadRow.tsx:1223`): `ROW`, `ROW_PAD`, `ROW_PAD`. t3code's rail uses the
-/// one-line `slim` and `folder` layouts - the two-line layouts in that file are for a
-/// row that carries a branch, a machine and a diff stat, and a rail of forty of those
-/// is a wall. A second line is what made this rail read as a list of paragraphs.
+/// **One line, 36px, whatever it holds**: `ROW`, `ROW_PAD`, `ROW_PAD`. A two-line
+/// row is for one that carries a branch, a machine and a diff stat, and a rail of
+/// forty of those is a wall. A second line is what made this rail read as a list of
+/// paragraphs.
 ///
 /// Inside a project the row is indented `ps-9` (`:1228`) - `ROW`, one row's height as
 /// the indent, which is the chevron and the folder mark wide - so a session's title
@@ -2627,9 +2626,8 @@ pub fn run_summary(
 /// What a run's line says: **what it was doing**, then what it did.
 ///
 /// The head is the thought's own name (`thought_name`) - the rule the terminal frontend
-/// names one with, and the reason a fold reads as a row and not as a paragraph. t3code
-/// has no wording to copy here: its `row.summary` is built by its timeline projection and
-/// is `not specified` in the files that were read.
+/// names one with, and the reason a fold reads as a row and not as a paragraph. The
+/// model's own opening sentence is the name, and nothing is invented on top of it.
 ///
 /// The tail is what the row did: the count and the kinds of its calls and the time they
 /// took, in the place their timestamp strip sits. A run with no calls is a thought, and
@@ -3037,9 +3035,9 @@ pub fn composer(
                 // #201e1c card - and that is the bug: "why is the
                 // background colour of the input box half one gray and half another darker
                 // gray". Two surfaces for one control is a box inside a box, and it is the
-                // same mistake as the old well with its own corner and rim. t3code's editor
-                // is laid **directly on the card** at the card's own padding, so the whole
-                // thing is one surface and one colour.
+                // same mistake as the old well with its own corner and rim. The editor
+                // is laid **directly on the card** at the card's own padding, so the
+                // whole thing is one surface and one colour.
                 .child(
                     div()
                         .w_full()
@@ -3088,8 +3086,8 @@ pub fn composer(
 /// conversation.
 ///
 /// The feature, as it was described ("a list of lines... you can
-/// jump to them quickly from clicking on other ones"), and t3code has the same
-/// strip. Its rules are theirs and they are the ones that make it usable:
+/// jump to them quickly from clicking on other ones"). The rules that make it
+/// usable:
 ///
 /// - **One mark per turn**, spaced evenly, in a rail shorter than the column. The
 ///   strip is a table of contents, not a scale drawing of the scroll height, so a
@@ -3248,8 +3246,8 @@ pub fn to_bottom(
 /// It has no border and no fill of its own, because the strip around it is the
 /// surface: a cell inside a bordered plate that also drew its own border and its own
 /// fill is two boxes for one thing. The strip is the edge; a cell is only lit under
-/// the pointer. That is t3code's own control - `rounded-md border
-/// border-transparent px-1.75 hover:bg-accent` - a label that lifts, not a pill.
+/// the pointer. A label that lifts, not a pill: no border, no fill, a wash under
+/// the pointer.
 pub fn chip(mark: Option<IconName>, value: &str, t: f32, locked: bool) -> Div {
     let tone = if locked {
         theme::ghost()

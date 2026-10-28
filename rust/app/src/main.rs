@@ -764,8 +764,8 @@ pub struct App {
     /// says why it cannot run anything.
     agent: Option<agent::Agent>,
     /// Sessions with a turn that finished while you were looking somewhere else, by
-    /// id. The rail marks these and nothing else does: this is the "waiting for you"
-    /// half of t3code's row, and it is cleared by selecting the session.
+    /// id. The rail marks these and nothing else does: it is the "waiting for you"
+    /// half of the row, and it is cleared by selecting the session.
     unseen: std::collections::HashSet<String>,
     /// The one clock, started at boot. Held so it is started once rather than
     /// per frame: a task spawned inside `render` is a task per frame.
@@ -786,8 +786,8 @@ pub struct App {
     news_in_flight: (Sender<cuacode::version::News>, Receiver<cuacode::version::News>),
 }
 
-/// How tall the field may grow before it scrolls inside itself: 208px - t3code's
-/// `max-h-52`, and `05-editor.md`'s own number for the editor's ceiling.
+/// How tall the field may grow before it scrolls inside itself: 208px, the number
+/// `05-editor.md` names for the editor's ceiling.
 ///
 /// **Not a `theme.rs` token**: the palette's number set is closed at the three constants
 /// the spec adds (`00-INDEX.md`, "The three new numbers"), so this one lives at the field
@@ -1036,9 +1036,8 @@ impl App {
                         // edge is the only place this is knowable, because `busy` is the
                         // worker's live state and not a fact on disk.
                         //
-                        // The delivery is `InAppAndSystem`, which is t3code's
-                        // `notifications` mode: a desktop app that only ever told you
-                        // in-app is an app you have to be looking at.
+                        // The delivery is `InAppAndSystem`: a desktop app that only
+                        // ever told you in-app is an app you have to be looking at.
                         if was_busy && !busy {
                             let held = app
                                 .agent
@@ -2038,8 +2037,8 @@ impl App {
     /// the account: how hard it thinks.
     ///
     /// The shape this follows: the model's picker carries the effort level **as a slider**
-    /// rather than as a fifth chip beside it, which is t3code's `ComposerSurface` -
-    /// the model control opens, and the reasoning rung is set from inside it.
+    /// rather than as a fifth chip beside it: the model control opens, and the
+    /// reasoning rung is set from inside it.
     fn model_card(&self, cx: &mut Context<Self>) -> AnyElement {
         card(v_flex()
             .w_full()
@@ -2581,7 +2580,7 @@ impl App {
         let key = format!("s:{}", s.id);
         let t = motion::hover_t(&key);
         let selected = self.sel.as_deref() == Some(s.id.as_str());
-        // What this row says about the run, in t3code's own order: a question the
+        // What this row says about the run, in this order: a question the
         // worker is blocked on beats a failure beats a run in flight beats a turn
         // that finished while you were elsewhere beats nothing at all. Only the row
         // the worker is holding can be in the first three, because the worker holds
@@ -2679,8 +2678,8 @@ impl App {
     ///
     /// The scroller's own `child_bounds` are what answers it, so this is the same
     /// measurement the scroll is laid out from rather than a second opinion about
-    /// it. `resolveTimelineMinimapCurrentIndex` is t3code's version of the rule,
-    /// including the tie-break: the first in view wins, so the mark tracks the top
+    /// it. The rule has a tie-break: the first in view wins, so the mark tracks the
+    /// top
     /// of the screen rather than the bottom.
     fn mark_in_view(&self, marks: &[state::Anchor]) -> Option<usize> {
         // **From the measured row extents, not from the handle.** `bounds_for_item` asks
@@ -3537,8 +3536,7 @@ impl App {
             // `MEASURE` wide and centred, so on a window wider than that there is real
             // empty space to the right of it - and that is where a table of contents
             // belongs. On a narrower window there is no gutter, so the strip is not drawn
-            // at all rather than laid over the conversation: t3code does the same thing
-            // (`hitStripWidth > 0` or it goes inert).
+            // at all rather than laid over the conversation.
             // The width of the **content column**, which is the window less both side
             // panels - and it must be both. This only subtracted the rail, so with the
             // sidebar open the strip was placed as if there were 250px more room than
