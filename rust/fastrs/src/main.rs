@@ -1882,8 +1882,13 @@ impl App {
 
     /// One key. Returns false to leave.
     fn key(&mut self, k: KeyEvent) -> bool {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        // AltGr arrives as ctrl+alt, and the character the layout made is in the
+        // event: `AltGr+Q` on a German keyboard is a `@` that reads as both
+        // modifiers. Both are spent on it here, or every ctrl and alt binding
+        // below eats a character that was typed.
+        let gr = altgr(k);
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL) && !gr;
+        let alt = k.modifiers.contains(KeyModifiers::ALT) && !gr;
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let cmd = k.modifiers.contains(KeyModifiers::SUPER);
         // Any key at all is someone at the keyboard, and the clock a held prompt
@@ -2216,8 +2221,11 @@ impl App {
             // A trigger at the start of a word opens its menu; anywhere else it
             // is a character, so `src/main.rs` and `user@example.com` are text.
             // A replay has no worker to ask, so it has no menus either.
+            // A character AltGr made is never a trigger: `@` is AltGr+Q on a
+            // German layout, and a menu opening on it would be a menu nobody
+            // asked for, over a character that is the whole point of the key.
             KeyCode::Char(c @ ('/' | '$' | '@'))
-                if !ctrl && self.sess.is_some() && self.at_word_start() =>
+                if !ctrl && !gr && self.sess.is_some() && self.at_word_start() =>
             {
                 self.insert(c);
                 self.open_menu(Kind::of(c).unwrap());
@@ -2226,6 +2234,12 @@ impl App {
             _ => {}
         }
         true
+    }
+
+    /// Whether the open menu is a view of the line rather than a question beside
+    /// it: true for a trigger's menu, false for a picker.
+    fn on_line(&self) -> bool {
+        self.menu.as_ref().is_some_and(|open| open.on_line())
     }
 
     /// Whether the caret sits at the start of a word, which is the only place a
@@ -2321,7 +2335,10 @@ impl App {
 
     /// One key while a menu is up.
     fn menu_key(&mut self, k: KeyEvent) -> bool {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        // AltGr reads as ctrl+alt on Windows and the character it made is in the
+        // event, so a filter is filtered with it rather than losing it.
+        let gr = altgr(k);
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL) && !gr;
         match k.code {
             // Escape takes back the trigger and the filter both. A menu that
             // left its own characters behind would have edited a message the
@@ -2377,6 +2394,15 @@ impl App {
                 }
                 self.ask_for_rows();
             }
+            KeyCode::Char(c) if c.is_whitespace() && self.on_line() => {
+                // A token ends at a space, and a menu is about one token. So the
+                // space is not a filter that matches nothing: it ends the word
+                // the trigger opened, the menu goes, and the space is typed. That
+                // is what makes "something / something else" a sentence -- and
+                // it is the same reading the worker's parser takes of it.
+                self.menu = None;
+                self.insert(c);
+            }
             KeyCode::Char(c) if !ctrl => {
                 // Typed after a trigger, the character is on the line as well as
                 // in the filter: they are the same text. A picker's filter is its
@@ -2405,6 +2431,14 @@ impl App {
         let Some((kind, anchor, value)) = self.menu.as_ref().and_then(|open| {
             open.chosen().map(|item| (open.kind, open.anchor, item.value.clone()))
         }) else {
+            // Nothing under the cursor. At a trigger's menu that is a word the
+            // list does not know, which the worker reads as prose and sends -- so
+            // sending it is the only thing enter can mean. A picker opened by a
+            // command has no line of its own, and enter there stays what it was.
+            if self.on_line() {
+                self.menu = None;
+                self.send();
+            }
             return;
         };
         match kind {
@@ -2613,6 +2647,27 @@ fn frame_wait(idle: Duration, moving: bool) -> u64 {
     } else {
         STILL_MS
     }
+}
+
+/// Whether this key is AltGr's character rather than a ctrl or alt binding.
+///
+/// Windows reports AltGr as ctrl+alt and puts the character the layout made in
+/// the same event: `AltGr+Q` is `@` on a German keyboard. So those two
+/// modifiers are not asking for a binding there, they are how that character
+/// was reached, and spending them on one is how a typed character goes missing.
+///
+/// The character is what tells the two apart. AltGr's level carries symbols and
+/// accented letters -- `@ { [ ] } \ ~` and the currency and letter forms beside
+/// them -- and never a plain ASCII letter or digit, which is what a ctrl or alt
+/// binding is spelled with. So ctrl+alt+backspace and ctrl+alt+the arrows stay
+/// bindings, and `\` typed on a German keyboard lands in the message.
+///
+/// ponytail: a layout whose AltGr level makes an ASCII letter or digit would be
+/// read as a binding instead. None of the ones I know do, and the alternative is
+/// asking Windows which layout is on the keyboard on every keystroke.
+fn altgr(k: KeyEvent) -> bool {
+    k.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        && matches!(k.code, KeyCode::Char(c) if !c.is_ascii_alphanumeric())
 }
 
 fn run(mut app: App) -> io::Result<()> {
