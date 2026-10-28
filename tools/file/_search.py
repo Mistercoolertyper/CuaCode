@@ -46,8 +46,10 @@ def _rg(rg: str, path: Path, args: dict, pattern: str):
         cmd.append("--json")
         if n := args.get("context"): cmd += ["--context", str(min(n, MAX_CONTEXT))]
     try:
+        # stdin closed: rg reads stdin when it is given no path, and here a path is
+        # always given, but a command waiting on the console would take the TUI's keys.
         p = subprocess.run(cmd + ["--", str(path)], capture_output=True, text=True,
-                           timeout=RG_TIMEOUT)
+                           timeout=RG_TIMEOUT, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return None
     if p.returncode > 1: return None          # 1 is "no matches"; 2 and up is rg refusing

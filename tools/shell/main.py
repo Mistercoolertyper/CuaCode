@@ -38,7 +38,14 @@ def _argv(command: str) -> list[str]:
     worker inherits a bare PATH.
     """
     if WINDOWS:
-        return ["powershell", "-NoProfile", "-Command",
+        # -NonInteractive, and the console handed nothing: without them, anything
+        # that prompts writes its prompt to CONOUT$ -- the terminal the TUI is
+        # drawing in -- while stdout is a pipe nobody is watching. A missing
+        # mandatory parameter (an empty `Write-Output`, a bare `Remove-Item`)
+        # then paints "Supply values for the following parameters" straight over
+        # the composer, in the middle of the input box, and leaves it there.
+        # Refusing to prompt turns that into an error on stderr instead.
+        return ["powershell", "-NoProfile", "-NonInteractive", "-Command",
                 f"{command}\n$__rc = $LASTEXITCODE; if ($null -eq $__rc) {{ $__rc = if ($?) {{ 0 }} else {{ 1 }} }}\n"
                 f"Write-Output \"{MARK}$($PWD.Path)\"\nexit $__rc"]
     return [os.environ.get("SHELL") or "/bin/sh", "-lc",

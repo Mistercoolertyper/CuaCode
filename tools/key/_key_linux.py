@@ -9,4 +9,8 @@ def press(combo: str):
     parts = [p.strip().lower() for p in combo.split("+")]
     mapped = [_ALIASES.get(p, p) for p in parts]
     xdotool_combo = "+".join(mapped)
-    subprocess.run(["xdotool", "key", xdotool_combo], check=True)
+    # Silent: an unknown key name is an xdotool error, and stderr is the terminal
+    # the TUI is drawing in.
+    subprocess.run(["xdotool", "key", xdotool_combo], check=True,
+                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL)
