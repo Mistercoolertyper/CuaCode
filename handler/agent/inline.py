@@ -27,7 +27,7 @@ COMMANDS = (
     ("model",    "which model that provider runs", True),
     ("vision",   "which provider looks at pictures", True),
     ("effort",   "how hard it thinks: off low medium high max", True),
-    ("cwd",      "where the next conversation stands, before it starts", True),
+    ("cwd",      "where the next conversation stands; a space lists directories", True),
     ("compact",  "fold the conversation now, or set the limit it folds at", True),
     ("context",  "how much of the window the conversation fills", False),
     ("usage",    "what this and every other session has cost", False),
@@ -39,8 +39,31 @@ COMMANDS = (
 # a menu asking a question that has no answer.
 ALIASES = {"compress": "compact"}
 
+# A command whose argument is a **path** rather than a word. `/cwd /home/me/work`
+# is the plain way to say it, and `/`, `~` and `..` are exactly what the word rule
+# below refuses -- so these read the argument as a path, quoted when it has a
+# space in it, and every other command keeps the word rule.
+PATHS = frozenset({"cwd"})
+
 _ALL = frozenset(name for name, _, _ in COMMANDS) | frozenset(ALIASES)
 _BLOCKING = frozenset(name for name, _, blocking in COMMANDS if blocking) | frozenset(ALIASES)
+
+
+def _argument(text: str, k: int) -> tuple[str, int]:
+    """The argument starting at `k`, and where it ends.
+
+    One token, or a quoted one when a path has a space in it: a path is not a
+    word, and the quote is the only way to say where it stops.
+    """
+    n = len(text)
+    if text[k] in "\"'":
+        end = text.find(text[k], k + 1)
+        if end != -1:
+            return text[k + 1:end], end + 1
+    end = k
+    while end < n and not text[end].isspace():
+        end += 1
+    return text[k:end], end
 
 
 def listing() -> list:
@@ -59,9 +82,10 @@ def parse(text: str) -> Result:
     """Pull `/command arg` occurrences out of `text`.
 
     A command is a `/` that opens a word followed by a known name and an
-    optional single-token argument; every other slash is left alone. The
-    residue, prose and any unknown `/word`, comes back as `text`, so a parallel
-    command leaves its message intact for the model.
+    optional argument; every other slash is left alone. The residue, prose and
+    any unknown `/word`, comes back as `text`, so a parallel command leaves its
+    message intact for the model. `cwd`'s argument is a path and takes the
+    characters a word refuses (`/cwd /home/me/work`).
     """
     blocking, parallel, out = [], [], []
     i, n = 0, len(text or "")
@@ -83,12 +107,8 @@ def parse(text: str) -> Result:
                 if name in _BLOCKING:
                     while k < n and text[k].isspace():
                         k += 1
-                    if k < n and (text[k].isalnum() or text[k] in "._:"):
-                        k2 = k
-                        while k2 < n and not text[k2].isspace():
-                            k2 += 1
-                        arg = text[k:k2]
-                        k = k2
+                    if k < n and (name in PATHS or text[k].isalnum() or text[k] in "._:"):
+                        arg, k = _argument(text, k)
                 (blocking if name in _BLOCKING else parallel).append((name, arg))
                 i = k
                 continue
@@ -103,8 +123,9 @@ if __name__ == "__main__":
         return [(n, a) for n, a in res.blocking] + [(n, a) for n, a in res.parallel]
 
     # The menu is not a second copy of the table: every command the parser
-    # knows is one the frontend can list.
-    assert {c["name"] for c in listing()} == _ALL
+    # knows is one the frontend can list. An alias is the exception -- it is
+    # kept working and kept out of the menu on purpose.
+    assert {c["name"] for c in listing()} == {name for name, _, _ in COMMANDS}
     assert all(c["description"] for c in listing())
 
     r = parse("explain X then /provider fr now")
@@ -114,4 +135,13 @@ if __name__ == "__main__":
     # A slash glued to a word, a path, or an unknown name is prose.
     assert names(parse("a /providerfr /etc/passwd /nope")) == []
     assert parse("").text == ""
+    # A path is an argument, not a word: `/`, `~` and `..` all start one, and a
+    # path with a space is quoted. Nothing of it is left as prose.
+    for typed, want in [("/cwd /home/me/work", "/home/me/work"),
+                        ("/cwd ~/work", "~/work"),
+                        ("/cwd ../there", "../there"),
+                        ("/cwd \"/home/my work\"", "/home/my work")]:
+        r = parse(typed)
+        assert names(r) == [("cwd", want)], (typed, names(r))
+        assert r.text == "", (typed, r.text)
     print("inline parse ok")

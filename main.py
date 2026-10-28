@@ -264,6 +264,11 @@ def _list_now(env):
         elif action == "fs.list":
             root = sess.meta.get("cwd") or ctx.get("cwd") or os.getcwd()
             ipc.reply(env, "files", fs_listing(root, data.get("dir", "")))
+        elif action == "dir.list":
+            # `/cwd`'s menu: the directories anywhere on this machine, because
+            # choosing one is leaving the directory the conversation is in.
+            root = sess.meta.get("cwd") or ctx.get("cwd") or os.getcwd()
+            ipc.reply(env, "dirs", dir_listing(root, data.get("dir", "")))
         elif action == "provider.list":
             ipc.reply(env, "providers", {"providers": config.listing(),
                                          "vision": config.vision_helper()[0], "vision_model": config.vision_helper()[1],
@@ -274,7 +279,7 @@ def _list_now(env):
         ipc.reply(env, "status", {"state": "error", "error": str(e)})
 
 
-for _action in ("command.list", "skill.list", "fs.list", "provider.list", "session.list"):
+for _action in ("command.list", "skill.list", "fs.list", "dir.list", "provider.list", "session.list"):
     ipc.direct[_action] = _list_now
 
 
@@ -430,21 +435,34 @@ def set_cwd_here(arg: str) -> str:
     **this** process's filesystem, which on a box is that box's: a path that does not
     exist where the work happens is not a location.
 
+    Every answer says which of the three it is: where it stands (and that it can
+    still move), where it now stands (and that this conversation starts there),
+    or why it cannot move and what to do instead. A path is read against the
+    directory the conversation stands in, not against the worker's own launch
+    directory, because that is the directory the person is looking at.
+
     One function for both doors - the `/cwd` command and the `session.cwd` a picker
     sends - because two spellings of "set the directory" is how one of them forgets
     that a conversation that has started cannot move.
     """
     here = sess.meta.get("cwd") or ctx.get("cwd") or os.getcwd()
+    started = bool(sess.records())
     if not arg:
+        if started:
+            return f"cwd: {here} - this conversation has started, so it is fixed"
         return f"cwd: {here}"
-    want = os.path.abspath(os.path.expanduser(arg))
+    # `~` first: it is the only spelling that does not depend on where the
+    # process was launched, and a relative path is a path from the conversation's
+    # own directory rather than from wherever the worker happened to start.
+    want = os.path.abspath(os.path.join(here, os.path.expanduser(arg)))
     if not os.path.isdir(want):
-        return f"cwd: {arg} is not a directory here"
-    if sess.records():
-        return "cwd: this conversation has started - set it before the first message, or open a new session"
+        return f"cwd: {arg} is not a directory on this machine"
+    if started:
+        return (f"cwd: {here} - this conversation has started, so it is fixed; "
+                "open a new session to work somewhere else")
     sess.set_cwd(want)
     ctx["cwd"] = want
-    return f"cwd -> {want}"
+    return f"cwd: {want} - this conversation starts there"
 
 
 def inline_command(env, text: str):
@@ -559,6 +577,41 @@ def _run_inline(name, arg) -> str:
         # is rebuilt when the other's source moves.
         return f"version {version.stamp()} \u00b7 `cuacode doctor` compares it with origin"
     return None
+
+
+def dir_listing(here: str, path: str = "") -> dict:
+    """One directory's subdirectories, for the `/cwd` menu.
+
+    Anywhere on **this** machine, unlike `fs_listing`: the point of `/cwd` is
+    leaving where the conversation stands, so a path may be absolute, start with
+    `~`, or step out with `..`. Only directories are rows, because only a
+    directory can be an answer, and `.`-prefixed ones stay out the way they do
+    in every menu here.
+
+    `dir` is the absolute path actually listed, because that is what the
+    `use this directory` row writes: the worker expanded `~`, and a frontend
+    expanding it again would be a second idea of what a path is. `error` is why
+    nothing is listed, so a menu can say "no such directory" instead of drawing
+    an empty frame that looks like an empty folder.
+    """
+    want = os.path.expanduser((path or "").strip())
+    if not os.path.isabs(want):
+        want = os.path.join(here or os.getcwd(), want)
+    want = os.path.normpath(want)
+    parent = os.path.dirname(want)
+    out = {"dir": want, "parent": "" if parent == want else parent,
+           "entries": [], "error": ""}
+    try:
+        names = os.listdir(want)
+    except OSError as e:
+        out["error"] = e.strerror or str(e)
+        return out
+    entries = [{"name": n, "path": os.path.join(want, n), "dir": True}
+               for n in names
+               if not n.startswith(".") and os.path.isdir(os.path.join(want, n))]
+    entries.sort(key=lambda e: e["name"].lower())
+    out["entries"] = entries[:200]
+    return out
 
 
 def fs_listing(root: str, sub: str = "") -> dict:

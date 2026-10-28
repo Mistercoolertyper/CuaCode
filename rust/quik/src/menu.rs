@@ -32,6 +32,10 @@ pub enum Kind {
     Skills,
     /// One directory of the conversation's own tree, written as its path.
     Files,
+    /// A directory anywhere on the worker's machine, written as its path. The
+    /// list behind `/cwd`: where the conversation stands is a place on a disk,
+    /// and a path is picked from what is there rather than spelled from memory.
+    Dirs,
     /// The configured providers. A picker rather than a word: choosing one
     /// switches, and nothing goes on the line.
     Providers,
@@ -71,6 +75,7 @@ impl Kind {
             Kind::Commands => "command",
             Kind::Skills => "skill",
             Kind::Files => "file",
+            Kind::Dirs => "directory",
             Kind::Providers => "provider",
             Kind::Models => "model",
             Kind::Sessions => "session",
@@ -278,11 +283,13 @@ pub fn with_local(items: Vec<Item>) -> Vec<Item> {
 }
 
 /// A menu's rows, as the worker sent them: which list they are, the rows, and
-/// for a model catalog the provider it was asked of.
+/// for a model catalog the provider it was asked of, or for a directory why it
+/// could not be read.
 pub struct Reply {
     pub kind: Kind,
     pub items: Vec<Item>,
     pub provider: String,
+    pub error: String,
 }
 
 /// The rows a menu reply carries, or nothing when the event was not one.
@@ -296,6 +303,7 @@ pub fn from_reply(kind: &str, data: &serde_json::Value) -> Option<Reply> {
         "commands" => ("commands", Kind::Commands),
         "skills" => ("skills", Kind::Skills),
         "files" => ("entries", Kind::Files),
+        "dirs" => ("entries", Kind::Dirs),
         "providers" => ("providers", Kind::Providers),
         "models" => ("models", Kind::Models),
         "sessions" => ("sessions", Kind::Sessions),
@@ -331,6 +339,26 @@ pub fn from_reply(kind: &str, data: &serde_json::Value) -> Option<Reply> {
                 Some(Item::new(name, "", value))
             })
             .collect(),
+        // A directory anywhere on that machine, which is what `/cwd`'s argument
+        // is. The row that finishes is the directory being listed -- choosing
+        // it is the answer, and it carries no trailing slash for exactly that
+        // reason -- and every other row is a way in, so it does.
+        Kind::Dirs => {
+            let here = data.get("dir").and_then(|d| d.as_str()).unwrap_or("");
+            let mut items: Vec<Item> = Vec::with_capacity(rows.len() + 2);
+            if !here.is_empty() {
+                items.push(Item::new("use this directory", here.to_string(), here.to_string()));
+            }
+            if let Some(up) = data.get("parent").and_then(|p| p.as_str()).filter(|p| !p.is_empty()) {
+                items.push(Item::new("..", up.to_string(), format!("{up}/")));
+            }
+            items.extend(rows.iter().filter_map(|row| {
+                let path = row.get("path")?.as_str()?;
+                let name = row.get("name").and_then(|n| n.as_str()).unwrap_or(path);
+                Some(Item::new(name, "", format!("{path}/")))
+            }));
+            items
+        }
         Kind::Providers => rows
             .iter()
             .filter_map(|row| {
@@ -379,7 +407,8 @@ pub fn from_reply(kind: &str, data: &serde_json::Value) -> Option<Reply> {
         Kind::Permissions | Kind::Calls | Kind::Hosts => Vec::new(),
     };
     let provider = data.get("provider").and_then(|p| p.as_str()).unwrap_or("").to_string();
-    Some(Reply { kind, items, provider })
+    let error = data.get("error").and_then(|e| e.as_str()).unwrap_or("").to_string();
+    Some(Reply { kind, items, provider, error })
 }
 
 /// A row's help line, marked when the row is the thing already in use: a picker
@@ -436,6 +465,11 @@ pub struct Menu {
     /// it. What a chosen model is set on, rather than whatever the frontend
     /// believes is current.
     pub provider: String,
+    /// Directories only: why the worker could not read the one asked for, in its
+    /// own words. Empty when it could. A menu that drew an empty frame for both
+    /// an empty directory and a path that is not there is a menu telling the
+    /// reader nothing about the thing it was asked for.
+    pub error: String,
     /// Whether the filter is also the tail of the message, and so whether a
     /// keystroke is a keystroke in the field.
     ///
@@ -458,6 +492,7 @@ impl Menu {
             filter: String::new(),
             dir: None,
             provider: String::new(),
+            error: String::new(),
             on_line: true,
             all: Vec::new(),
             shown: Vec::new(),
@@ -492,9 +527,12 @@ impl Menu {
     }
 
     /// A file filter is a path, and only its last part names an entry: what has
-    /// been typed after the last `/`, and the directory walked to get there.
+    /// been typed after the last `/`, and the directory walked to get there. A
+    /// filter that begins at the root walks from `/` rather than from the
+    /// conversation, which is the difference between `/cwd /etc` and `/cwd etc`.
     pub fn walked(&self) -> (&str, &str) {
         match self.filter.rsplit_once('/') {
+            Some(("", name)) if self.filter.starts_with('/') => ("/", name),
             Some((dir, name)) => (dir, name),
             None => ("", self.filter.as_str()),
         }
@@ -510,9 +548,15 @@ impl Menu {
     /// count is a place with no way to tell how big it is or where in it you are.
     /// The count is what the filter left, because that is what the keys can reach.
     pub fn title(&self) -> String {
-        match self.shown.len() {
+        let said = match self.shown.len() {
             0 => self.kind.title().to_string(),
             n => format!("{} \u{b7} {n}", self.kind.title()),
+        };
+        // Why a list is empty, when the worker said why: a directory with
+        // nothing in it and a directory that is not there draw the same frame.
+        match self.error.is_empty() {
+            true => said,
+            false => format!("{said} \u{b7} {}", self.error),
         }
     }
 
@@ -534,7 +578,7 @@ impl Menu {
     /// arrive.
     pub fn refilter(&mut self) {
         let needle = match self.kind {
-            Kind::Files => self.walked().1,
+            Kind::Files | Kind::Dirs => self.walked().1,
             _ => self.filter.as_str(),
         }
         .to_lowercase();
@@ -714,6 +758,51 @@ mod tests {
         assert_eq!(menu.walked(), ("src", ""));
         menu.refilter();
         assert_eq!(labels(&menu), ["main.rs", "mod.rs"]);
+    }
+
+    /// `/cwd`'s list: a directory anywhere on the machine. The row that
+    /// finishes is the directory being read, and it carries no slash because a
+    /// slash means "walk into this"; the entry above it says where walking up
+    /// goes, and every row under it is a way in.
+    #[test]
+    fn the_directory_list_says_where_you_are_and_how_to_leave_it() {
+        let reply = from_reply(
+            "dirs",
+            &serde_json::json!({"dir": "/home/me/work", "parent": "/home/me",
+                 "error": "", "entries": [
+                {"name": "src", "dir": true, "path": "/home/me/work/src"}]}),
+        )
+        .unwrap();
+        assert_eq!(reply.kind, Kind::Dirs);
+        assert_eq!(reply.items[0], Item::new("use this directory", "/home/me/work", "/home/me/work"));
+        assert_eq!(reply.items[1].value, "/home/me/", "the row above walks up");
+        assert_eq!(reply.items[2].value, "/home/me/work/src/", "an entry walks in");
+
+        // A path that is not there says why, rather than drawing an empty frame
+        // that reads as an empty directory.
+        let reply = from_reply(
+            "dirs",
+            &serde_json::json!({"dir": "/nope", "parent": "/", "entries": [],
+                 "error": "No such file or directory"}),
+        )
+        .unwrap();
+        let mut menu = Menu::open(Kind::Dirs, 0);
+        menu.fill(reply.items);
+        menu.error = reply.error;
+        assert!(menu.title().contains("No such file or directory"), "{}", menu.title());
+    }
+
+    /// An absolute filter walks from the root, which is what makes `/cwd /etc`
+    /// different from `/cwd etc`.
+    #[test]
+    fn an_absolute_filter_starts_at_the_root() {
+        let mut menu = Menu::open(Kind::Dirs, 0);
+        menu.filter = "/etc/".into();
+        assert_eq!(menu.walked(), ("/etc", ""));
+        menu.filter = "/".into();
+        assert_eq!(menu.walked(), ("/", ""));
+        menu.filter = "etc".into();
+        assert_eq!(menu.walked(), ("", "etc"), "a bare word is still the conversation's own");
     }
 
     /// Every list the worker sends becomes rows, and choosing one writes the
