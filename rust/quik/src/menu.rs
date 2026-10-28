@@ -13,6 +13,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use cuacode::hosts::Host;
 use cuacode::transcript::Row;
 
 use crate::view::{call_ink, call_lead, call_result, clip, clip_runs, ink, runs_width, thought_name, Run};
@@ -46,6 +47,11 @@ pub enum Kind {
     /// frontend fills itself: the rows are already in the transcript, and the
     /// worker has no list of them to ask for.
     Calls,
+    /// The machines a conversation can run on. A picker, and the only one that
+    /// replaces the worker rather than talking to it: choosing a row starts a
+    /// new conversation over there, because a conversation belongs to the machine
+    /// its worker runs on.
+    Hosts,
 }
 
 impl Kind {
@@ -70,6 +76,7 @@ impl Kind {
             Kind::Sessions => "session",
             Kind::Permissions => "permission",
             Kind::Calls => "call",
+            Kind::Hosts => "host",
         }
     }
 }
@@ -163,6 +170,46 @@ pub fn local() -> Vec<Item> {
         Item::new("permissions", "ask, auto, bypass, or off", "/permissions"),
     ]
 }
+
+/// The machines a conversation can run on, this one first.
+///
+/// The rows are `hosts.json` read once rather than a list kept here, and the
+/// empty value is this machine: every install without that file has exactly one
+/// row, which is the way this screen has always looked. The help beside a row is
+/// the `ssh` destination, because that string is the whole answer to "how does it
+/// get there" and a person debugging one should not have to open the file to see
+/// what was used.
+pub fn hosts(list: &[Host], now: Option<&str>) -> Vec<Item> {
+    let mut rows = vec![Item::new("this machine", acting("", now.is_none()), "")];
+    for host in list {
+        rows.push(Item::new(
+            host.name.clone(),
+            acting(&host.ssh, now == Some(host.name.as_str())),
+            host.name.clone(),
+        ));
+    }
+    rows
+}
+
+/// The conversation list, with the row that is not a conversation on top: a new
+/// one, standing in `where_new`.
+///
+/// It leads because that is the row someone who has just moved to a box wants, and
+/// the list under it is that box's own. The value is empty, which is not a session
+/// id and cannot be: `session.new` is the command behind that row, and the worker
+/// creates the folder with its first record, in the directory its own entry put it
+/// in. `where_new` is that directory, said out loud, because a new session on a
+/// machine you are not sitting at is a location before it is anything else.
+pub fn sessions(where_new: &str, items: Vec<Item>) -> Vec<Item> {
+    let mut rows = vec![Item::new("new session", where_new.to_string(), String::new())];
+    rows.extend(items);
+    rows
+}
+
+/// The value of the row a **typed path** adds to a conversation picker. Not a
+/// session id and not a value one could be: the rows are `new session` for the
+/// empty value and a session's id for everything else.
+pub const NEW_IN: &str = "\u{0}new-in";
 
 /// The permission modes as a picker draws them: the four the worker knows, in
 /// the order it takes them, with the one in use marked. A picker that only lists
@@ -329,7 +376,7 @@ pub fn from_reply(kind: &str, data: &serde_json::Value) -> Option<Reply> {
         // Never arrives: the four permission modes are the frontend's own, and
         // the calls are read off the transcript. Here so the match stays
         // exhaustive over what a menu can be.
-        Kind::Permissions | Kind::Calls => Vec::new(),
+        Kind::Permissions | Kind::Calls | Kind::Hosts => Vec::new(),
     };
     let provider = data.get("provider").and_then(|p| p.as_str()).unwrap_or("").to_string();
     Some(Reply { kind, items, provider })
@@ -491,6 +538,16 @@ impl Menu {
             _ => self.filter.as_str(),
         }
         .to_lowercase();
+        // A path typed into a conversation picker is not a filter, it is where the new
+        // conversation should stand: a row appears for it, so the choice is a row like
+        // every other one and enter takes it. Without this the picker only knew how to
+        // open what was already on that disk.
+        self.all.retain(|item| item.value != NEW_IN);
+        let typed = self.filter.trim().to_string();
+        if self.kind == Kind::Sessions && (typed.starts_with('/') || typed.starts_with('~')) {
+            self.all
+                .insert(0, Item::new(format!("new session in {typed}"), "", NEW_IN));
+        }
         let mut ranked: Vec<(u8, usize)> = Vec::new();
         for (i, item) in self.all.iter().enumerate() {
             let hay = item.label.to_lowercase();
@@ -574,6 +631,30 @@ mod tests {
 
     fn labels(menu: &Menu) -> Vec<&str> {
         menu.shown.iter().map(|i| menu.all[*i].label.as_str()).collect()
+    }
+
+    /// A menu's rows, and what choosing one writes onto the message.
+    ///
+    /// The host picker is the one list a worker never answers, so it is checked
+    /// here: this machine is always a row, and a host's help is the `ssh` string
+    /// that is the whole answer to how the conversation gets there.
+    #[test]
+    fn the_machines_are_this_one_first_and_the_file_after_it() {
+        let list = vec![
+            Host { name: "box".into(), ssh: "me@box".into(), dir: "/srv".into(), ..Host::default() },
+        ];
+        let rows = hosts(&list, None);
+        assert_eq!(rows[0].label, "this machine");
+        assert_eq!(rows[0].value, "", "the empty value is this machine");
+        assert_eq!(rows[0].hint, "acting now");
+        assert_eq!(rows[1].label, "box");
+        assert_eq!(rows[1].hint, "me@box", "the ssh destination, so a broken one is visible");
+        assert_eq!(rows[1].value, "box");
+
+        // On a host, the mark moves to it and this machine is only a destination.
+        let rows = hosts(&list, Some("box"));
+        assert_eq!(rows[0].hint, "");
+        assert!(rows[1].hint.contains("acting now"));
     }
 
     /// The filter is the tail of the message, and what a menu does with it. A

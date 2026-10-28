@@ -10,6 +10,8 @@
 //! code, headings, bullets and fences, with the markers gone. Nothing else on a row
 //! is read that way -- a call, a result and a notice are drawn as written.
 
+use cuacode::code::Fence;
+use cuacode::code::Tone;
 use cuacode::session;
 use cuacode::transcript::{Row, describe_args, is_bulky};
 use ratatui::style::{Color, Modifier, Style};
@@ -1295,56 +1297,10 @@ fn call_line(
 /// A name for a thought, taken from the thought itself.
 ///
 /// This is the name a row carries before any model has named it: the first
-/// sentence of the thought, cut to a head line's length on a word boundary. The
-/// worker can name a step with a small model and that name wins when it arrives;
-/// without a worker this is the only name there is, which is why it reads as the
-/// thought's own words rather than as a label invented for it.
-pub fn thought_name(text: &str) -> String {
-    /// Where a name stops being a name and becomes a sentence again.
-    const MAX: usize = 54;
-    let line = text
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or("")
-        .trim_start_matches(|c: char| {
-            c.is_whitespace() || matches!(c, '#' | '*' | '-' | '>' | '`' | '+')
-        })
-        .replace("**", "");
-    let line = line.trim();
-    if line.is_empty() {
-        return "Thinking".to_string();
-    }
-    // A whole sentence if it fits a head line. If it does not, the clause before
-    // the first comma or semicolon: a name that ends mid-clause reads as a bug,
-    // and one that ends at a comma still says what the step is.
-    let end = line
-        .find(['.', '!', '?'])
-        .filter(|&e| e <= MAX)
-        .or_else(|| {
-            line.find(", ").filter(|&e| e >= 12 && e <= MAX)
-        })
-        .or_else(|| line.find("; ").filter(|&e| e >= 12 && e <= MAX))
-        .unwrap_or_else(|| cut_word(line, MAX));
-    let name = line[..end].trim().trim_end_matches('.').trim();
-    if name.is_empty() {
-        "Thinking".to_string()
-    } else {
-        name.to_string()
-    }
-}
-
-/// How much of `text` fits before `max` bytes, cut at the last space, and never
-/// inside a character.
-fn cut_word(text: &str, max: usize) -> usize {
-    if text.len() <= max {
-        return text.len();
-    }
-    match text[..max].rfind(' ') {
-        Some(at) => at,
-        None => text[..max].char_indices().last().map_or(0, |(i, c)| i + c.len_utf8()),
-    }
-}
+/// The thought's name is **the shared half's rule**, not a copy of it: both frontends
+/// name a thinking row, and two cutting rules is how a terminal and a window disagree
+/// about the same run. Re-exported under the path this crate's own call sites use.
+pub use cuacode::transcript::thought_name;
 
 /// Whether a step has anything to open. A thought does (its own text), a run of
 /// calls does (one line each), and a peer message does (the message, which is
@@ -1544,20 +1500,28 @@ fn formatted(text: &str, style: Style, room: usize) -> Vec<Vec<Run>> {
     let lines: Vec<&str> = text.split('\n').collect();
     let mut out = Vec::new();
     let mut fenced = false;
+    // What the open fence said it was written in, and what its last line left open:
+    // the language is what tells a `#` from an attribute, and a block comment or a
+    // triple-quoted string has to stay open into the line after it.
+    let mut fence = Fence::default();
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
         let trimmed = line.trim_start();
         let indent = line.len() - trimmed.len();
         i += 1;
-        if trimmed.starts_with("```") {
+        if let Some(info) = trimmed.strip_prefix("```") {
             // The fence is a marker, not a line: what it wraps is what matters, and
-            // it is drawn as the code it is.
+            // it is drawn as the code it is. What is left on the markers' line is the
+            // language, the one thing that says how to read it.
             fenced = !fenced;
+            if fenced {
+                fence = Fence::new(info);
+            }
             continue;
         }
         if fenced {
-            out.push(code_line(&untabbed(line), style));
+            out.push(code_line(&untabbed(line), &mut fence, style));
             continue;
         }
         // A table is a block rather than a line: it is only a table because of the
@@ -1618,213 +1582,33 @@ fn formatted(text: &str, style: Style, room: usize) -> Vec<Vec<Run>> {
     out
 }
 
-/// The words a reader knows without knowing the language, which is as much of a
-/// vocabulary as this has: a keyword is what makes a line read as code rather than
-/// as a sentence, and the rest of a line's meaning is the reader's own.
-const KEYWORDS: &[&str] = &[
-    "fn",
-    "let",
-    "mut",
-    "def",
-    "class",
-    "struct",
-    "enum",
-    "trait",
-    "impl",
-    "type",
-    "where",
-    "mod",
-    "crate",
-    "pub",
-    "use",
-    "import",
-    "from",
-    "as",
-    "package",
-    "func",
-    "lambda",
-    "async",
-    "await",
-    "if",
-    "else",
-    "elif",
-    "match",
-    "for",
-    "while",
-    "loop",
-    "in",
-    "is",
-    "not",
-    "and",
-    "or",
-    "break",
-    "continue",
-    "return",
-    "yield",
-    "try",
-    "catch",
-    "except",
-    "finally",
-    "raise",
-    "with",
-    "do",
-    "switch",
-    "const",
-    "static",
-    "var",
-    "new",
-    "this",
-    "self",
-    "super",
-    "nil",
-    "undefined",
-    "true",
-    "false",
-    "None",
-    "null",
-    "void",
-];
-
-/// One line inside a fence, in the few tones a terminal reads code in: a comment,
-/// a string, a keyword, a number, and the code colour for everything else.
+/// The style of one tone of a line of code, in the palette the row already has.
 ///
-/// Language-agnostic on purpose, and shallow on purpose: it is a reader's
-/// convenience and not a parser, and a line coloured confidently wrong reads worse
-/// than a line in one colour. Every tone is one the palette already has -- what is
-/// said *about* the code is `faint`, a string is the green of a thing that is done,
-/// a keyword is the link's blue, and a number is the row's own white -- so the
+/// What is said *about* the code is `faint`, a string is the green of a thing that is
+/// done, a keyword is the link's blue, and a number is the row's own white, so the
 /// vocabulary costs `ink` nothing. The blue is a keyword's here and nothing is
 /// clickable inside a fence: a fence never goes through `inline`.
-///
-/// ponytail: one line at a time, with no state carried between them, so a string
-/// left open on one line is not known to be open on the next, and the fence's own
-/// language is never read. The upgrade path is a lexer over the whole block, behind
-/// this same signature.
-fn code_line(text: &str, base: Style) -> Vec<Run> {
-    let base = base.fg(ink::code());
-    let comment = base.fg(ink::faint());
-    let string = base.fg(ink::done());
-    let keyword = base.fg(ink::link());
-    let number = base.fg(ink::text());
-    let mut out: Vec<Run> = Vec::new();
-    let mut plain = String::new();
-    let mut at = 0;
-    // What the previous run ended with, which is what says whether a digit begins a
-    // number or sits inside a word.
-    let mut before: Option<char> = None;
-    while at < text.len() {
-        let rest = &text[at..];
-        let ch = rest.chars().next().expect("a position inside the text");
-        // A comment runs to the end of the line and nothing after it is read: it is
-        // what is said about the code rather than being it. `#[` is not one -- it is
-        // the one shape a `#` leads in the code itself, an attribute or an array's
-        // length -- and is left as it was written.
-        if rest.starts_with("//") || (ch == '#' && !rest.starts_with("#[")) {
-            if !plain.is_empty() {
-                out.push((std::mem::take(&mut plain), base));
-            }
-            out.push((rest.to_string(), comment));
-            break;
-        }
-        // A string is its two quotes and what is between them, or the rest of the
-        // line when nothing closes it: an unclosed one is still the shape a string
-        // has, and seeing the rest of the line go with it is how a reader notices.
-        if let Some(len) = quoted(rest, before) {
-            if !plain.is_empty() {
-                out.push((std::mem::take(&mut plain), base));
-            }
-            out.push((rest[..len].to_string(), string));
-            before = rest[..len].chars().next_back();
-            at += len;
-            continue;
-        }
-        // A number is a digit that begins one rather than sitting inside a word, and
-        // it is taken whole -- `0x1f`, `1_000`, `3.5`, `2px` -- so no line is left
-        // half a number.
-        if ch.is_ascii_digit()
-            && !before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.')
-        {
-            let len = run_len(rest, |c| c.is_ascii_alphanumeric() || c == '.' || c == '_');
-            if !plain.is_empty() {
-                out.push((std::mem::take(&mut plain), base));
-            }
-            out.push((rest[..len].to_string(), number));
-            before = rest[..len].chars().next_back();
-            at += len;
-            continue;
-        }
-        // A word, in the keyword's colour when it is one of the few a reader knows
-        // without knowing the language.
-        if ch.is_alphabetic() || ch == '_' {
-            let len = run_len(rest, |c| c.is_alphanumeric() || c == '_');
-            let word = &rest[..len];
-            if KEYWORDS.contains(&word) {
-                if !plain.is_empty() {
-                    out.push((std::mem::take(&mut plain), base));
-                }
-                out.push((word.to_string(), keyword));
-            } else {
-                plain.push_str(word);
-            }
-            before = word.chars().next_back();
-            at += len;
-            continue;
-        }
-        plain.push(ch);
-        before = Some(ch);
-        at += ch.len_utf8();
+fn code_tone(tone: Tone, base: Style) -> Style {
+    match tone {
+        Tone::Plain => base.fg(ink::code()),
+        Tone::Comment => base.fg(ink::faint()),
+        Tone::String => base.fg(ink::done()),
+        Tone::Keyword => base.fg(ink::link()),
+        Tone::Number => base.fg(ink::text()),
     }
-    if !plain.is_empty() {
-        out.push((plain, base));
-    }
-    out
 }
 
-/// How many bytes of `rest` one run of the characters `keeps` keeps takes.
-fn run_len(rest: &str, keeps: impl Fn(char) -> bool) -> usize {
-    rest.find(|c| !keeps(c)).unwrap_or(rest.len())
-}
-
-/// How many bytes of `rest` one literal takes: the quote, what is between, and the
-/// quote that closes it, or the rest of the line when nothing closes it.
+/// One line inside a fence, in the few tones a terminal reads code by.
 ///
-/// `None` for a single quote that does not open one: a `'` inside a word is an
-/// apostrophe (`don't`) and a `'` that never closes is a lifetime or a lone quote.
-/// Colouring the rest of `let x: &'a str` green is exactly the confidently wrong
-/// line this is not here to draw.
-fn quoted(rest: &str, before: Option<char>) -> Option<usize> {
-    let quote = rest.chars().next()?;
-    if !matches!(quote, '"' | '\'' | '`') {
-        return None;
-    }
-    if quote == '\'' && before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
-        return None;
-    }
-    let mut at = quote.len_utf8();
-    let mut escaped = false;
-    let mut closed = false;
-    for ch in rest[at..].chars() {
-        at += ch.len_utf8();
-        if escaped {
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == quote {
-            closed = true;
-            break;
-        } else if quote == '\'' && matches!(ch, '"' | '`') {
-            // A quote of another kind inside a `'` run: this is not a string, it is
-            // a lifetime or an apostrophe meeting the quote that was really opening
-            // one. `let x: &'a str = "it's here"` is the line this keeps legible, and
-            // the cost is `'say "hi"'`, whose inner quotes are the ones drawn.
-            return None;
-        }
-    }
-    if closed || quote != '\'' {
-        Some(at)
-    } else {
-        None
-    }
+/// Which tone a run is belongs here, because it is the palette's; which run is which
+/// tone belongs to `cuacode::code`, because both frontends draw the same code and a
+/// second vocabulary is how two panes end up disagreeing about what a comment is.
+fn code_line(text: &str, fence: &mut Fence, base: Style) -> Vec<Run> {
+    fence
+        .line(text)
+        .into_iter()
+        .map(|(run, tone)| (run.to_string(), code_tone(tone, base)))
+        .collect()
 }
 
 /// The text of a heading line, or nothing if it is not one: `#` through `######`,
@@ -2502,15 +2286,22 @@ fn body_of(lines: &[String]) -> Vec<Body> {
                 .is_some_and(|(a, b)| b == a + 1),
             _ => false,
         });
+    // A document here has no language to be read by, so its box is read by the
+    // generic shapes -- but still as one block, so a `/*` left open on a line keeps
+    // colouring the lines under it.
+    let mut fence = Fence::default();
     lines
         .iter()
         .enumerate()
         .map(|(i, line)| match numbered[i].filter(|_| counts) {
             Some((n, text)) => (
                 n.parse::<usize>().ok(),
-                code_line(&untabbed(text), Style::new()),
+                code_line(&untabbed(text), &mut fence, Style::new()),
             ),
-            None => (Some(i + 1), code_line(&untabbed(line), Style::new())),
+            None => (
+                Some(i + 1),
+                code_line(&untabbed(line), &mut fence, Style::new()),
+            ),
         })
         .collect()
 }
@@ -2787,42 +2578,63 @@ pub fn wrap_lines(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>> {
     out
 }
 
-/// The question the worker is blocked on, in full.
+/// A permission's document: what answering one needs to be answerable.
 ///
-/// A field line can only carry a yes or a no. Everything needed to answer one is
-/// here: why the gate flagged the call, the call itself as the model wrote it, and
-/// what the call says it would do. Refusing on a clipped line is refusing blind.
-pub fn ask_detail(name: &str, data: &Value) -> Opened {
-    let mut lines = Vec::new();
-    let label = |what: &str| {
-        Line::from(Span::styled(
-            format!("{what}:"),
-            Style::new().fg(ink::code()).bold(),
-        ))
-    };
+/// A yes or a no on a clipped line is a blind one, so everything the worker said
+/// about the call is here: why the gate stopped it, the call itself as the row
+/// names it, what the call says it would do, and the change it would make. The
+/// panel draws it above the two rows that answer it, so the decision comes after
+/// the evidence and never instead of it.
+pub fn ask_body(name: &str, data: &Value) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    // The call as the row names it, in the row's own two tones: the verb says what it
+    // would do and the bracket says what it would do it to. The arguments were a
+    // pretty-printed json blob here, which put `{ "command": "rm x" }` where the person
+    // needs `shell(rm x)` -- the same thing the row above already says. It carries no
+    // label: `the call:` read as a tool called "the call".
+    //
+    // What comes first, because it is what is being allowed; the reason it was stopped
+    // is the answer to the question the call raises, so it sits under it.
+    let args = data.get("args").cloned().unwrap_or(Value::Null);
+    let (verb, hint) = call_name(name, &describe_args(&args), &args);
+    let mut call = vec![Span::styled(verb, Style::new().fg(ink::call()))];
+    if let Some(hint) = hint {
+        call.push(Span::styled(
+            format!("({hint})"),
+            Style::new().fg(ink::code()),
+        ));
+    }
+    lines.push(Line::from(call));
+    // The reason the gate stopped it, as prose. `why:` over one sentence read as a form
+    // field, and the sentence is what is being weighed.
     if let Some(note) = data
         .get("note")
         .and_then(Value::as_str)
         .filter(|n| !n.trim().is_empty())
     {
-        lines.push(label("why"));
-        lines.extend(note.lines().map(|line| Line::from(line.to_string())));
         lines.push(Line::from(""));
+        lines.extend(
+            note.lines()
+                .map(|line| Line::from(Span::styled(line.to_string(), Style::new().fg(ink::text())))),
+        );
     }
-    lines.push(label("the call"));
-    let call = data.get("args").map(pretty).unwrap_or_default();
-    lines.extend(call.lines().map(|line| Line::from(line.to_string())));
-    lines.push(Line::from(""));
+    // What it would do and the change it would make, in the order a person reads them
+    // and with no label over either: a sentence under the call is the call's own
+    // consequence, and a diff is a diff by its colours.
     if let Some(preview) = data.get("preview") {
         if let Some(summary) = preview.get("summary").and_then(Value::as_str) {
-            lines.push(label("it would"));
-            lines.extend(summary.lines().map(|line| Line::from(line.to_string())));
-            lines.push(Line::from(""));
+            lines.extend(
+                summary
+                    .lines()
+                    .map(|line| Line::from(Span::styled(line.to_string(), Style::new().fg(ink::quiet())))),
+            );
         }
         if let Some(diff) = preview.get("diff").and_then(Value::as_str) {
-            lines.push(label("change"));
-            // The colours the panel gives a diff, in the one place a person is
-            // asked to read it before saying yes.
+            if lines.last().is_some_and(|line| !line.to_string().trim().is_empty()) {
+                lines.push(Line::from(""));
+            }
+            // The colours the panel gives a diff, in the one place a person is asked
+            // to read it before saying yes.
             lines.extend(diff.lines().map(|line| {
                 Line::from(Span::styled(
                     line.to_string(),
@@ -2831,11 +2643,7 @@ pub fn ask_detail(name: &str, data: &Value) -> Opened {
             }));
         }
     }
-    Opened {
-        title: format!("allow {name}?"),
-        lines,
-        scroll: 0,
-    }
+    lines
 }
 
 /// The keys, on request. `/help` is the one door to them.
@@ -2871,6 +2679,7 @@ pub fn keys() -> Opened {
             "everything before the caret on the line",
         ),
         ("cmd-delete, cmd-k / ctrl-k", "to the end of the line"),
+        ("ctrl-y", "put back what the last delete took"),
         (
             "\u{2191} \u{2193}",
             "a line of the message, or of the conversation",
@@ -2884,6 +2693,8 @@ pub fn keys() -> Opened {
         ("ctrl-t", "every step's calls; its thinking one line each"),
         ("ctrl-o", "the calls, to open one in full"),
         ("ctrl-b", "push the running call into the background"),
+        ("ctrl-g", "the machine this conversation runs on"),
+        ("ctrl-d", "send it as a run that keeps going without this screen"),
         (
             "double click",
             "one row: a call in full, a thinking opened or shut",
@@ -2903,11 +2714,6 @@ pub fn keys() -> Opened {
             .collect(),
         scroll: 0,
     }
-}
-
-/// A value as the document it is, one key per line.
-fn pretty(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
 
 /// Whether a call's summary reads as a failure. The worker says so two ways: an
@@ -3202,6 +3008,74 @@ mod tests {
         );
     }
 
+    /// A fence is read in the language its markers name, and a block it leaves open
+    /// is still open on the line under it. Both are the fence's own doing: the info
+    /// string is the only thing that says `#` is a comment here and an attribute
+    /// there, and without it the second half of a block comment is code.
+    #[test]
+    fn a_fence_is_read_in_the_language_its_markers_name() {
+        let base = Style::new().fg(ink::code());
+        let rows_of = |text: &str| {
+            formatted(text, Style::new().fg(ink::text()), ROOM)
+                .into_iter()
+                .map(|runs| {
+                    runs.into_iter()
+                        .map(|(text, style)| (text, style.fg.unwrap_or(ink::text())))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // The one line, in two languages: a comment in Python, code in Rust.
+        assert_eq!(
+            rows_of("```py\n# a note\n```"),
+            vec![vec![("# a note".to_string(), ink::faint())]]
+        );
+        assert_eq!(
+            rows_of("```rust\n#[derive(Debug)]\n```"),
+            vec![vec![("#[derive(Debug)]".to_string(), ink::code())]]
+        );
+        // Nothing said which language: the generic shapes, which is what a bare
+        // fence has always been read as.
+        assert_eq!(
+            rows_of("```\n# a note\n```"),
+            vec![vec![("# a note".to_string(), ink::faint())]]
+        );
+        // A comment left open runs into the lines under it.
+        assert_eq!(
+            rows_of("```c\nint x; /* open\nstill here\ndone */ int y;\n```"),
+            vec![
+                vec![
+                    ("int x; ".to_string(), ink::code()),
+                    ("/* open".to_string(), ink::faint()),
+                ],
+                vec![("still here".to_string(), ink::faint())],
+                vec![
+                    ("done */".to_string(), ink::faint()),
+                    (" int y;".to_string(), ink::code()),
+                ],
+            ]
+        );
+        // And it reaches the screen: the same line through the rows, the pieces and the
+        // wrap is one span in the keyword's tone, not a word the fence coloured and the
+        // painter forgot.
+        let answer = rows(&[
+            r#"{"type":"token","id":"a","data":{"state":"content","token":"```rust\nfn main() {}\n```"}}"#,
+        ]);
+        let drawn = draw(
+            &pieces_at(&answer, &all_open(), &no_figures(), None, true),
+            ROOM,
+        );
+        let fn_span = drawn
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.as_ref() == "fn")
+            .expect("`fn` is on the screen");
+        assert_eq!(fn_span.style.fg, Some(ink::link()));
+        assert_eq!(base.fg.unwrap(), ink::code());
+    }
+
     #[test]
     fn wrapping_keeps_each_words_style() {
         let answer = rows(&[
@@ -3407,23 +3281,24 @@ mod tests {
             "note": "it writes outside the directory the run started in",
             "preview": {"summary": "write 6542 bytes to src/main.rs"},
         });
-        let asked = ask_detail("file", &data);
-        assert_eq!(asked.title, "allow file?");
-        let text: String = asked
-            .lines
+        let lines = ask_body("file", &data);
+        let text: String = lines
             .iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        // The gate's reason in full, the call as the model wrote it, and what the
-        // call says it would do: a yes or a no on a clipped line is a blind one.
+        // The order is the argument: the reason, the call as the row names it, then
+        // what it would do. A yes or a no on a clipped line is a blind one.
         assert!(
-            text.contains("why:\nit writes outside the directory"),
+            text.starts_with("write(src/main.rs)\n\nit writes outside the directory the run started in\n"),
             "{text}"
         );
-        assert!(text.contains("the call:\n{"), "{text}");
-        assert!(text.contains("\"path\": \"src/main.rs\""), "{text}");
-        assert!(text.contains("it would:\nwrite 6542 bytes"), "{text}");
+        assert!(text.contains("write 6542 bytes to src/main.rs"), "{text}");
+        // No headings over any of it: `why:` over a sentence read as a form, and
+        // `the call:` read as a tool called "the call".
+        for label in ["why:", "the call:", "it would:", "change:"] {
+            assert!(!text.contains(label), "{label} is still a heading: {text}");
+        }
     }
 
     #[test]
