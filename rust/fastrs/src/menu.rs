@@ -13,6 +13,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use cuacode::hosts::Host;
 use cuacode::transcript::Row;
 
 use crate::view::{call_ink, call_lead, call_result, clip, clip_runs, ink, runs_width, Run};
@@ -46,6 +47,11 @@ pub enum Kind {
     /// frontend fills itself: the rows are already in the transcript, and the
     /// worker has no list of them to ask for.
     Calls,
+    /// The machines a conversation can run on. A picker, and the only one that
+    /// replaces the worker rather than talking to it: choosing a row starts a
+    /// new conversation over there, because a conversation belongs to the machine
+    /// its worker runs on.
+    Hosts,
 }
 
 impl Kind {
@@ -70,6 +76,7 @@ impl Kind {
             Kind::Sessions => "session",
             Kind::Permissions => "permission",
             Kind::Calls => "call",
+            Kind::Hosts => "host",
         }
     }
 }
@@ -164,6 +171,26 @@ pub fn local() -> Vec<Item> {
     ]
 }
 
+/// The machines a conversation can run on, this one first.
+///
+/// The rows are `hosts.json` read once rather than a list kept here, and the
+/// empty value is this machine: every install without that file has exactly one
+/// row, which is the way this screen has always looked. The help beside a row is
+/// the `ssh` destination, because that string is the whole answer to "how does it
+/// get there" and a person debugging one should not have to open the file to see
+/// what was used.
+pub fn hosts(list: &[Host], now: Option<&str>) -> Vec<Item> {
+    let mut rows = vec![Item::new("this machine", acting("", now.is_none()), "")];
+    for host in list {
+        rows.push(Item::new(
+            host.name.clone(),
+            acting(&host.ssh, now == Some(host.name.as_str())),
+            host.name.clone(),
+        ));
+    }
+    rows
+}
+
 /// The permission modes as a picker draws them: the four the worker knows, in
 /// the order it takes them, with the one in use marked. A picker that only lists
 /// is one you have to leave to find out where you are.
@@ -247,6 +274,9 @@ pub fn from_reply(kind: &str, data: &serde_json::Value) -> Option<Reply> {
     };
     let rows = data.get(key)?.as_array()?;
     let items = match kind {
+        // Nothing answers for the machines: that list is a file the frontend reads
+        // itself, and a worker cannot speak for one it has never met.
+        Kind::Hosts => return None,
         Kind::Commands => rows
             .iter()
             .filter_map(|row| {
