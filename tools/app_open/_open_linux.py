@@ -6,8 +6,12 @@ def get_frontmost() -> str | None:
     return win_id or None
 
 def open_app(app: str) -> str | None:
-    try: subprocess.Popen([app])
-    except Exception: subprocess.Popen(["xdg-open", app])
+    # Detached from the TUI's terminal: a launch that writes to it would paint
+    # inside the composer, and nothing here reads the app's output anyway.
+    _quiet = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                  start_new_session=True)
+    try: subprocess.Popen([app], **_quiet)
+    except Exception: subprocess.Popen(["xdg-open", app], **_quiet)
 
     deadline = time.time() + 5
     while time.time() < deadline:

@@ -2,6 +2,12 @@ import os, subprocess, time, ctypes, win32api, win32gui, win32process, win32con,
 from ctypes import wintypes
 
 _SPI_GETWORKAREA = 0x0030
+# A launched app gets no console of the one launching it: a console app would
+# otherwise write into the terminal the TUI is drawing in. DETACHED_PROCESS for
+# the app itself, CREATE_NO_WINDOW for the `cmd /c start` fallback that owns no
+# window of its own but would otherwise attach one.
+DETACHED_PROCESS = 0x00000008
+CREATE_NO_WINDOW = 0x08000000
 _SHELL_CLASSES = {
     "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
     "NotifyIconOverflowWindow", "TaskListThumbnailWnd",
@@ -125,10 +131,20 @@ def open_app(app: str) -> int | None:
     existing = _find_window(app)
     if existing:
         return existing
+    # Launched with no console of its own: a console app inherits the handle the
+    # TUI is drawing on, and its output then lands inside the composer mid-frame.
+    # DETACHED_PROCESS gives it none, and nothing here waits on its output anyway.
     try:
-        subprocess.Popen(app)
+        subprocess.Popen(app, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, creationflags=DETACHED_PROCESS)
     except Exception:
-        try: subprocess.Popen(["cmd", "/c", "start", "", app], shell=False)
+        # `start` runs the app under a fresh shell rather than beside the TUI, so
+        # the detached console still belongs to the app. Its own output is dropped
+        # by the pipes, which `start` would otherwise let through to the console.
+        try:
+            subprocess.Popen(["cmd", "/c", "start", "", app], shell=False,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
         except Exception: return None
 
     deadline = time.time() + 8

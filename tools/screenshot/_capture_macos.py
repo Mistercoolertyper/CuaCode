@@ -32,7 +32,10 @@ def capture():
         # file per attached display and only the first lands on the path we hand it, so a
         # second monitor changed what "the screenshot" meant. Every coordinate below is
         # measured from the main display's origin, the only one CGEvent clicks reach.
-        subprocess.run(["screencapture", "-x", "-D", "1", "-t", "bmp", tmp], check=True)
+        # stdin closed and the exit status checked: a tool that stops to ask a
+        # question would otherwise take the keystroke meant for the composer.
+        subprocess.run(["screencapture", "-x", "-D", "1", "-t", "bmp", tmp], check=True,
+                       stdin=subprocess.DEVNULL)
         img = Image.open(tmp)
         img.load()  # decode before the file goes away; Image.open is lazy
         return img
