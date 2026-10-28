@@ -17,18 +17,12 @@ class Envelope:
 
 
 class IPC:
-    def __init__(self, script: Optional[list] = None):
+    def __init__(self):
         self.inbox: queue.Queue[Envelope] = queue.Queue()
         self._lock = threading.Lock()
         self._pending: dict[str, Callable[[Envelope], None]] = {}
         self.terminal_info: dict = {}
         self._cancel = threading.Event()
-        # A scripted run: these envelopes are handed to the loop before anything
-        # else, and there is no stdin to read because there is nothing on the other
-        # end of it. `main.py --detach` is the whole of the caller: one message from
-        # a file, run with nobody attached.
-        self.detached = script is not None
-        self._script: list[Envelope] = [Envelope.from_dict(s) for s in (script or [])]
         # Handed straight to generate(), which clears it as it consumes it:
         # one press moves one call.
         self.background = threading.Event()
@@ -45,11 +39,7 @@ class IPC:
         # Commands answered on the reader thread, by action, since the loop sits inside
         # generate() for a whole turn: handlers must be read-only and quick.
         self.direct: dict[str, Callable[[Envelope], None]] = {}
-        # No reader thread for a scripted run: `for line in sys.stdin` on a detached
-        # process reads /dev/null, hits EOF, and the loop's own check would shut it
-        # down before the message it was started for ever ran.
-        if not self.detached:
-            threading.Thread(target=self._read_loop, daemon=True).start()
+        threading.Thread(target=self._read_loop, daemon=True).start()
 
     def _read_loop(self):
         for line in sys.stdin:
@@ -192,14 +182,6 @@ class IPC:
     def poll(self) -> list[Envelope]:
         cmds = []
         while not self.inbox.empty(): cmds.append(self.inbox.get())
-        if self._script:
-            cmds.extend(self._script)
-            self._script.clear()
-        elif self.detached and not cmds and not self._running.is_set():
-            # A scripted run is over when the script is. The flag a closed stdin sets
-            # is the same one, so the loop's own shutdown does the commit and the
-            # empty-session drop, exactly as it does for a frontend that went away.
-            self._eof.set()
         return cmds
 
     def poll_one(self, timeout: Optional[float] = None) -> Optional[Envelope]:

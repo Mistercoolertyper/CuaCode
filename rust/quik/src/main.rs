@@ -32,7 +32,7 @@ mod winpaste;
 
 use std::collections::HashMap;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -589,10 +589,6 @@ struct App {
     /// thirty a second, so `App::live` asks on a thread that outlives the frame
     /// and the loop collects it here.
     news_rx: Option<Receiver<version::News>>,
-    /// A detached run that is being started, and what came of it. Two `ssh` calls
-    /// are about a second each, so the key answers at once and the notice arrives
-    /// when the far end has actually taken it.
-    detach_rx: Option<Receiver<Result<String, String>>>,
     /// `CUACODE_HOME`, when the launch named one. Kept because switching host
     /// builds a whole new conversation and the state root goes with it.
     home: Option<PathBuf>,
@@ -618,25 +614,28 @@ impl App {
 
     /// The same screen, with its worker on `host` instead of this machine.
     ///
-    /// Nothing about the conversation changes over there: the worker speaks the
-    /// same wire, so the only difference is which process the pipe goes to. What
-    /// does not cross is the working directory -- a local path names nothing on
-    /// another machine, so a remote host starts where its own entry says and the
-    /// launch's own cwd is dropped.
+    /// A box's worker is **hosted**: it lives in a tmux pane there and this screen is a
+    /// client of it. That is what makes a box's conversation outlive this terminal: quit
+    /// quik, ctrl-c it, shut the laptop, and the pane on that box carries on, turn in
+    /// flight and all. The wire is the same wire; what changed is who owns its ends.
+    ///
+    /// Nothing about the conversation changes over there either. What does not cross is
+    /// the working directory -- a local path names nothing on another machine, so a
+    /// remote host starts where its own entry says and the launch's own cwd is dropped.
     fn live_on(
         host: Option<Host>,
         home: Option<&std::path::Path>,
         start: Start,
         opening: Option<String>,
     ) -> io::Result<App> {
-        let cwd = std::env::current_dir().ok();
-        let local_cwd = if host.is_some() { None } else { cwd.as_deref() };
-        let target = match &host {
-            Some(h) => Target::Remote(h.clone()),
-            None => Target::Local,
-        };
-        let sess = Session::start_on(&target, home, local_cwd)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let sess = match &host {
+            Some(h) => Session::attach_on(h),
+            None => {
+                let cwd = std::env::current_dir().ok();
+                Session::start_on(&Target::Local, home, cwd.as_deref())
+            }
+        }
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         let mut app = App::new(Some(sess));
         app.host = host;
         app.home = home.map(std::path::Path::to_path_buf);
@@ -724,7 +723,6 @@ impl App {
             peer_at: None,
             news: None,
             news_rx: None,
-            detach_rx: None,
             home: None,
             host: None,
             hosts: Vec::new(),
@@ -769,20 +767,6 @@ impl App {
             if let Ok(news) = rx.try_recv() {
                 self.news = Some(news);
                 self.news_rx = None;
-            }
-        }
-        // A detached run that has been started, or the reason it was not. The notice
-        // lands here rather than under the keypress because the far end is a round
-        // trip away, and a screen that froze for it would be the worse answer.
-        if let Some(rx) = &self.detach_rx {
-            if let Ok(answer) = rx.try_recv() {
-                self.detach_rx = None;
-                match answer {
-                    Ok(where_) => self.say(format!(
-                        "detached on {where_} \u{b7} it is in that machine's session list when its first round lands"
-                    )),
-                    Err(e) => self.say(format!("could not detach: {e}")),
-                }
             }
         }
         let events = match &mut self.sess {
@@ -2249,11 +2233,9 @@ impl App {
             // The machine this conversation runs on. The only key that starts a
             // different conversation rather than talking to this one.
             KeyCode::Char('g') if ctrl => self.pick_hosts(),
-            // A run that outlives this screen: the message is written to the machine the
-            // worker is on and started there under `nohup`, so quitting quik quits
-            // nothing over there. Its permission mode is `off` by construction, because
-            // nobody is left to answer a gate.
-            KeyCode::Char('d') if ctrl => self.detach_message(),
+            // Let go of the box: the worker there lives in a pane of its own, so this
+            // ends the view and leaves the work running. Nothing is sent to it.
+            KeyCode::Char('d') if ctrl => self.detach_box(),
             // The worker already knows how to push a call into the background,
             // and discards this when nothing is in flight.
             KeyCode::Char('b') if ctrl => {
@@ -2731,53 +2713,33 @@ impl App {
         self.act("session.new", serde_json::json!({}));
     }
 
-    /// Send the message in the field as a run that nobody is attached to.
+    /// Stop watching the box, and leave it working. `ctrl-d`.
     ///
-    /// `ctrl-d`. The run is a `main.py --detach` on whichever machine the worker is
-    /// on, started under `nohup`, so **this terminal is not its parent**: quit quik and
-    /// the turn keeps going. It asks nothing, because there is nobody to ask - a
-    /// detached worker forces the permission mode to `off` - and a turn that stopped
-    /// for a person who is not there would hang for ever.
-    ///
-    /// What it does lands in that machine's own session list, which is where it is read
-    /// back: ctrl-g, the machine, and the row is there once the first round commits.
-    fn detach_message(&mut self) {
-        if self.detach_rx.is_some() {
-            self.say("a detached run is already being started".to_string());
+    /// The worker over there is a child of its own tmux pane, so letting go of this
+    /// session ends the view and nothing else: a turn in flight keeps running, the laptop
+    /// can be shut, and ctrl-g brings the conversation back to where it got to. That is
+    /// the whole of what detach means here - it is not a run sent away, it is this screen
+    /// no longer being attached to work that never depended on it.
+    fn detach_box(&mut self) {
+        let Some(host) = self.host.clone() else {
+            self.say(
+                "detach is for a box: this conversation's worker lives in this terminal, so \
+                 closing it ends the work"
+                    .to_string(),
+            );
             return;
-        }
-        let text = self.input.trim().to_string();
-        if text.is_empty() {
-            self.say("nothing to detach: the field is empty".to_string());
-            return;
-        }
-        let worker = match cuacode::worker::worker_path() {
-            Ok(path) => path.display().to_string(),
-            Err(e) => return self.say(e),
         };
-        let python = match cuacode::worker::python(std::path::Path::new(&worker)) {
-            Ok(path) => path.display().to_string(),
-            Err(e) => return self.say(e),
-        };
-        let host = self.host.clone();
-        let root = self.home.clone().unwrap_or_else(cuacode::state_root);
-        let cwd = self.new_session_where();
-        let name = host
-            .as_ref()
-            .map(|h| h.name.clone())
-            .unwrap_or_else(|| "this machine".to_string());
-        self.input.clear();
-        self.caret = 0;
+        // Dropping the session is the whole of it: `Worker::close` on a hosted worker kills
+        // the tail and never sends `stop`, so nothing on that box hears about this.
+        self.sess = None;
+        self.log = Transcript::default();
+        self.menu = None;
         self.follow = true;
-        self.say(format!("detaching on {name}..."));
-        // Off the frame: two `ssh` calls are two round trips, and this is the thread that
-        // draws. The notice lands on the pump.
-        let (tx, rx) = mpsc::channel();
-        self.detach_rx = Some(rx);
-        std::thread::spawn(move || {
-            let answer = start_detached(host.as_ref(), &python, &worker, &root, &cwd, &text);
-            let _ = tx.send(answer);
-        });
+        self.scroll = 0;
+        self.say(format!(
+            "detached: {0} carries on, this screen is not attached to it - ctrl-g to come back",
+            host.name
+        ));
     }
 
     /// Move this screen onto another machine.
@@ -2843,117 +2805,6 @@ fn shimmer_phase(snap: Option<&Snapshot>, peer_age: Option<Duration>, ms: u128) 
         return None;
     }
     Some((age / view::SHIMMER_STEP_MS) as usize)
-}
-
-/// The two commands a detached run is, for one machine: write the message where that
-/// machine can read it, then start the run so that nothing on this side is its parent.
-///
-/// `main.py --detach <file>` is one turn from a file that reads no stdin, and the worker
-/// over there forces the permission mode to `off`: nobody is attached to answer a gate, so
-/// nothing may stop to ask. `nohup` and both streams on the log are what make the run
-/// outlive the `ssh` that started it. Free, so the shape is assertable with no box and no
-/// process, and one function so this machine and a box cannot drift apart.
-fn detach_commands(cwd: &str, python: &str, worker: &str, dir: &str, stamp: &str) -> (String, String) {
-    let dir = dir.trim_end_matches('/');
-    let prompt = format!("{dir}/{stamp}.txt");
-    let log = format!("{dir}/{stamp}.log");
-    let write = format!(
-        "mkdir -p {} && cat > {}",
-        cuacode::worker::sh(dir),
-        cuacode::worker::sh(&prompt)
-    );
-    let start = format!(
-        "cd {} && nohup {} {} --detach {} > {} 2>&1 < /dev/null &",
-        cuacode::worker::sh(cwd),
-        cuacode::worker::sh(python),
-        cuacode::worker::sh(worker),
-        cuacode::worker::sh(&prompt),
-        cuacode::worker::sh(&log)
-    );
-    (write, start)
-}
-
-/// Start one, on the machine the worker is on. `None` is this one: the same two steps
-/// with no `ssh` in front of them.
-fn start_detached(
-    host: Option<&Host>,
-    python: &str,
-    worker: &str,
-    root: &Path,
-    cwd: &str,
-    text: &str,
-) -> Result<String, String> {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-        .to_string();
-    match host {
-        Some(h) => {
-            let dir = format!("{}/detached", h.home());
-            let (write, start) = detach_commands(cwd, python, worker, &dir, &stamp);
-            // The flag has to exist **there**. A box running an older checkout boots the
-            // worker anyway, ignores the argument, says ready on a log nobody reads and
-            // exits, which looks exactly like a detached run that did nothing. Asked
-            // first, so the answer is a sentence rather than a silence.
-            run_ssh(
-                h,
-                &format!("grep -q -- '--detach' {}", cuacode::worker::sh(worker)),
-                None,
-            )
-            .map_err(|_| {
-                format!("{0} is running a cuacode without --detach: update the checkout there", h.name)
-            })?;
-            // The message first, on stdin so no quoting survives the trip: one call for
-            // the words, one for the run, and the second one returns as soon as the far
-            // side has taken it.
-            run_ssh(h, &write, Some(text))?;
-            run_ssh(h, &start, None)?;
-            Ok(h.name.clone())
-        }
-        None => {
-            let dir = root.join("detached");
-            let (write, start) = detach_commands(cwd, python, worker, &dir.display().to_string(), &stamp);
-            // The same two steps without a shell between them, and then the start line,
-            // which is a shell's own job because of `nohup` and the redirects.
-            let _ = write;
-            std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            std::fs::write(dir.join(format!("{stamp}.txt")), text)
-                .map_err(|e| format!("{}: {e}", dir.display()))?;
-            let out = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&start)
-                .output()
-                .map_err(|e| format!("sh: {e}"))?;
-            if !out.status.success() {
-                return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-            }
-            Ok("this machine".to_string())
-        }
-    }
-}
-
-/// One command on that machine, the same transport a worker rides. `stdin` is written
-/// into it and then closed, which is what makes `cat` on the far side finish.
-fn run_ssh(host: &Host, command: &str, stdin: Option<&str>) -> Result<String, String> {
-    use std::io::Write as _;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("ssh")
-        .args(cuacode::worker::ssh_argv_for(host, command))
-        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("ssh: {e}"))?;
-    if let (Some(text), Some(pipe)) = (stdin, child.stdin.as_mut()) {
-        pipe.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
-    }
-    drop(child.stdin.take());
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// What the status line says about a peer whose message is waiting: the other agent's
@@ -3900,31 +3751,11 @@ mod tests {
         assert!(screen.contains("new session in /home/me/deep"), "{screen}");
     }
 
-    /// The detached line, as text: `nohup` so nothing here is its parent, both streams
-    /// on the log, stdin from /dev/null because the message comes from a file, and the
-    /// message path quoted because a directory with a space in it is still one word.
+    /// Letting go of a box is not ending its work, and on this machine it is nothing at
+    /// all: the worker here is this terminal's child, so the key says so rather than
+    /// pretending something was detached.
     #[test]
-    fn a_detached_run_is_a_nohup_line_with_the_message_in_a_file() {
-        let (write, start) = detach_commands(
-            "/home/me/my work",
-            "/usr/bin/python3",
-            "/srv/cuacode/main.py",
-            "/home/me/.cuacode/detached/",
-            "17",
-        );
-        assert_eq!(write, "mkdir -p '/home/me/.cuacode/detached' && cat > '/home/me/.cuacode/detached/17.txt'");
-        assert!(
-            start.contains("cd '/home/me/my work' && nohup '/usr/bin/python3' '/srv/cuacode/main.py' --detach '/home/me/.cuacode/detached/17.txt'"),
-            "{start}"
-        );
-        assert!(start.contains("2>&1 < /dev/null &"), "nothing may hold the pipe open: {start}");
-        assert!(!start.contains("ssh"), "the transport is the caller's business: {start}");
-    }
-
-    /// ctrl-d with nothing typed starts nothing and says why: the one thing a key that
-    /// spawns a run on another machine must never do is spawn one out of an empty field.
-    #[test]
-    fn ctrl_d_on_an_empty_field_starts_nothing() {
+    fn ctrl_d_on_this_machine_says_what_detach_is_for() {
         let mut app = App::new(None);
         app.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
         let said: Vec<String> = app
@@ -3937,10 +3768,9 @@ mod tests {
             })
             .collect();
         assert!(
-            said.iter().any(|s| s.contains("nothing to detach")),
+            said.iter().any(|s| s.contains("detach is for a box")),
             "said {said:?}"
         );
-        assert!(app.detach_rx.is_none(), "a thread was started for an empty field");
     }
 
     /// The build id and the update notice have to reach the row a person reads,

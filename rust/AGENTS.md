@@ -99,13 +99,14 @@ shell scripts pick it up from the manifest with no other change.
   `Host::read_command` on its own thread (`ask_box`/`apply_box`), never in a frame
   and never on the tick.
 
-  A **detached** run is the one thing that is not a child of the screen: a terminal
-  frontend's `ctrl-d` writes the message to that machine and starts
-  `main.py --detach <file>` there under `nohup`, so closing the frontend stops
-  nothing. The worker forces the permission mode to `off` for exactly that reason
-  (`bypass` still stops for an irreversible call and puts it to a person, and the
-  person is not there), and the run answers on that machine's session list rather
-  than on the wire.
+  A box's worker is **hosted** on that box, and this frontend is a client of it
+  (`Worker::attach`): it runs in a tmux pane there, commands go in with `send-keys`,
+  and events come off the end of `~/.cuacode/live/cua.log`. Nothing here is its
+  parent, so `ctrl-d`, a quit, or this machine going down ends the view and never
+  the work - a turn in flight keeps generating. The worker is started as
+  `main.py --detached`, which forces the permission mode to `off`: `bypass` still
+  stops for an irreversible call and puts it to a person, and that person may be on
+  a plane.
 
 - **The render path does not touch the disk.** `render` runs thirty times a second
   while a hover is travelling, and a frame that opens a file is a frame the

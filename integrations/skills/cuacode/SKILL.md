@@ -112,15 +112,15 @@ conversation there and the list is that box's own. In a terminal frontend the
 conversation picker leads with a `new session` row, whose help line is the
 directory that session would stand in; `/cwd <path>` sets that directory before
 the first message, and is refused after it.
-- Closing the frontend stops an attached worker (the `ssh` process is its parent).
-A **detached** run is the exception: `ctrl-d` in a terminal frontend sends the
-message to the box and starts `main.py --detach <file>` under `nohup`, so closing
-the terminal stops nothing. It runs with permissions `off` (nobody is there to
-answer a gate), writes only to that box's session record, and is read back from
-the box's session list.
-- `--detach` needs the **same tree on the box**. A box running an older checkout
-does not have it: the frontend checks before starting and says so rather than
-leaving a worker that ignored the argument and exited.
+- A box's worker is **hosted on that box**: it runs in a tmux pane there
+(`Host::pane`, output followed from `~/.cuacode/live/cua.log`) and the frontend is
+a client of it. Closing the frontend, ctrl-c, or shutting this machine down ends
+the view, not the work: a turn in flight keeps generating. `ctrl-d` lets go on
+purpose and `ctrl-g` comes back to where the conversation got to. It is started
+with `--detached`, so its permission mode is `off`: a gate would otherwise stop
+for a person who may not be there.
+- That host needs `tmux` on the box, and the **same tree**: the worker is started as
+`main.py --detached`, and an older checkout does not have the flag.
 - Nothing sends a path across. A frontend on this machine never passes its own
 directory to a worker elsewhere, because that path names nothing over there.
 

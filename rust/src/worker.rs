@@ -171,6 +171,10 @@ pub struct Worker {
     stdin: Option<ChildStdin>,
     errors: Arc<Mutex<Vec<u8>>>,
     closing: Arc<AtomicBool>,
+    /// Set when this is a **hosted** worker: one on a box whose stdio belongs to a tmux
+    /// pane there rather than to this process. `child` is then the `ssh` carrying the
+    /// tail of that pane's log, and closing it closes the view and nothing else.
+    hosted: Option<Host>,
 }
 
 impl Worker {
@@ -223,13 +227,73 @@ impl Worker {
         let (tx, rx) = mpsc::channel();
 
         read_stderr(stderr, errors.clone());
-        let worker = Worker { child, stdin: Some(stdin), errors, closing };
+        let worker = Worker { child, stdin: Some(stdin), errors, closing, hosted: None };
         read_stdout(stdout, tx, worker.closing.clone(), worker.errors.clone(), worker.child.id());
         Ok((worker, rx))
     }
 
+    /// Attach to the worker hosted on `host`, starting one if that box has none.
+    ///
+    /// This is the detachable shape. The worker over there is a child of a tmux pane, so
+    /// nothing here is its parent: shutting this machine down stops nothing, and the run
+    /// in flight keeps going. Commands go into the pane with `send-keys` (a command per
+    /// call, about a second, which is why a message is where you feel it) and events come
+    /// off the end of the file `pipe-pane` appends, followed by one `tail -f` for the
+    /// whole attachment.
+    pub fn attach(h: &Host) -> Result<(Worker, Receiver<Event>), String> {
+        let mut fresh = false;
+        if !ssh_ok(h, &h.has_pane_command())? {
+            ssh_run(h, &h.start_pane_command(), None)?;
+            fresh = true;
+            // The pane's shell has to start the worker: a moment, or the log is measured
+            // before the ready line is in it and the first frame waits on a worker that
+            // has already spoken.
+            thread::sleep(std::time::Duration::from_millis(400));
+        }
+        // A pane this call started is read from the beginning, so the ready line reaches the
+        // screen even if it was written a moment before the tail attached. One that was
+        // already there is read from its end: everything before it is the past, and the past
+        // is the session record, which `session.load` replays.
+        let from = if fresh {
+            1
+        } else {
+            ssh_run(h, &h.log_size_command(), None)?
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(0)
+                + 1
+        };
+        let mut cmd = Command::new("ssh");
+        cmd.args(ssh_argv_for(h, &h.tail_command(from)))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| format!("ssh {}: {e}", h.name))?;
+        let stdout = child.stdout.take().ok_or("no stdout pipe")?;
+        let stderr = child.stderr.take().ok_or("no stderr pipe")?;
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let closing = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        read_stderr(stderr, errors.clone());
+        let worker = Worker {
+            child,
+            stdin: None,
+            errors,
+            closing: closing.clone(),
+            hosted: Some(h.clone()),
+        };
+        read_hosted(stdout, tx, closing, h.name.clone());
+        Ok((worker, rx))
+    }
+
     /// Write one envelope to the worker's stdin.
+    ///
+    /// A hosted worker has no stdin here: the envelope is typed into the pane that owns
+    /// it, which is the same line the pipe would have carried.
     pub fn send(&mut self, env: &Envelope) -> Result<(), String> {
+        if let Some(h) = self.hosted.clone() {
+            return ssh_run(&h, &h.send_command(&env.to_line()), None).map(|_| ());
+        }
         let stdin = self.stdin.as_mut().ok_or("worker is closed")?;
         stdin.write_all(env.to_line().as_bytes()).map_err(|e| e.to_string())?;
         stdin.flush().map_err(|e| e.to_string())
@@ -242,9 +306,15 @@ impl Worker {
     }
 
     /// Ask the worker to stop, then make sure it has.
+    ///
+    /// A hosted worker is **not** stopped by this: dropping the view is not ending the
+    /// work, which is the whole reason it is hosted. Its tail is closed and the pane on
+    /// that box carries on.
     pub fn close(&mut self) -> Result<(), String> {
         self.closing.store(true, Ordering::SeqCst);
-        let _ = self.send(&Envelope::cmd("quit", "stop", serde_json::json!({})));
+        if self.hosted.is_none() {
+            let _ = self.send(&Envelope::cmd("quit", "stop", serde_json::json!({})));
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
         Ok(())
@@ -253,12 +323,84 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        // The worker holds a real process group and a session folder; it must
-        // not outlive the thing that spawned it.
+        // The worker this process spawned holds a real process group and a session
+        // folder, so it must not outlive the thing that spawned it. A **hosted** one is
+        // the other case: what is dropped here is the tail, and the work stays.
         self.closing.store(true, Ordering::SeqCst);
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// One `ssh` into `host`, with the exit code as the answer: the shape a question like
+/// "is a worker already hosted there" needs.
+fn ssh_ok(h: &Host, command: &str) -> Result<bool, String> {
+    let out = Command::new("ssh")
+        .args(ssh_argv_for(h, command))
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("ssh {}: {e}", h.name))?;
+    Ok(out.status.success())
+}
+
+/// One `ssh` into `host`, its stdout as the answer, and a failed exit as the error it
+/// printed. `stdin` is written in and closed, for a command that reads a file's worth of
+/// text.
+fn ssh_run(h: &Host, command: &str, stdin: Option<&str>) -> Result<String, String> {
+    use std::io::Write as _;
+    let mut child = Command::new("ssh")
+        .args(ssh_argv_for(h, command))
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("ssh {}: {e}", h.name))?;
+    if let (Some(text), Some(pipe)) = (stdin, child.stdin.as_mut()) {
+        pipe.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    drop(child.stdin.take());
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if said.is_empty() { format!("ssh {} failed", h.name) } else { said });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Lines off a hosted worker's log, followed for as long as the tail lives.
+///
+/// A line that is not an envelope is dropped rather than reported: the pane's pty can
+/// echo, tmux can print, and none of that is the worker speaking. A tail that ends is
+/// the **connection** ending, and it says so, because the worker over there is still
+/// running and a screen that read that as a dead worker would be lying.
+fn read_hosted(stdout: impl Read + Send + 'static, tx: Sender<Event>, closing: Arc<AtomicBool>,
+               name: String) {
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+            let line = String::from_utf8_lossy(&buf);
+            let line = line.trim_end();
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(ev) = wire::parse(line) else { continue };
+            if tx.send(ev).is_err() {
+                return;
+            }
+        }
+        if !closing.load(Ordering::SeqCst) {
+            let _ = tx.send(wire::worker_exit(&format!(
+                "lost the connection to {name}; the worker there is still running, ctrl-g to come back"
+            )));
+        }
+    });
 }
 
 fn read_stdout(stdout: impl Read + Send + 'static, tx: Sender<Event>, closing: Arc<AtomicBool>,

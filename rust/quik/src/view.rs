@@ -2694,7 +2694,7 @@ pub fn keys() -> Opened {
         ("ctrl-o", "the calls, to open one in full"),
         ("ctrl-b", "push the running call into the background"),
         ("ctrl-g", "the machine this conversation runs on"),
-        ("ctrl-d", "send it as a run that keeps going without this screen"),
+        ("ctrl-d", "let go of the box; it keeps working"),
         (
             "double click",
             "one row: a call in full, a thinking opened or shut",
