@@ -17,7 +17,34 @@ from tools._safety import shell as shell_safety
 
 SETTINGS = config.settings()
 
-ipc = IPC()
+
+def detach_prompt(argv: list[str]) -> str:
+    """The message a `--detach` run was given, or empty for a normal launch.
+
+    `main.py --detach <file>` is one turn with nobody attached: the frontend that
+    started it is gone (or never stays), so there is no pipe to speak on and nobody
+    to answer a permission. The message comes from a file rather than an argument so
+    that it can be a paragraph with quotes and newlines in it, and so the frontend
+    that wrote it over `ssh` never has to quote anything.
+    """
+    for i, arg in enumerate(argv):
+        if arg == "--detach" and i + 1 < len(argv):
+            path = argv[i + 1]
+            try:
+                return open(path, encoding="utf-8").read().strip()
+            except OSError as e:
+                print(f"--detach {path}: {e}", file=sys.stderr)
+                sys.exit(2)
+    return ""
+
+
+DETACHED = detach_prompt(sys.argv[1:])
+
+# A detached run hands the loop its one message before it starts, and reads no
+# stdin: the whole run is that message, and the loop's own EOF shutdown is what
+# commits the session and lets the process go.
+ipc = IPC(script=[{"type": "cmd", "id": "detached", "data": {"action": "chat", "text": DETACHED}}]
+          if DETACHED else None)
 
 
 class Ctx(dict):
@@ -37,6 +64,13 @@ def terminal_ctx(data) -> Ctx:
     when the two swap places.
     """
     info = dict(data or {})
+    # The directory, when the frontend sent none. A frontend on another machine has
+    # no path to send: the wire may cross to a box, where its cwd names nothing, so
+    # it leaves the field out. The worker is standing in a directory either way, and
+    # this is that one -- a session that cannot say where it happened is a session
+    # recall and app-scoped memory cannot find again.
+    if not info.get("cwd"):
+        info["cwd"] = os.getcwd()
     if os.name == "nt" and not info.get("frontmost_app"):
         try:
             from tools.screenshot._capture_windows import active_app_name
@@ -77,17 +111,20 @@ def settings_fields(sess) -> dict:
     return out
 
 
+# ask | auto | bypass | off, for calls a tool declares need asking; a frontend
+# re-declares it once it is up. Nobody is attached to a detached run, so nothing
+# may stop to ask: the gate asks nothing at all and every call goes through.
+# `bypass` is not enough here -- its whole rule is to stop for the irreversible
+# calls and put those to a person, and that person is exactly who is not there.
+PERM_MODE = "off" if DETACHED else config.permission_mode()
+
 # The ready line carries the session id, so a frontend can tie its live row to
 # the record committed later, plus the mode and settings for the header.
 ipc.send("status", {"state": "ready", "session_id": sess.id,
-                    "mode": config.permission_mode(), **settings_fields(sess)})
+                    "mode": PERM_MODE, **settings_fields(sess)})
 # Tools run in this process, so the memory tool retitles the object the loop
 # holds, not the file underneath it.
 naming.set_live(sess)
-
-# ask | auto | bypass | off, for calls a tool declares need asking; a frontend
-# re-declares it once it is up.
-PERM_MODE = config.permission_mode()
 
 # The last round's cost, read by /context: one round, not a running total.
 LAST_TURN = {}
@@ -395,6 +432,32 @@ def fold_now() -> str:
     return said or "compact: nothing here worth folding yet"
 
 
+def set_cwd_here(arg: str) -> str:
+    """Where this conversation stands, and the one place that decides it.
+
+    Before the first record only: the worker stamps the directory on the session and
+    every tool the run calls runs there, so moving it under a live conversation is not
+    a setting, it is a lie about where the work has been happening. Checked against
+    **this** process's filesystem, which on a box is that box's: a path that does not
+    exist where the work happens is not a location.
+
+    One function for both doors - the `/cwd` command and the `session.cwd` a picker
+    sends - because two spellings of "set the directory" is how one of them forgets
+    that a conversation that has started cannot move.
+    """
+    here = sess.meta.get("cwd") or ctx.get("cwd") or os.getcwd()
+    if not arg:
+        return f"cwd: {here}"
+    want = os.path.abspath(os.path.expanduser(arg))
+    if not os.path.isdir(want):
+        return f"cwd: {arg} is not a directory here"
+    if sess.records():
+        return "cwd: this conversation has started - set it before the first message, or open a new session"
+    sess.set_cwd(want)
+    ctx["cwd"] = want
+    return f"cwd -> {want}"
+
+
 def inline_command(env, text: str):
     """Act on the inline /commands in a chat message. True when a blocking command
     (provider, model, vision, effort) ran: its result is the whole answer and the turn stops.
@@ -456,6 +519,8 @@ def _run_inline(name, arg) -> str:
         sess.set_effort(arg)
         config.set_default_effort(sess.effort)
         return f"effort -> {sess.effort}"
+    if name == "cwd":
+        return set_cwd_here(arg)
     if name == "compact":
         # Three jobs, one word. With no argument it folds now; with a size it sets
         # the limit the conversation folds at; with a share it sets that instead,
@@ -743,6 +808,11 @@ while True:
             except ValueError as e:
                 ipc.reply(env, "status", {"state": "error", "error": str(e)})
 
+        elif action == "session.cwd":
+            # Where the next conversation stands, said as a notice because it is the
+            # answer to a question someone asked by typing a directory into a picker.
+            notice = set_cwd_here(env.data.get("path") or "")
+            ipc.reply(env, "token", {"state": "notice", "token": notice})
         elif action == "session.new":
             # The effort carries over: a fresh chat is not a request to go back
             # to whatever the provider does by default.

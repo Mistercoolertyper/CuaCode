@@ -27,6 +27,7 @@ COMMANDS = (
     ("model",    "which model that provider runs", True),
     ("vision",   "which provider looks at pictures", True),
     ("effort",   "how hard it thinks: off low medium high max", True),
+    ("cwd",      "where the next conversation stands, before it starts", True),
     ("compact",  "fold the conversation now, or set the limit it folds at", True),
     ("context",  "how much of the window the conversation fills", False),
     ("usage",    "what this and every other session has cost", False),
