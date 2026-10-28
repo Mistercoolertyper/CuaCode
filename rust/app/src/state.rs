@@ -27,41 +27,6 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-/// How a session row's second line reads.
-///
-/// One rule, and it is a person's rather than a heuristic: **a session under a
-/// project says nothing, and a session without one shows its full path.** The
-/// project's heading has already named where these stand, so a second line under
-/// it is a line that repeats its own heading; outside any project there is no
-/// heading, so the path is the only thing that says where the session is.
-///
-/// The first pass here tried to be cleverer than that (a relative subpath for a
-/// session inside a project, a shortened path for one outside) and both halves
-/// were wrong: a two-line row in a rail of one-line rows is a gap, and `…/x/y`
-/// is a path with its beginning cut off rather than its end kept.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Caption {
-    /// Nothing to add: the session stands where its project does.
-    None,
-    /// No project: the whole path, because nothing else names the place.
-    Path(String),
-}
-
-impl Caption {
-    /// The text to draw on the second line, or nothing.
-    pub fn text(&self) -> String {
-        match self {
-            Caption::None => String::new(),
-            Caption::Path(path) => path.clone(),
-        }
-    }
-
-    /// Whether the row has a second line at all, which is what sets its height.
-    pub fn two_line(&self) -> bool {
-        !matches!(self, Caption::None)
-    }
-}
-
 /// One session, as `meta.json` describes it. Every field is optional: the
 /// worker writes the key it has, and 31 of the 459 sessions on this machine
 /// have no `cwd` at all.
@@ -171,13 +136,18 @@ impl Workspace {
     /// The same, against a root named rather than discovered: the one door, so
     /// a test drives the reader the window drives.
     pub fn read_from(home: &Path) -> Workspace {
-        let home = home.to_path_buf();
-        let projects = read_projects(&home);
-        let mut sessions = read_sessions(&home);
+        Workspace::group(read_projects(home), read_sessions(home), home.to_path_buf())
+    }
+
+    /// The same grouping, from a listing that came from somewhere else: a worker's
+    /// own `session.list`, which is a box's listing read **on that box**.
+    ///
+    /// `projects` is empty for a box this window cannot open, and that is the honest
+    /// answer rather than a gap: a promoted project is a fact about that box's
+    /// `projects.json`, and the window has not read it. Every session then sits under
+    /// its own directory, which is a fact each session carries.
+    pub fn group(projects: Vec<Project>, mut sessions: Vec<Session>, home: PathBuf) -> Workspace {
         let total = sessions.len();
-        // silence the borrow checker's doubt: `home` is read above and moved
-        // into the result below.
-        let _ = &home;
 
         // Newest first, and once: the grouping only takes from this, so the
         // order inside a project is this order and not a second sort.
@@ -310,9 +280,18 @@ pub fn transcript(home: &Path, id: &str, max: usize) -> Vec<Turn> {
         return Vec::new();
     }
     let path = home.join("sessions").join(id).join("messages.jsonl");
-    let Ok(text) = read_tail(&path, TAIL_BYTES) else {
-        return Vec::new();
-    };
+    match read_tail(&path, TAIL_BYTES as u64) {
+        Ok(text) => turns(&text, max),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The same rows, from the bytes of a transcript rather than from a path to one.
+///
+/// One reader for a file this machine opened and one fetched from a box it cannot
+/// open, because they are the same file: a remote read is the tail of that box's
+/// `messages.jsonl`, bytes for bytes, with the same torn first line to drop.
+pub fn turns(text: &str, max: usize) -> Vec<Turn> {
     let mut out: Vec<Turn> = Vec::new();
     for line in text.lines() {
         let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -364,7 +343,11 @@ pub fn transcript(home: &Path, id: &str, max: usize) -> Vec<Turn> {
 
 /// How much of the end of a transcript is read. 256KB is thousands of rows of
 /// conversation and a fraction of a millisecond off an SSD.
-const TAIL_BYTES: u64 = 256 * 1024;
+///
+/// Public because the same number is what a remote read asks `tail` for: a box read
+/// over `ssh` and a file read here are the same read, and two sizes for it is how
+/// one of them ends up drawing shorter than the other.
+pub const TAIL_BYTES: usize = 256 * 1024;
 
 /// The last `n` bytes of a file, as text, with the partial first line dropped.
 ///
@@ -874,48 +857,10 @@ impl Choices {
             .unwrap_or_default()
     }
 
-    /// The models a provider can be asked for, in the order a person wants them:
-    /// the account's own history first (known to work here), then the registry's
-    /// shortlist (the ones it would pick), then anything with capabilities
-    /// recorded, then the rest of the shortlist's tail. One of each, and never a
-    /// blank row.
-    pub fn models(&self, provider: &str) -> Vec<String> {
-        let Some(p) = self.providers.iter().find(|p| p.name == provider) else {
-            return Vec::new();
-        };
-        let mut out: Vec<String> = Vec::new();
-        let mut push = |name: &str, out: &mut Vec<String>| {
-            let name = name.trim();
-            if !name.is_empty() && !out.iter().any(|m| m == name) {
-                out.push(name.to_string());
-            }
-        };
-        for m in &p.history {
-            push(m, &mut out);
-        }
-        for m in &p.shortlist {
-            push(m, &mut out);
-        }
-        push(&p.default_model, &mut out);
-        for m in &p.caps {
-            push(m, &mut out);
-        }
-        out
-    }
-
     pub fn provider(&self, name: &str) -> Option<&Provider> {
         self.providers.iter().find(|p| p.name == name)
     }
 
-    /// What a provider is, as the word a menu can hold: where it points, which
-    /// is the only thing that tells nine api keys apart.
-    pub fn provider_fact(&self, name: &str) -> String {
-        HOSTS
-            .iter()
-            .find(|(n, _)| *n == name)
-            .map(|(_, host)| (*host).to_string())
-            .unwrap_or_default()
-    }
 }
 
 /// Read `config.json` for the two settings that are the file's, then ask the
@@ -1058,19 +1003,6 @@ impl Icon {
         Icon::Glyph(t.to_string())
     }
 }
-
-/// The gradient rungs their own `ColorSelector` offers, as the two ends of each
-/// circle. Eight, which is what a `grad:<n>` token indexes.
-pub const GRADIENTS: [(u32, u32); 8] = [
-    (0xe07850, 0xe5c07b),
-    (0x61afef, 0x7ec0f5),
-    (0x5fb37f, 0x98d1a8),
-    (0xc678dd, 0xd494e6),
-    (0x56b6c2, 0x73c7d3),
-    (0xdc6b6b, 0xffcccc),
-    (0xd4a84b, 0xecd08f),
-    (0x7b68ee, 0xad46ff),
-];
 
 /// Every project's icon token, keyed by its directory.
 pub fn icons(home: &Path) -> std::collections::HashMap<String, String> {
@@ -1469,9 +1401,6 @@ impl Changed {
         format!("{tail}/")
     }
 
-    pub fn is_untracked(&self) -> bool {
-        self.status == "untracked"
-    }
 }
 
 /// A repository's state: which branch, and what is uncommitted.
@@ -1608,6 +1537,8 @@ fn assemble(dirs: &mut std::collections::BTreeMap<String, Vec<Node>>, at: &str) 
     children
 }
 
+/// Flatten filtered, borrowed nodes into rows. The same walk as `tree_rows`,
+/// over a slice of references rather than a tree of owners.
 /// A tree flattened into rows, with the folders that are open walked into and the
 /// ones that are shut left as a single row.
 ///
@@ -1644,8 +1575,6 @@ fn walk<'a>(
     }
 }
 
-/// Flatten filtered, borrowed nodes into rows. The same walk as `tree_rows`,
-/// over a slice of references rather than a tree of owners.
 pub fn tree_rows_ref<'a>(
     nodes: &[&'a Node],
     is_open: &dyn Fn(&str) -> bool,
@@ -1819,15 +1748,6 @@ pub enum Viewing {
 }
 
 impl Viewing {
-    pub fn text(&self) -> &str {
-        match self {
-            Viewing::Patch(t) | Viewing::Whole(t) | Viewing::Empty(t) => t,
-        }
-    }
-
-    pub fn is_patch(&self) -> bool {
-        matches!(self, Viewing::Patch(_))
-    }
 }
 
 /// The file a change touched, as a patch or as its own text.
@@ -1897,23 +1817,6 @@ pub fn add_project(dir: &Path) -> Result<(), String> {
     std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(())
-}
-
-/// What a session row's second line should say.
-///
-/// `project` is the project the session was *filed under*, so having one settles
-/// it: no second line, regardless of where inside the project it stands. With no
-/// project, the path is drawn whole, with the home directory as `~`, because a
-/// path that has been shortened is a path that no longer says where the thing is.
-pub fn caption(cwd: &str, project: Option<&Path>) -> Caption {
-    if project.is_some() {
-        return Caption::None;
-    }
-    let cwd = cwd.trim();
-    if cwd.is_empty() {
-        return Caption::Path("no directory recorded".into());
-    }
-    Caption::Path(short_path(Path::new(cwd)))
 }
 
 /// The state root: `CUACODE_HOME` when it is set, `~/.cuacode` otherwise. The
@@ -2084,6 +1987,47 @@ mod tests {
     fn a_session_with_no_cwd_is_not_placed_by_guessing() {
         assert!(!under("", Path::new("/Users/x/proj")));
         assert!(!under("   ", Path::new("/Users/x/proj")));
+    }
+
+    /// A box's listing arrives over the wire and is grouped by the same code the
+    /// local disk goes through. No projects, because the window has not read that
+    /// box's `projects.json`: every session is headed by its own directory, newest
+    /// first, and a session with no directory is the only thing under "No".
+    #[test]
+    fn a_listing_from_another_box_groups_by_its_own_directories() {
+        let s = |id: &str, cwd: &str, updated: &str| Session {
+            id: id.into(),
+            title: id.into(),
+            cwd: cwd.into(),
+            updated: updated.into(),
+            ..Default::default()
+        };
+        let listing = vec![
+            s("old", "/home/me/work", "2026-10-01T10:00:00+00:00"),
+            s("new", "/home/me/work", "2026-10-02T10:00:00+00:00"),
+            s("elsewhere", "/home/me/other", "2026-10-01T12:00:00+00:00"),
+            s("nowhere", "", "2026-10-01T09:00:00+00:00"),
+        ];
+        let ws = Workspace::group(Vec::new(), listing, PathBuf::from("/unread"));
+        assert_eq!(ws.total, 4);
+        let headings: Vec<&str> = ws.projects.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(headings, vec!["work", "other"], "the newest session's directory leads");
+        let ids: Vec<&str> = ws.projects[0].sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["new", "old"], "newest first inside a heading");
+        assert_eq!(ws.other.len(), 1, "a session with no directory is the only one there");
+    }
+
+    #[test]
+    fn rows_are_read_from_the_bytes_of_a_transcript() {
+        let text = "{\"t\":\"user\",\"ts\":\"t1\",\"text\":\"hi\"}\n\n{\"t\":\"assistant\",\"ts\":\"t2\",\"content\":\"hello\"}\n";
+        let rows = turns(text, 40);
+        assert_eq!(rows.len(), 2, "the blank line is not a row");
+        assert_eq!(rows[0].kind, Kind::User);
+        assert_eq!(rows[1].kind, Kind::Answer);
+        // A tail read lands mid-record: half a line parses as nothing and costs its own
+        // row, never the ones after it.
+        let torn = format!("t2\":\"hello\"}}\n{}", text);
+        assert_eq!(turns(&torn, 40).len(), 2);
     }
 
     #[test]
@@ -2326,38 +2270,6 @@ mod tests {
         assert_eq!(open.len(), 2);
         assert_eq!(open[1].0.name, "b");
         assert_eq!(open[1].1, 1, "a child indents one step");
-    }
-
-    #[test]
-    fn a_session_under_a_project_has_no_second_line() {
-        // The rule, as stated: with a project, nothing under the name. It does
-        // not matter whether the session is at the project's root or somewhere
-        // under it - the heading already named the place.
-        let root = "/Users/x/Work/demo";
-        let p = Path::new(root);
-        assert_eq!(caption(root, Some(p)), Caption::None);
-        assert_eq!(
-            caption("/Users/x/Work/demo/rust/app", Some(p)),
-            Caption::None,
-            "a subdirectory is still under the project"
-        );
-        assert!(!caption(root, Some(p)).two_line());
-    }
-
-    #[test]
-    fn a_session_without_a_project_shows_its_whole_path() {
-        // And without one, the path as it is: shortened by the home directory
-        // only, so it still says exactly where the session stands.
-        // Built from the home this test actually runs under: the shortening is
-        // what is under test, not any one person's directory layout.
-        let home = cuacode::home_dir().expect("a home to shorten against");
-        let c = caption(&home.join("Documents/Work/demo").display().to_string(), None);
-        assert_eq!(c.text(), "~/Documents/Work/demo");
-        assert!(c.two_line());
-        assert_eq!(caption(&home.display().to_string(), None).text(), "~");
-        let none = caption("", None);
-        assert!(none.two_line(), "a session with no directory still has a line to give");
-        assert!(none.text().contains("no directory"), "{:?}", none.text());
     }
 
     #[test]

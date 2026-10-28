@@ -29,12 +29,11 @@
 use std::path::{Path, PathBuf};
 
 use cuacode::session::Session;
+use cuacode::worker::Target;
 
 /// What the window needs to know about the worker, without holding it.
 #[derive(Default, Clone)]
 pub struct Live {
-    /// Whether a worker process is up.
-    pub up: bool,
     /// Whether a turn is in flight, which is what the send control draws as Stop.
     pub busy: bool,
     /// The id of the session the worker is holding, once it has said.
@@ -71,6 +70,12 @@ pub struct Agent {
     /// The session the worker was last *told* to hold, so a send into the rail's
     /// selection loads it once rather than on every frame that draws.
     asked_for: String,
+    /// Which box this worker is on. `None` is this machine.
+    host: Option<cuacode::hosts::Host>,
+    /// That box's own listing, and how many listings have arrived, so the window can
+    /// tell a fresh one from the one it already drew. Empty on this machine, whose
+    /// sessions the window reads off its own disk instead.
+    listing: (u64, Vec<crate::state::Session>),
 }
 
 impl Agent {
@@ -78,12 +83,37 @@ impl Agent {
     /// stands, which is a real directory rather than wherever the app was run
     /// from.
     pub fn start(home: &Path, cwd: Option<&Path>) -> Result<Agent, String> {
-        let sess = Session::start(Some(home), cwd)?;
-        Ok(Agent { sess, live: Live { up: true, ..Default::default() }, asked_for: String::new() })
+        Agent::start_on(home, &Target::Local, cwd)
     }
 
-    pub fn up(&self) -> bool {
-        self.live.up
+    /// The same, on one machine. A worker over there is one `ssh` process carrying
+    /// the same wire, so nothing above this line knows the difference: the pipe is
+    /// the interface, and where its far end is does not change it.
+    pub fn start_on(home: &Path, target: &Target, cwd: Option<&Path>) -> Result<Agent, String> {
+        let sess = Session::start_on(target, Some(home), cwd)?;
+        let host = match target {
+            Target::Remote(h) => Some(h.clone()),
+            Target::Local => None,
+        };
+        Ok(Agent {
+            sess,
+            live: Live::default(),
+            asked_for: String::new(),
+            host,
+            listing: (0, Vec::new()),
+        })
+    }
+
+    /// That box's own listing: the count of listings seen, and the rows.
+    pub fn listed(&self) -> &(u64, Vec<crate::state::Session>) {
+        &self.listing
+    }
+
+    /// Ask the worker for the sessions **it** is holding on disk, which on another
+    /// box is that box's list: `session.list` reads the state root of the worker that
+    /// answers, so the window never has to know where the folder is.
+    pub fn list(&mut self) -> Result<(), String> {
+        self.sess.command("session.list", serde_json::json!({}))
     }
 
     /// A copy of what is being drawn. A copy and not a borrow: the window holds
@@ -105,6 +135,23 @@ impl Agent {
     }
 
     fn on(&mut self, ev: cuacode::wire::Event) -> bool {
+        // A box's own listing, kept whole: it is the answer `session.list` gives, and
+        // on another machine it is the only list the window can have. The rows are the
+        // worker's `meta.json`s, so they deserialize as the same type the local disk
+        // does - there is one shape of a session row and it is the file's.
+        if ev.env.kind == "sessions" {
+            if let Some(list) = ev.env.data.get("sessions").and_then(|s| s.as_array()) {
+                let rows: Vec<crate::state::Session> = list
+                    .iter()
+                    .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                    .collect();
+                self.listing = (self.listing.0 + 1, rows);
+            }
+            // Folded by the shared half as well, which is what a picker reads: one
+            // event, one fold, and this one only keeps the copy the rail draws.
+            self.sess.on_event(&ev);
+            return true;
+        }
         // A question blocks the worker dead, so it is answered by a person and is
         // not a row. It is the one event that stops the loop until it is.
         if ev.env.kind == "permission" {
@@ -161,6 +208,13 @@ impl Agent {
     /// the thing that decides it, and it can change between sessions.
     fn set_cwd(&mut self, dir: Option<&Path>) -> Result<(), String> {
         let Some(dir) = dir else { return Ok(()) };
+        // A path from this machine names nothing on another box. That worker was
+        // started in its own entry's directory, and a session over there already
+        // carries the directory it stood in, so there is nothing to say and saying
+        // it is how a Mac path ended up written on a session on a Linux box.
+        if self.host.is_some() {
+            return Ok(());
+        }
         self.sess.terminal.cwd = dir.display().to_string();
         let data = serde_json::to_value(&self.sess.terminal).unwrap_or(serde_json::Value::Null);
         self.sess.reply("app-cwd", "terminal", data)

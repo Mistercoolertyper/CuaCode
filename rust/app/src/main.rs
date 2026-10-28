@@ -29,7 +29,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::notification::{Notification, NotificationDelivery, NotificationType};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -49,6 +49,9 @@ mod view;
 /// below as `pub` for exactly that reason. This module is one stable name in front of
 /// it, so moving the declaration does not reach into the test.
 mod app {
+    // Nothing in the library target reads these; the integration tests do, and they
+    // reach the app through this one name.
+    #![allow(unused_imports)]
     pub use crate::{App, Brands, ChainAssets};
 }
 
@@ -115,6 +118,7 @@ fn real_main() {
         .with_assets(ChainAssets::new(Brands, gpui_kit::assets::AllAssets::new("")))
         .run(move |cx| {
             gpui_kit::init(cx);
+            dress(cx);
             install_menu(cx);
             let options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
@@ -152,6 +156,23 @@ fn real_main() {
             })
             .expect("failed to open the window");
         });
+}
+
+/// The window's own scrollbars, in the palette's own tone.
+///
+/// gpui draws the bar itself - a code fence's scroll region and the page's alike - and
+/// reads its thumb from the component theme, so one call here dresses both. `12` gives
+/// the thumb as `line` at 78% and one width for either (`SCROLLBAR` 6, set where the
+/// region is made), and 13 cites the same bar for the page. Before this the thumb was
+/// the component library's own accent, which is a second palette in the same window.
+///
+/// Public because the headless harness builds the same window and must draw the same
+/// bar: a frame dressed differently from the app is a frame that proves nothing.
+pub fn dress(cx: &mut gpui_kit::App) {
+    gpui_kit::component::Theme::update(cx, |theme| {
+        theme.colors.scrollbar_thumb = theme::line().opacity(0.78);
+        theme.colors.scrollbar_thumb_hover = theme::line_strong();
+    });
 }
 
 /// Two asset sources as one: the first that answers, wins.
@@ -255,7 +276,9 @@ const BRAND_SVG: [(&str, &str); 24] = [
 /// filling the space.
 fn menu_foot(menu: List) -> Option<&'static str> {
     match menu {
-        List::Project => Some("A session's location is fixed once it has started."),
+        List::Project => {
+            Some("A machine starts a new conversation; a location is fixed once it has.")
+        }
         List::Permissions => Some("Ask is the safe default; off never asks."),
         _ => None,
     }
@@ -295,23 +318,6 @@ fn card(body: Div) -> AnyElement {
             .p(px(4.0))
             .child(body),
     )
-}
-
-/// A mark per provider, so a list of nine is scannable. Not their key: a key is
-/// an identifier and a mark is what you recognise without reading.
-fn provider_icon(name: &str) -> IconName {
-    match name {
-        "ollama" => IconName::Server,
-        "anthropic" => IconName::Sparkles,
-        "openai" => IconName::Bot,
-        "openrouter" => IconName::Waypoints,
-        "deepseek" => IconName::Atom,
-        "nvidia" => IconName::CircuitBoard,
-        "together" => IconName::Boxes,
-        "qubrain" => IconName::Brain,
-        "Synthetic" => IconName::Hexagon,
-        _ => IconName::Cloud,
-    }
 }
 
 /// `--name value`, or `None`.
@@ -435,6 +441,22 @@ impl Cache {
         }
         moved
     }
+
+    /// Take rows read from another box, where the stamp was that box's own
+    /// `meta.json` and the bytes already arrived on a thread.
+    ///
+    /// The plan is cleared rather than fetched: a box's `todo.json` would be a
+    /// second round trip for a panel, and an empty plan is the honest way to say the
+    /// window has not read one. ponytail: read it in the same `ssh` as the transcript
+    /// when the plan panel matters on a box.
+    fn accept(&mut self, id: &str, turns: Vec<state::Turn>) {
+        if self.session != id {
+            self.session = id.to_string();
+            self.transcript = (None, Vec::new());
+            self.plan = (None, Vec::new());
+        }
+        self.rows = state::fold(&turns);
+    }
 }
 
 
@@ -471,6 +493,21 @@ struct GitRead {
     /// `None` when the tree was already known for this directory and only the
     /// changes were due.
     tree: Option<(Vec<state::Node>, bool)>,
+}
+
+/// One read out of another box: the tail of a conversation's `messages.jsonl`,
+/// fetched over the `ssh` a worker over there already rides.
+///
+/// The point of it is that a box is a state root rather than a label. This window
+/// draws a conversation from bytes on a disk, and on another machine that disk is
+/// not open to this one, so the bytes are fetched - on a thread, because a round trip
+/// is about a second and no frame may wait for one.
+struct BoxRead {
+    /// The session, so an answer for a conversation the reader has left is dropped.
+    id: String,
+    /// The transcript's tail, empty when `ssh` or the read failed. An empty
+    /// transcript draws nothing, which is the honest answer to "could not read".
+    text: String,
 }
 
 /// Whether the view follows new output, or holds still because the reader moved it.
@@ -604,8 +641,21 @@ pub struct App {
     /// The directory the next session will stand in. Empty is the window's own
     /// default: no directory, which is a real choice and not an absence.
     project: Option<std::path::PathBuf>,
+    /// The machines `hosts.json` named, read once at boot.
+    hosts: Vec<cuacode::hosts::Host>,
+    /// The one the worker is on, `None` for this machine.
+    host: Option<cuacode::hosts::Host>,
+    /// Reads out of another box, in flight and applied. An `ssh` is about a second
+    /// of wall clock, so it runs on its own thread and the tick applies the answer,
+    /// exactly as `git` and the provider catalogs already do.
+    box_read: (Sender<BoxRead>, Receiver<BoxRead>),
+    /// What the last read was asked for: `(box, session, stamp)`. One change is one
+    /// read rather than one per nap.
+    box_asked: (String, String, String),
+    /// Whether a read is out, so the nap cannot ask for a second one behind it.
+    box_busy: bool,
     /// Where the message is being typed.
-    input: Entity<InputState>,
+    input: Entity<TextareaState>,
     _input_sub: Subscription,
     /// The menu that is open, if one is.
     menu: Option<List>,
@@ -645,6 +695,16 @@ pub struct App {
     /// on the session so switching away and back does not open yesterday's run
     /// in today's conversation.
     open_runs: (String, std::collections::HashSet<usize>),
+    /// Which `<details>` blocks are open, in which answer.
+    ///
+    /// The same shape as `open_runs` and for the same reason: a block of markdown is
+    /// rebuilt from the answer's text every frame, so it cannot hold a boolean of its
+    /// own. Keyed by `(document, block)` - the document being a hash of the row's text,
+    /// which is stable while the text is.
+    open_notes: (u64, std::collections::HashSet<usize>),
+    /// Which fences are **wrapped**, in which answer. The same pair as `open_notes`,
+    /// for the header's wrap toggle.
+    wrap_notes: (u64, std::collections::HashSet<usize>),
     /// A minimap mark the reader pressed: the **row index** to bring to the top of
     /// the transcript. One-shot, like a pin, because `scroll_to_top_of_item` is a
     /// request the next layout takes.
@@ -726,6 +786,20 @@ pub struct App {
     news_in_flight: (Sender<cuacode::version::News>, Receiver<cuacode::version::News>),
 }
 
+/// How tall the field may grow before it scrolls inside itself: 208px - t3code's
+/// `max-h-52`, and `05-editor.md`'s own number for the editor's ceiling.
+///
+/// **Not a `theme.rs` token**: the palette's number set is closed at the three constants
+/// the spec adds (`00-INDEX.md`, "The three new numbers"), so this one lives at the field
+/// that uses it and nowhere else.
+const COMPOSER_MAX_H: f32 = 208.0;
+
+/// The composer's placeholder copy.
+///
+/// Drawn as an overlay on the field, never set on the field's own state: that one is
+/// painted into the text and would scroll with the draft.
+const PLACEHOLDER: &str = "Ask, or tell this agent what to do\u{2026}";
+
 impl App {
     /// Public because the render harness builds one against its own off-screen window.
     /// Everything else about the app is private and stays that way.
@@ -747,18 +821,44 @@ impl App {
         let provider = choices.active.clone();
         let model = choices.model_of(&provider);
         let permission = choices.permission.clone();
+        // A **multi-line** field, because Enter is supposed to submit and fall through
+        // to a newline when the submit is refused, and a one-line state cannot hold the
+        // second half of that. Two rows is the floor; the growth stops at the ceiling
+        // divided by the line, rounded **down** so the field never passes it. `submit_on_enter` is what splits the two keys:
+        // plain Enter emits the submit, Shift-Enter inserts.
+        //
+        // No `placeholder` on the state: that one is painted as text *inside* the
+        // scrolling field. The copy is an overlay (`PLACEHOLDER`, drawn in `composer`).
+        let rows = (COMPOSER_MAX_H / theme::COMPOSER_LINE) as usize;
         let input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Ask, or tell this agent what to do\u{2026}")
+            TextareaState::new(window, cx)
+                .auto_grow(2, rows)
+                .submit_on_enter(true)
         });
+        // **The field has the keys from the moment the window opens.** A desktop app
+        // with one field that you must click before typing is a field that looks
+        // broken on the first keystroke, and the render harness proved it: keys
+        // dispatched at boot went nowhere until they were given a focus target.
+        input.update(cx, |state, cx| state.focus(window, cx));
         let _input_sub = cx.subscribe_in(&input, window, |this: &mut App, _, ev, window, cx| {
-            if let InputEvent::PressEnter { .. } = ev {
-                // In rename mode the field is a prompt, not a composer: the same Enter
-                // commits the name rather than starting a run.
-                if this.renaming.is_some() {
-                    this.commit_rename(window, cx);
-                } else {
-                    this.send(window, cx);
-                }
+            let InputEvent::PressEnter { shift, .. } = ev else { return };
+            // Shift-Enter is the field's own newline and never submits: the state has
+            // already inserted it by the time this runs.
+            if *shift {
+                return;
+            }
+            // In rename mode the field is a prompt, not a composer: the same Enter
+            // commits the name rather than starting a run.
+            if this.renaming.is_some() {
+                this.commit_rename(window, cx);
+            } else {
+                // A **refused** submit is a newline, not a key that does nothing - an
+                // empty field, or no worker to send to. The field has already split the
+                // block by the time this runs (`submit_on_enter` emits the event and
+                // inserts), so the refusal is this handler declining and nothing more:
+                // inserting here as well gave an empty prompt **two** newlines per
+                // press, which is what the `tests/composer.rs` proof caught.
+                let _ = this.send(window, cx);
             }
         });
         let icons = state::icons(&ws.home);
@@ -777,6 +877,10 @@ impl App {
                 None
             }
         };
+        // Read once, at boot: which machines this window may run a worker on. A
+        // file read here rather than in a frame, because the frame is thirty a
+        // second and this is the same list for the whole run.
+        let hosts = cuacode::hosts::load(&ws.home);
         let mut app = App {
             ws,
             icons,
@@ -793,6 +897,11 @@ impl App {
             model,
             permission,
             project: None,
+            hosts,
+            host: None,
+            box_read: std::sync::mpsc::channel(),
+            box_asked: (String::new(), String::new(), String::new()),
+            box_busy: false,
             input,
             _input_sub,
             menu: None,
@@ -805,6 +914,8 @@ impl App {
             cache,
             follow: Follow::new(),
             open_runs: (String::new(), std::collections::HashSet::new()),
+            open_notes: (0, std::collections::HashSet::new()),
+            wrap_notes: (0, std::collections::HashSet::new()),
             jump: None,
             scroll: ScrollHandle::new(),
             row_bounds: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
@@ -829,6 +940,20 @@ impl App {
         };
         app.fetch_catalog(&app.provider.clone());
         app.ask_updates();
+        // **The selected session's project is open, the rest are shut.** The rail is a
+        // tree of projects, and a tree that opens with every branch folded shows nothing
+        // but folder names - the one session this window has already selected would be
+        // two clicks away, and the row that says what it is doing is the row you came to
+        // read. Everything else stays folded: forty sessions at once is the wall the
+        // fold exists to prevent.
+        if let Some(dir) = app
+            .sel
+            .as_deref()
+            .and_then(|id| app.ws.project_of(id))
+            .map(|p| p.dir.display().to_string())
+        {
+            app.open_dirs.push(dir);
+        }
         // The window's four settings are the worker's, and the worker starts with
         // the config's. Told once here so a turn sent before a chip is moved still
         // runs on what the chips are showing; a chip moved later tells it again.
@@ -856,6 +981,7 @@ impl App {
             // The id the worker was holding last nap, so following a newly-created
             // session is an edge rather than a state that re-fires forever.
             let mut last_held = String::new();
+            let mut last_listed = 0;
             loop {
                 cx.background_executor().timer(nap).await;
                 let alive = this
@@ -863,15 +989,20 @@ impl App {
                         // The disk is checked here and not in `render`: a session
                         // being written while you watch it arrives on its own,
                         // and no frame pays for a read to make that happen.
-                        let moved = match app.sel.clone() {
-                            Some(id) => app.cache.sync(&app.ws.home, &id),
-                            None => false,
+                        // This machine's conversation is read off its own disk. On
+                        // another box the disk is an `ssh` away, so the read is asked
+                        // for here and applied from its own thread.
+                        let moved = match (app.host.is_none(), app.sel.clone()) {
+                            (true, Some(id)) => app.cache.sync(&app.ws.home, &id),
+                            _ => false,
                         };
+                        app.ask_box();
+                        let box_moved = app.apply_box();
                         // Follow the output, but only for a reader who is at the foot. See
                         // [`Follow`]: the decision is `moved && on`, and `on` is the reader's
                         // intent - put down by a wheel, picked up again by a frame that
                         // found them back at the bottom.
-                        if app.follow.follows(moved) {
+                        if app.follow.follows(moved || box_moved) {
                             app.follow.pin = true;
                         }
                         // Git on its own thread and on its own slow clock: five
@@ -969,6 +1100,14 @@ impl App {
                                 }
                             }
                         }
+                        // A box's listing is asked for on the same falling edge: a
+                        // round that landed over there is a row the rail has not seen
+                        // yet, which the local rail gets free by re-reading its disk.
+                        if was_busy && !busy && app.host.is_some() {
+                            if let Some(a) = app.agent.as_mut() {
+                                let _ = a.list();
+                            }
+                        }
                         was_busy = busy;
                         // The rail follows the worker: a session it just created is a
                         // folder the window has not listed yet, so the list is re-read
@@ -1001,7 +1140,9 @@ impl App {
                             // on and there is nothing to select.
                             app.reload_keeping(true, cx);
                             if app.session(&held).is_some() {
-                                app.cache.sync(&app.ws.home.clone(), &held);
+                                if app.host.is_none() {
+                                    app.cache.sync(&app.ws.home.clone(), &held);
+                                }
                                 app.sel = Some(held.clone());
                                 app.follow.pin = true;
                                 true
@@ -1036,8 +1177,31 @@ impl App {
                                 app.reload_keeping(true, cx);
                             }
                         }
+                        // A box's listing lands as the answer to `session.list`. The
+                        // rail is rebuilt from it - the rows are that box's own
+                        // `meta.json`s - and a conversation the worker has just started
+                        // over there is selected here, which is the same follow rule the
+                        // local rail gets from re-reading the disk.
+                        let listed = app.agent.as_ref().map(|a| a.listed().0).unwrap_or(0);
+                        if listed != last_listed {
+                            last_listed = listed;
+                            app.ws = app.read_workspace();
+                            let just_held = app
+                                .agent
+                                .as_ref()
+                                .map(|a| a.holding().to_string())
+                                .unwrap_or_default();
+                            if app.sel.is_none()
+                                && !just_held.is_empty()
+                                && app.session(&just_held).is_some()
+                            {
+                                app.sel = Some(just_held);
+                                app.follow.pin = true;
+                            }
+                            cx.notify();
+                        }
                         if moved
-                            || git_moved
+                            || box_moved
                             || catalog_moved
                             || news_moved
                             || worker_moved
@@ -1066,7 +1230,7 @@ impl App {
     /// the new conversation you are typing into - and re-selecting the newest row
     /// on disk would throw you out of it and into somebody else's session.
     fn reload_keeping(&mut self, keep_empty: bool, cx: &mut Context<Self>) {
-        self.ws = state::Workspace::read();
+        self.ws = self.read_workspace();
         if self.sel.as_ref().is_some_and(|id| self.session(id).is_none()) {
             self.sel = None;
         }
@@ -1075,10 +1239,32 @@ impl App {
         }
         // The selection may have moved, and the cache is keyed on it, so this is
         // what makes a reload actually show the new thing rather than the old.
+        // Another box is not read here at all: its bytes come off a thread, and a
+        // reload is the tick's thread.
         if let Some(id) = self.sel.clone() {
-            self.cache.sync(&self.ws.home, &id);
+            if self.host.is_none() {
+                self.cache.sync(&self.ws.home, &id);
+            }
         }
         cx.notify();
+    }
+
+    /// The box the window is looking at, as the list the rail draws.
+    ///
+    /// This machine is a disk read, same as it always was. Another box is its own
+    /// worker's answer to `session.list`: the folders are on that machine, so the
+    /// worker standing on it is the only thing here that can list them. Its
+    /// `projects.json` is not read either, so every row groups under the directory it
+    /// stands in - which is a fact each row carries.
+    fn read_workspace(&self) -> state::Workspace {
+        match (self.host.as_ref(), self.agent.as_ref()) {
+            (Some(h), Some(a)) => state::Workspace::group(
+                Vec::new(),
+                a.listed().1.clone(),
+                std::path::PathBuf::from(h.home()),
+            ),
+            _ => state::Workspace::read(),
+        }
     }
 
     /// A manual reload. **The landing is asked for here**, by the one caller that means
@@ -1123,12 +1309,6 @@ impl App {
         cx.notify();
     }
 
-    /// What a row's second line says, which is only ever the part its heading did
-    /// not already say.
-    fn caption(&self, project: Option<&state::Project>, session: &state::Session) -> state::Caption {
-        state::caption(&session.cwd, project.map(|p| p.dir.as_path()))
-    }
-
     /// Whether the session's location can still be changed.
     ///
     /// Only until the session has started. The directory is stamped on the
@@ -1136,8 +1316,12 @@ impl App {
     /// so moving it under a live session is not a setting, it is a lie about
     /// where the work already happened. The worker's own rule is the same one:
     /// `set_cwd` only takes a value before the first record.
+    ///
+    /// On another box it is always locked, and for a stronger reason: the chips
+    /// offer directories on **this** machine, and none of them names anything over
+    /// there. What the chip says is the directory that box's worker stands in.
     fn location_locked(&self) -> bool {
-        self.selected().is_some()
+        self.host.is_some() || self.selected().is_some()
     }
 
     /// What the model chip says: which model, and how hard it thinks.
@@ -1186,21 +1370,66 @@ impl App {
     /// own choice for the next run, and no directory is a real choice rather
     /// than an absence, so it says so.
     fn project_label(&self) -> String {
+        // The machine leads when it is not this one: the location means nothing
+        // without it, and a chip saying `demo` while the agent works on another box
+        // is the one thing here that would be a lie.
+        let machine = self.host.as_ref().map(|h| format!("{} \u{b7} ", h.name));
+        let here = |s: String| match &machine {
+            Some(m) => format!("{m}{s}"),
+            None => s,
+        };
         if let Some(id) = self.sel.as_deref() {
             if let Some(p) = self.ws.project_of(id) {
-                return p.name.clone();
+                return here(p.name.clone());
             }
             if let Some(s) = self.session(id) {
                 if !s.cwd.trim().is_empty() {
-                    return state::leaf(Path::new(&s.cwd));
+                    return here(state::leaf(Path::new(&s.cwd)));
                 }
             }
-            return "No directory".into();
+            return here("No directory".into());
         }
-        match &self.project {
-            Some(p) => state::leaf(p),
-            None => "No directory".into(),
+        here(match (&self.host, &self.project) {
+            // On another box the window has no path it can offer: the worker stands
+            // where that box's own entry says, and that directory is the one thing
+            // here that is a fact rather than a guess.
+            (Some(h), _) => state::leaf(std::path::Path::new(h.cwd())),
+            (None, Some(p)) => state::leaf(p),
+            (None, None) => "No directory".into(),
+        })
+    }
+
+    /// Start over on the machine the worker was just moved to.
+    ///
+    /// A session belongs to the box that wrote it: the folder is on that machine, so
+    /// nothing on this screen survives the move - not the selection, not the
+    /// transcript, not the directory the composer was offering. A box is a state
+    /// root, and the screen is a view of one state root at a time. That is also what
+    /// the machine rows' own foot already promised: *a machine starts a new
+    /// conversation*.
+    ///
+    /// The rail is then that box's own list, which arrives from its worker rather
+    /// than from this disk. Nothing is asked for on this machine, where the disk is
+    /// already the answer.
+    fn begin_on_the_new_box(&mut self, cx: &mut Context<Self>) {
+        self.sel = None;
+        self.cache = Cache::empty();
+        self.follow = Follow::new();
+        self.open_runs = (String::new(), std::collections::HashSet::new());
+        self.unseen.clear();
+        // The window's own next-location is a path on **this** machine, so it is not
+        // an offer that can be kept. The box's own entry names where it starts.
+        self.project = None;
+        self.box_asked = (String::new(), String::new(), String::new());
+        if self.host.is_some() {
+            if let Some(a) = self.agent.as_mut() {
+                if let Err(e) = a.list() {
+                    eprintln!("list a box's sessions: {e}");
+                }
+            }
         }
+        self.ws = self.read_workspace();
+        cx.notify();
     }
 
     /// Start a new conversation.
@@ -1349,13 +1578,46 @@ impl App {
         (held != id).then(|| id.to_string())
     }
 
+    /// The composer's draft, as the field holds it.
+    ///
+    /// Public because the render harness types into the real field and reads it back:
+    /// the composer's keys are only proven by what they leave in here, and a frame is
+    /// not evidence of a newline.
+    pub fn draft(&self, cx: &gpui_kit::App) -> String {
+        self.input.read(cx).value().to_string()
+    }
+
+    /// Whether the composer's field holds the keys right now. The harness's own
+    /// question: an unhandled keystroke is ambiguous between "no focus" and "no
+    /// handler", and those are two different bugs.
+    pub fn composer_focused(&self, window: &Window, cx: &gpui_kit::App) -> bool {
+        self.input.focus_handle(cx).is_focused(window)
+    }
+
+    /// Send a turn's words again: put them back in the field and press the same control
+    /// the person would.
+    ///
+    /// A refusal to send is a no-op here rather than a newline: a retry is not typing.
+    /// Mid-run it does nothing at all, because `send` in that state is the **Stop**, and a
+    /// retry that cancelled the run it was retrying is the opposite of the verb.
+    fn retry(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.agent.as_ref().is_some_and(|a| a.live().busy) {
+            return;
+        }
+        self.input.update(cx, |state, cx| state.set_value(text, window, cx));
+        self.send(window, cx);
+    }
+
     /// Send what is in the field, or stop what is running.
     ///
     /// This is the one function that changes when a worker is wired in, which
     /// is what the base app always said it was. Three things decide what a press
     /// means, and the order matters: a live run makes it the Stop; a session the
     /// worker is not holding is loaded first; and everything else is a message.
-    fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    ///
+    /// Answers whether the press was **actioned**. `false` is a refusal - nothing to
+    /// send, or nothing to send it to - and Enter turns that into a newline.
+    fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         // Everything that reads `self` first, so the worker can be borrowed
         // mutably below without fighting it.
         let busy = self.agent.as_ref().is_some_and(|a| a.live().busy);
@@ -1364,23 +1626,29 @@ impl App {
                 let _ = agent.cancel();
             }
             cx.notify();
-            return;
+            return true;
         }
         let text = self.input.read(cx).value().to_string();
         if text.trim().is_empty() {
-            return;
+            return false;
         }
         // A send into a conversation the worker is not holding is a load first and
         // the message behind it.
         let load = self.needs_load();
-        let cwd = self
-            .sel
-            .as_deref()
-            .and_then(|id| self.ws.project_of(id))
-            .map(|p| p.dir.clone())
-            .or_else(|| self.project.clone());
+        // The directory only when the worker is on this machine. A path here names
+        // nothing on another box: that worker was started in its own entry's
+        // directory, and the session it is holding already carries where it stood.
+        let cwd = if self.host.is_some() {
+            None
+        } else {
+            self.sel
+                .as_deref()
+                .and_then(|id| self.ws.project_of(id))
+                .map(|p| p.dir.clone())
+                .or_else(|| self.project.clone())
+        };
         let Some(agent) = self.agent.as_mut() else {
-            return;
+            return false;
         };
         if let Some(id) = load {
             let _ = agent.load(&id);
@@ -1393,6 +1661,7 @@ impl App {
         // The window follows a live run, which is what watching one means.
         self.follow.pin = true;
         cx.notify();
+        true
     }
 
     // ------------------------------------------------------------ the composer
@@ -1428,7 +1697,11 @@ impl App {
             false,
             cx,
         ));
-
+        // Which machine runs it is the same question as which directory, so it is
+        // the same chip. A row of five ghost chips is a toolbar, and the machine a
+        // conversation runs on is a *where*, not a fifth setting beside the model.
+        // The chip is the one the location already lives on, and the menu it opens
+        // leads with the machines.
         // The settings the worker has to be told before a turn: who answers, and
         // how hard it thinks. They are on the chips, so they are sent when a chip
         // changes rather than per keystroke; this is only the boot case, where the
@@ -1440,13 +1713,57 @@ impl App {
         let send = motion::mark_on_hover(
             view::send_button(motion::hover_t("composer:send"), busy || self.can_send(cx), busy),
             "composer:send",
-            cx.listener(|this, _, window, cx| this.send(window, cx)),
+            cx.listener(|this, _, window, cx| {
+                this.send(window, cx);
+            }),
         )
         .into_any_element();
+        // The field, and the placeholder over it.
+        //
+        // The copy is an **overlay pinned to the first baseline**, not the field's own
+        // placeholder: that one is text inside the scrolling buffer, so it scrolls with
+        // the draft and moves the moment the caret does. Same size and leading as the
+        // text, at `muted`, which is the one token in this palette that holds the
+        // source's 4.6:1 floor on `composer()` (`05-editor.md`, the placeholder).
+        //
+        // It hides on text, and the source also hides it when context chips sit **inside
+        // the field** (`isEmpty && contextRecords.size === 0`). This window has none
+        // there - its chips are the settings row under the field - so emptiness is the
+        // whole rule today.
+        let empty = self.input.read(cx).value().is_empty();
+        let placeholder = empty.then(|| {
+            div()
+                .absolute()
+                .top(px(0.))
+                .left(px(0.))
+                .text_size(px(theme::BODY))
+                .line_height(px(theme::COMPOSER_LINE))
+                .text_color(theme::muted())
+                .child(PLACEHOLDER)
+        });
         let field = div()
+            .relative()
             .flex_1()
             .min_w(px(0.))
-            .child(Input::new(&self.input).appearance(false))
+            // No face of its own: no ground, no edge, no inner well. The card is the
+            // surface and this is its text (`04-composer-card.md`).
+            //
+            // The multi-line box also insets its text by its own `Size::Medium` input
+            // padding - 10 across, 8 down (`set_editor_paddings`) - which cannot be styled
+            // off from here and on the card reads as a well. Cancelled by the same
+            // negative margin, so it is net zero: the text sits on the card's inner edge
+            // and the field's height is its rows. That is the source's own `p-1` /
+            // `-m-1` pair, done for the same reason.
+            .child(
+                Textarea::new(&self.input)
+                    .appearance(false)
+                    .aria_label(PLACEHOLDER)
+                    .ml(px(-10.))
+                    .mr(px(-10.))
+                    .mt(px(-8.))
+                    .mb(px(-8.)),
+            )
+            .children(placeholder)
             .into_any_element();
         // What the worker is doing, and the one thing it can be waiting on a person
         // for. Drawn above the field inside the card, which is where a run's own
@@ -1602,12 +1919,34 @@ impl App {
             // because "no directory" is a real choice and the one most runs take
             // when you are not in a checkout.
             List::Project => {
-                let mut rows = vec![state::MenuRow::new("No directory", "run anywhere")
-                    .current(self.project.is_none())];
+                let mut rows = Vec::new();
+                // The machines first, one group, and only when there is a file that
+                // named any: an install without `hosts.json` sees the directory
+                // list it has always seen, with nothing above it.
+                if !self.hosts.is_empty() {
+                    rows.push(
+                        state::MenuRow::new("this machine", "the one this window is on")
+                            .current(self.host.is_none())
+                            .group("Machine"),
+                    );
+                    for h in self.hosts.iter() {
+                        rows.push(
+                            state::MenuRow::new(h.name.clone(), h.ssh.clone())
+                                .current(self.host.as_ref().is_some_and(|n| n.name == h.name))
+                                .group("Machine"),
+                        );
+                    }
+                }
+                rows.push(
+                    state::MenuRow::new("No directory", "run anywhere")
+                        .current(self.project.is_none())
+                        .group("Directory"),
+                );
                 for p in self.ws.projects.iter() {
                     rows.push(
                         state::MenuRow::new(p.name.clone(), state::short_path(&p.dir))
-                            .current(self.project.as_deref() == Some(p.dir.as_path())),
+                            .current(self.project.as_deref() == Some(p.dir.as_path()))
+                            .group("Directory"),
                     );
                 }
                 if self.ws.projects.is_empty() {
@@ -1615,7 +1954,8 @@ impl App {
                     // control that failed to open.
                     rows.push(
                         state::MenuRow::new("No projects yet", "add one from the rail's footer")
-                            .enabled(false),
+                            .enabled(false)
+                            .group("Directory"),
                     );
                 }
                 rows
@@ -1924,20 +2264,60 @@ impl App {
     fn choose(&mut self, menu: List, value: &str, cx: &mut Context<Self>) {
         match menu {
             List::Project => {
-                self.project = if value == "No directory" {
-                    None
+                // ponytail: the machine rows carry their own name as the value, like
+                // every other row here, so a project named exactly like a host is a
+                // clash the machine wins. Rename one; a second value column for one
+                // menu is worse than the edge.
+                let machine = if value == "this machine" {
+                    Some(None)
                 } else {
-                    self.ws
-                        .projects
+                    self.hosts
                         .iter()
-                        .find(|p| p.name == value)
-                        .map(|p| p.dir.clone())
+                        .find(|h| h.name == value)
+                        .cloned()
+                        .map(Some)
                 };
-                // A new project means the next thing sent stands somewhere else.
-                // Where a session's directory is decided is the `terminal`
-                // envelope, sent with the message, so there is nothing to tell the
-                // worker here: this is a choice about the next session, and the
-                // next session gets it when it starts.
+                if let Some(next) = machine {
+                    let here = self.host.as_ref().map(|h| h.name.clone());
+                    let same = match (&next, &here) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => &a.name == b,
+                        _ => false,
+                    };
+                    if !same {
+                        // The one row that is not a setting: it replaces the worker.
+                        // A path here names nothing over there, so a remote worker
+                        // starts where its own entry says.
+                        let target = match &next {
+                            Some(h) => cuacode::worker::Target::Remote(h.clone()),
+                            None => cuacode::worker::Target::Local,
+                        };
+                        let cwd = if next.is_some() { None } else { self.project.clone() };
+                        match agent::Agent::start_on(&self.ws.home, &target, cwd.as_deref()) {
+                            Ok(a) => {
+                                self.agent = Some(a);
+                                self.host = next;
+                                self.begin_on_the_new_box(cx);
+                            }
+                            Err(e) => eprintln!("no worker on {value}: {e}"),
+                        }
+                    }
+                } else {
+                    self.project = if value == "No directory" {
+                        None
+                    } else {
+                        self.ws
+                            .projects
+                            .iter()
+                            .find(|p| p.name == value)
+                            .map(|p| p.dir.clone())
+                    };
+                    // A new project means the next thing sent stands somewhere else.
+                    // Where a session's directory is decided is the `terminal`
+                    // envelope, sent with the message, so there is nothing to tell the
+                    // worker here: this is a choice about the next session, and the
+                    // next session gets it when it starts.
+                }
             }
             List::Provider => {
                 self.provider = value.to_string();
@@ -2010,7 +2390,10 @@ impl App {
 
     fn rail(&self, cx: &mut Context<Self>) -> AnyElement {
         let total = self.ws.shown();
-        let mut list = v_flex().w_full().pb(px(theme::SPACE_MD));
+        // `flex flex-col gap-px` (`Sidebar.tsx:3155`): the seam between two blocks is one
+        // pixel of rail showing through, not a border. `SPACE_XS` would be a shelf and 0
+        // loses the rhythm entirely.
+        let mut list = v_flex().w_full().gap(px(1.0)).pb(px(theme::SPACE_MD));
         let mut rows: Vec<AnyElement> = Vec::new();
 
         // Borrowed, not cloned. This used to be `self.ws.projects.clone()` and
@@ -2020,8 +2403,13 @@ impl App {
         let projects = &self.ws.projects;
         let others = &self.ws.other;
         for project in projects {
-            let name = project.name.clone();
             let dir = project.dir.clone();
+            // `mt-2 first:mt-0` on a project folder (`SidebarProjectFolderHeader.tsx:64`):
+            // one group starts 8px below the last one, and the first starts flush with the
+            // group's own inset.
+            if !rows.is_empty() {
+                rows.push(div().w_full().h(px(theme::SPACE_SM)).flex_shrink_0().into_any_element());
+            }
             // The fold is keyed on the **directory**, not the name: two loose
             // headings can share a leaf (`Work/x` and `demo/x`), and folding one by
             // name would fold both.
@@ -2096,6 +2484,10 @@ impl App {
                     .flex_1()
                     .min_h(px(0.))
                     .overflow_y_scroll()
+                    // `p-[--sidebar-content-inset]` on the group: 8px, so a row's wash is
+                    // inset from the rail's edges and its own 10px padding puts the text
+                    // at 18 (`sidebar.tsx:679`).
+                    .px(px(theme::SPACE_SM))
                     .when(self.ws.projects.is_empty() && self.ws.other.is_empty(), |d| {
                         d.child(view::rail_empty())
                     })
@@ -2189,7 +2581,6 @@ impl App {
         let key = format!("s:{}", s.id);
         let t = motion::hover_t(&key);
         let selected = self.sel.as_deref() == Some(s.id.as_str());
-        let caption = self.caption(project, s);
         // What this row says about the run, in t3code's own order: a question the
         // worker is blocked on beats a failure beats a run in flight beats a turn
         // that finished while you were elsewhere beats nothing at all. Only the row
@@ -2198,15 +2589,14 @@ impl App {
         let live = self.agent.as_ref().map(|a| a.live()).unwrap_or_default();
         let held = self.agent.as_ref().map(|a| a.holding().to_string()).unwrap_or_default();
         let state = self.session_state(&s.id, &live, &held, &self.unseen);
-        // The project's own mark, on the session's row: their rail puts the
-        // **project** favicon on the thread row, and it is what says where a
-        // session stands now that the row carries no path under it.
         motion::mark_on_hover(
             view::session_row(
                 s,
                 selected,
                 t,
-                &caption,
+                // A row under a project is indented to its project's name; a loose
+                // one has no heading mark to line up with.
+                project.is_some(),
                 state,
                 cx.listener({
                     let id = s.id.clone();
@@ -2371,6 +2761,13 @@ impl App {
     /// because it lands wherever the frame happens to be, and it is worst on the
     /// directory you are actually working in, which is the one with the most to say.
     fn ask_git(&mut self) {
+        // A directory on another box is not one this machine can ask `git` about:
+        // the path would be read here, find nothing, and draw an empty panel as if
+        // the repository were clean. A question that can only be answered "nothing"
+        // is not asked.
+        if self.host.is_some() {
+            return;
+        }
         let Some(dir) = self.selected_dir() else {
             return;
         };
@@ -2417,6 +2814,60 @@ impl App {
             // A file that moved is a diff that is stale.
             self.cache.diff.1.clear();
             moved |= changed;
+        }
+        moved
+    }
+
+    /// Ask the box for the conversation on screen, when it is due and nothing is out.
+    ///
+    /// Only on another box: this machine's disk is open to the window, and a file the
+    /// window can read does not need an `ssh` to read it. The stamp is that box's own
+    /// `meta.json` (`updated` plus how many records it has), which the listing hands
+    /// over - so a round that lands over there is a new stamp, and a stamp already seen
+    /// is not asked for twice.
+    fn ask_box(&mut self) {
+        if self.box_busy {
+            return;
+        }
+        let (Some(host), Some(id)) = (self.host.clone(), self.sel.clone()) else {
+            return;
+        };
+        let Some(session) = self.session(&id) else {
+            return;
+        };
+        let stamp = format!("{}:{}", session.updated, session.records);
+        if self.box_asked == (host.name.clone(), id.clone(), stamp.clone()) {
+            return;
+        }
+        let Some(command) = host.read_command(&id, "messages.jsonl", Some(state::TAIL_BYTES)) else {
+            return;
+        };
+        let argv = cuacode::worker::ssh_argv_for(&host, &command);
+        self.box_asked = (host.name, id.clone(), stamp);
+        self.box_busy = true;
+        let tx = self.box_read.0.clone();
+        std::thread::spawn(move || {
+            let text = std::process::Command::new("ssh")
+                .args(&argv)
+                .output()
+                .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+                .unwrap_or_default();
+            let _ = tx.send(BoxRead { id, text });
+        });
+    }
+
+    /// Take a transcript that came back off that thread. Returns whether a row moved.
+    fn apply_box(&mut self) -> bool {
+        let mut moved = false;
+        while let Ok(read) = self.box_read.1.try_recv() {
+            self.box_busy = false;
+            // The reader may have left while `ssh` was out. An answer for a
+            // conversation nobody is looking at is dropped, not written.
+            if self.sel.as_deref() != Some(read.id.as_str()) {
+                continue;
+            }
+            self.cache.accept(&read.id, state::turns(&read.text, ROWS));
+            moved = true;
         }
         moved
     }
@@ -2469,8 +2920,6 @@ impl App {
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let session = self.selected();
-        let project = self.sel.as_deref().and_then(|id| self.ws.project_of(id));
         let dir = self.selected_dir();
         let changes = &self.cache.changes.2;
         let plan = self.plan();
@@ -2640,7 +3089,7 @@ impl App {
                     .child(icon(IconName::ListTodo, 13.0, theme::muted()))
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(theme::SMALL))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme::muted())
                             .child("Plan"),
@@ -2667,7 +3116,7 @@ impl App {
                 div()
                     .id("split")
                     .h_full()
-                    .w(px(6.0))
+                    .w(px(view::SPLIT_W))
                     .flex_shrink_0()
                     .cursor_col_resize()
                     .on_mouse_down(
@@ -2765,6 +3214,13 @@ impl App {
                 .unwrap_or_else(|| "no directory".into()),
             None => String::new(),
         };
+        // The head's first crumb. Borrowed, not cloned: this runs on every frame of a
+        // resize drag, and the name it needs is already in the state root.
+        let project_name = self
+            .sel
+            .as_deref()
+            .and_then(|id| self.ws.project_of(id))
+            .map(|p| p.name.as_str());
         // **The column's width and whether there is a strip: one decision.**
         //
         // This was two guesses that disagreed. The column insisted on `MEASURE` (736) and
@@ -2778,23 +3234,28 @@ impl App {
         // whenever there is more than one turn and there is room for the *band* - which is
         // far less room than before.
         let strip_on = self.agent.is_some() && self.cache.rows.len() > 1;
-        let band = theme::MAP_HIT_W + theme::SPACE_MD;
         let avail = {
             let width = f32::from(window.bounds().size.width);
-            let rail_w = if self.rail_open { self.rail_w } else { 0.0 };
-            let side_w = if self.sidebar_open { self.side_w } else { 0.0 };
+            let rail_w = if self.rail_carries(window) { self.rail_w + view::SPLIT_W } else { 0.0 };
+            let side_w = if self.sidebar_open { self.side_w + view::SPLIT_W } else { 0.0 };
             (width - rail_w - side_w).max(0.0)
         };
-        // The narrowest a conversation may get before the strip is dropped: below this the
-        // text is unreadable and the strip is the lesser thing to lose.
-        let floor = 420.0;
-        let strip_gutter = strip_on && avail - band * 2.0 >= floor;
-        // The column is the measure when it fits and the rest of the room when it does not.
-        let measure = if strip_gutter {
-            theme::MEASURE.min(avail - band * 2.0)
-        } else {
-            theme::MEASURE.min(avail)
-        };
+        // **The lane is `MEASURE`, and the strip lives in what is left over.**
+        //
+        // This narrowed the lane itself to make room, so a window with the strip on read a
+        // 634px measure - which is not the measure, and the composer under it stayed 736, so
+        // the text and the box it was answering in disagreed about where the column was.
+        // The measure is one number; furniture is drawn in the gutter or not at all
+        // (`docs/design/01-window-shell.md`, and 13 for the strip itself).
+        let measure = theme::MEASURE.min(avail);
+        let gutter = ((avail - measure) / 2.0).max(0.0);
+        // **The strip's target is a clamp, not a constant**: `min(MAP_HIT_W, gutter - 12)`
+        // floored at zero (`MessagesTimeline.logic.ts:449`-`:455`) - see `view::map_hit_w`.
+        let hit_w = view::map_hit_w(gutter);
+        // ...and it appears at the source's own floor: a measured gutter of 48px
+        // (`MessagesTimeline.logic.ts:283`). 48 has no rung here and none may be added, and
+        // the 48s that exist (`HEAD`, `TOPBAR`) are chrome heights, so it is a literal.
+        let strip_gutter = strip_on && gutter >= 48.0;
         let body: AnyElement = if self.ws.shown() == 0 {
             view::empty_state(&state::short_path(&self.ws.home), 0.0, 0.0).into_any_element()
         } else if let Some(s) = session {
@@ -2839,11 +3300,95 @@ impl App {
             // the minimap's strips sit where their turns are, and what a strip's jump
             // lands on.
             let bounds = self.row_bounds.clone();
+            // A `<details>`'s own state, and what a press on its summary row does. The
+            // closure owns the id because a block has none: the markdown is rebuilt from
+            // text every frame, and this is the only place that knows the document and
+            // the block it belongs to.
+            let notes_open = |doc: u64, n: usize| {
+                self.open_notes.0 == doc && self.open_notes.1.contains(&n)
+            };
+            let notes_press = |doc: u64, n: usize, head: AnyElement| -> AnyElement {
+                let key = format!("note:{doc:x}:{n}");
+                motion::mark_on_hover(
+                    div()
+                        .w_full()
+                        .rounded(px(theme::R_CHIP))
+                        .bg(motion::mix(theme::ink(0.0), theme::wash_hover(), motion::hover_t(&key))),
+                    &key,
+                    cx.listener(move |this, _, _, cx| {
+                        if this.open_notes.0 != doc {
+                            this.open_notes = (doc, std::collections::HashSet::new());
+                        }
+                        if !this.open_notes.1.insert(n) {
+                            this.open_notes.1.remove(&n);
+                        }
+                        cx.notify();
+                    }),
+                )
+                .child(head)
+                .into_any_element()
+            };
+            // A fence's wrap toggle: the same pair as a disclosure's, over its own set.
+            let notes_wrapped = |doc: u64, n: usize| {
+                self.wrap_notes.0 == doc && self.wrap_notes.1.contains(&n)
+            };
+            let notes_wrap_press = |doc: u64, n: usize, mark: AnyElement| -> AnyElement {
+                let key = format!("wrap:{doc:x}:{n}");
+                motion::mark_on_hover(
+                    div()
+                        .flex()
+                        .items_center()
+                        .rounded(px(theme::R_CHIP))
+                        .px(px(theme::SPACE_XS))
+                        .bg(motion::mix(theme::ink(0.0), theme::wash_hover(), motion::hover_t(&key))),
+                    &key,
+                    cx.listener(move |this, _, _, cx| {
+                        if this.wrap_notes.0 != doc {
+                            this.wrap_notes = (doc, std::collections::HashSet::new());
+                        }
+                        if !this.wrap_notes.1.insert(n) {
+                            this.wrap_notes.1.remove(&n);
+                        }
+                        cx.notify();
+                    }),
+                )
+                .child(mark)
+                .into_any_element()
+            };
+            // A turn's verbs: copy is drawn by the row itself (it needs the text, not the
+            // window), so this only carries the one that needs the window - **retry**,
+            // which puts the same words back in the field and sends them.
+            let retry = |_i: usize, text: &str, mark: AnyElement| -> AnyElement {
+                let text = text.to_string();
+                let key = format!("retry:{_i}");
+                motion::mark_on_hover(
+                    div()
+                        .flex()
+                        .items_center()
+                        .rounded(px(theme::R_CHIP))
+                        .px(px(theme::SPACE_XS))
+                        .bg(motion::mix(theme::ink(0.0), theme::wash_hover(), motion::hover_t(&key))),
+                    &key,
+                    cx.listener(move |this, _, window, cx| this.retry(text.clone(), window, cx)),
+                )
+                .child(mark)
+                .into_any_element()
+            };
+            let st = view::Rows {
+                run: &wrap,
+                is_open: &is_open,
+                retry: &retry,
+                notes: view::Notes {
+                    open: &notes_open,
+                    press: &notes_press,
+                    wrapped: &notes_wrapped,
+                    wrap_press: &notes_wrap_press,
+                },
+                measure,
+            };
             let col = view::transcript_with(
                 rows,
-                &wrap,
-                &is_open,
-                measure,
+                &st,
                 Some(Box::new(move |kids: Vec<Bounds<Pixels>>, _, _| {
                     let origin = kids.first().map(|b| f32::from(b.top())).unwrap_or(0.0);
                     *bounds.borrow_mut() = kids
@@ -2904,6 +3449,10 @@ impl App {
                 .size_full()
                 .overflow_y_scroll()
                 .track_scroll(&self.scroll)
+                // The **one bar width** (`12`'s `SCROLLBAR` 6, cited by 13 for the page):
+                // the fence's region sets the same number, and a page bar at the
+                // component library's default would be the second width in one window.
+                .scrollbar_width(px(theme::SCROLLBAR))
                 // A wheel is the reader taking the view, and it is the **only** authority
                 // on where they are: the handle cannot be asked, because its offset is the
                 // last layout's and a fresh scroll still reads as "at the foot". So any
@@ -2927,19 +3476,14 @@ impl App {
                     h_flex()
                         .w_full()
                         .justify_center()
-                        // **The text column gives up the strip's width.** At this window
-                        // size the content area is ~750 and the column is capped at 736, so
-                        // the "gutter" was 7px a side - no gutter at all. The strip then had
-                        // nowhere to be except over the text or out in space, which is what
-                        // every time it drew. Reserving the strip's own width on both sides
-                        // keeps the column centred *and* gives the strip a real home beside
-                        // the text. Symmetric, so the text does not shift off centre.
-                        .px(px(if strip_gutter { band } else { 0.0 }))
                         .child(col),
                 )
                 .into_any_element()
         } else {
-            view::nothing_selected().into_any_element()
+            // The one state this window leaves a person in with nothing to press: the rail
+            // is full of sessions and none is picked. It gets the action back.
+            view::nothing_selected(cx.listener(|this, _, _, cx| this.new_session(cx)))
+                .into_any_element()
         };
         // The transcript's own furniture, drawn **over** it: the minimap down the
         // right edge, and the way back to the end when the reader has left it.
@@ -2956,7 +3500,7 @@ impl App {
             // is a control that cannot do anything.
             let strip = if marks.len() > 1 {
                 let rows: Vec<usize> = marks.iter().map(|m| m.row).collect();
-                Some(view::minimap(&marks, current, &mut |i, face| {
+                Some(view::minimap(&marks, current, hit_w, &mut |i, face| {
                     // The row this pip stands for, copied out before the listener
                     // takes it: the listener outlives this call and a `usize` is the
                     // only thing it needs.
@@ -3002,13 +3546,8 @@ impl App {
             // where it actually lands.
             //
             // `content()` is laid out as `rail | content | sidebar`, so the gutter is half
-            // of what the content column has left over its own measure.
-            let width = f32::from(window.bounds().size.width);
-            let rail_w = if self.rail_open { self.rail_w } else { 0.0 };
-            let side_w = if self.sidebar_open { self.side_w } else { 0.0 };
-            // The room is reserved by the text column itself now (see `strip_gutter`), so
-            // this only has to know whether that happened.
-            let _ = (width, rail_w, side_w);
+            // of what the content column has left over its own measure - and the strip is
+            // centred **in that gutter**, which is where the text is not.
             if !strip_gutter {
                 None
             } else {
@@ -3029,9 +3568,9 @@ impl App {
                         // content area put the strip at the far edge, a few hundred pixels
                         // from the text. The gutter is now measured at
                         // run time, so this is where the text actually ends.
-                        // Inside the band the column reserved, so the strip is beside the
-                        // text rather than out in the empty area. Centred in that band.
-                        .right(px((band - theme::MAP_HIT_W) / 2.0))
+                        // Inside the gutter, centred, so the strip is beside the text
+                        // rather than out in the empty area or on top of it.
+                        .right(px(((gutter - hit_w) / 2.0).max(0.0)))
                         .top(px(theme::SPACE_LG))
                         .bottom(px(theme::COMPOSER_FLOOR_H))
                         .items_end()
@@ -3085,7 +3624,7 @@ impl App {
             .flex_1()
             .min_w(px(0.))
             .h_full()
-            .child(view::content_head(session, &caption))
+            .child(view::content_head(session, project_name, &caption))
             .child(
                 div()
                     .relative()
@@ -3136,6 +3675,21 @@ impl App {
 }
 
 impl App {
+    /// Whether the rail is on screen: open, and with the room for it.
+    ///
+    /// The source's own arithmetic - the rail's floor plus the conversation's measure is
+    /// where it stops being true that both fit - so below that the rail goes away
+    /// instead of shrinking under its floor (`threadSidebarWidth.ts:14`,
+    /// `docs/design/01-window-shell.md`). Nothing is drawn in its place: there is no
+    /// icon-only rail in this design, and the toggle is in the strip either way.
+    ///
+    /// One method rather than the same expression in the three places that need it
+    /// (the strip's band, the column, and the room the transcript is measured against).
+    fn rail_carries(&self, window: &Window) -> bool {
+        self.rail_open
+            && f32::from(window.bounds().size.width) >= theme::MEASURE + theme::RAIL_MIN
+    }
+
     /// Move whichever divider a drag owns to the pointer's own x, and keep the
     /// window painting.
     ///
@@ -3147,7 +3701,13 @@ impl App {
     /// rebuild the whole transcript per pixel.
     fn drag_to(&mut self, x: f32, cx: &mut Context<Self>) {
         if self.resizing_rail {
-            let next = x.clamp(theme::RAIL_MIN, theme::RAIL_MAX);
+            // The rail gives the conversation its `MEASURE` before it takes more room for
+            // itself: its ceiling is its own `RAIL_MAX` or what is left over once the text
+            // and the right panel have theirs, whichever is smaller.
+            let side = if self.sidebar_open { self.side_w + view::SPLIT_W } else { 0.0 };
+            let room = self.side_right - theme::MEASURE - side;
+            let ceiling = theme::RAIL_MAX.min(room).max(theme::RAIL_MIN);
+            let next = x.clamp(theme::RAIL_MIN, ceiling);
             if (next - self.drag_rail.unwrap_or(self.rail_w)).abs() > 0.5 {
                 self.drag_rail = Some(next);
                 cx.notify();
@@ -3280,16 +3840,23 @@ impl Render for App {
                                 cx.notify();
                             }),
                         );
-                        view::topbar(&state::short_path(&self.ws.home), toggle.into_any_element())
-                            .child(view::version_chip(
-                                self.news.as_ref().and_then(|n| n.behind()),
-                            ))
+                        view::topbar(
+                            // The strip's band is the rail's **column**, handle and all,
+                            // or it stops six pixels short of the rail under it.
+                            self.rail_carries(window)
+                                .then_some(self.rail_w + view::SPLIT_W),
+                            &state::short_path(&self.ws.home),
+                            toggle.into_any_element(),
+                        )
+                        .child(view::version_chip(
+                            self.news.as_ref().and_then(|n| n.behind()),
+                        ))
                     })
                     .child(
                         h_flex()
                             .flex_1()
                             .min_h(px(0.))
-                            .when(self.rail_open, |d| d.child(self.rail(cx)))
+                            .when(self.rail_carries(window), |d| d.child(self.rail(cx)))
                             .child(self.content(window, cx))
                             .when(self.sidebar_open, |d| d.child(self.sidebar(cx))),
                     ),
@@ -3334,6 +3901,49 @@ mod tests {
         let args = vec!["--fold".to_string(), "alpha".to_string()];
         assert_eq!(super::flag(&args, "--fold").as_deref(), Some("alpha"));
         assert_eq!(super::flag(&args, "--home"), None);
+    }
+
+    /// **One palette, one file.** `theme.rs` is where a colour may be written, and the
+    /// hard rule of the design folder is that no other file holds a hex: two palettes in
+    /// one window is the bug that folder exists to prevent. The rule was broken twice by
+    /// hand before it had this check (a git status tone and a table of project gradients),
+    /// so it is a test now rather than a paragraph.
+    #[test]
+    fn no_hex_outside_the_theme() {
+        let sources: [(&str, &str); 5] = [
+            ("view.rs", include_str!("view.rs")),
+            ("main.rs", include_str!("main.rs")),
+            ("md.rs", include_str!("md.rs")),
+            ("motion.rs", include_str!("motion.rs")),
+            ("state.rs", include_str!("state.rs")),
+        ];
+        let mut found = Vec::new();
+        for (name, text) in sources {
+            for (n, line) in text.lines().enumerate() {
+                let code = line.trim_start();
+                // Comments talk about colours ("#201e1c") in words; only code counts.
+                if code.starts_with("//") {
+                    continue;
+                }
+                for (marker, len) in [("0x", 6usize), ("#", 6usize)] {
+                    let mut rest = line;
+                    while let Some(at) = rest.find(marker) {
+                        let after = &rest[at + marker.len()..];
+                        let digits = after.chars().take_while(|c| c.is_ascii_hexdigit()).count();
+                        if digits >= len {
+                            found.push(format!("{name}:{} {}", n + 1, line.trim()));
+                            break;
+                        }
+                        rest = &rest[at + marker.len()..];
+                    }
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "a colour outside `theme.rs` - land it on a token there instead:\n{}",
+            found.join("\n")
+        );
     }
 
     /// A probe: the harness's own test lives in `shot.rs`, which needs the

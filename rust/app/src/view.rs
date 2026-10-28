@@ -22,14 +22,15 @@
 //! that are used are theirs, on a control and on the empty state's mark.
 
 use gpui_kit::assets::IconName;
+// The scrollbar element, which draws a bar inside the window with our own tokens:
+// gpui's `div` scroll reserves the room for one and paints no chrome.
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use std::path::Path;
-
 use crate::md;
-use crate::state::{Caption, Changes, Changed, Icon, MenuRow, Node, Project, Row, Session, Step, Viewing};
+use crate::state::{Changes, Changed, Icon, MenuRow, Node, Project, Row, Session, Step, Viewing};
 use crate::state;
 use crate::{motion, theme};
 
@@ -171,24 +172,6 @@ pub fn spinner(size: f32, tone: Hsla) -> Div {
         .child(icon(IconName::CircleDashed, size, tone.opacity(0.45 + 0.55 * phase)))
 }
 
-/// Their `StatusIndicator`: a pulse behind a solid dot, amber while an agent is
-/// working (`bg-amber-500`, `animate-ping`). The phase is the app's own clock.
-pub fn working_dot() -> Div {
-    let phase = motion::pulse_phase();
-    div()
-        .flex_shrink_0()
-        .relative()
-        .size(px(7.0))
-        .child(
-            div()
-                .absolute()
-                .size(px(7.0))
-                .rounded_full()
-                .bg(theme::state_working().opacity(0.25 + 0.55 * phase)),
-        )
-        .child(div().absolute().size(px(7.0)).rounded_full().bg(theme::state_working()))
-}
-
 // ---------------------------------------------------------------- the rail
 //
 // The rail answers "where is my work", and a project is the unit: their own
@@ -217,9 +200,10 @@ pub fn rail_head(sessions: usize, new_t: f32) -> Div {
         .flex_shrink_0()
         .items_center()
         .gap(px(theme::SPACE_SM))
-        .px(px(theme::SPACE_MD))
-        .border_b_1()
-        .border_color(theme::line())
+        // The group's own inset plus a row's, so this head's mark lines up with the
+        // project marks under it instead of standing 6px to their left. The rail has one
+        // left edge and everything in it lands on it (`docs/design/02-sidebar.md`).
+        .px(px(theme::SPACE_SM + theme::ROW_PAD))
         .child(icon(IconName::Layers2, 15.0, theme::text()))
         .child(
             div()
@@ -279,18 +263,21 @@ pub fn project_head(
 ) -> Div {
     h_flex()
         .w_full()
-        .h(px(theme::ROW_HEAD))
+        // `h-8 ... gap-2.5 px-(--sidebar-row-content-inset) rounded-(--control-radius)` -
+        // `SidebarProjectFolderHeader.tsx:77`. 32 tall, 10 between the mark and the name,
+        // 10 at each side, 8 round: `CONTROL`, `ROW_PAD`, `ROW_PAD`, `R_MD`.
+        .h(px(theme::CONTROL))
         .flex_shrink_0()
         .items_center()
-        .gap(px(theme::SPACE_SM))
-        .pl(px(theme::SPACE_SM))
-        .pr(px(theme::SPACE_SM))
+        .gap(px(theme::ROW_PAD))
+        .px(px(theme::ROW_PAD))
+        .rounded(px(theme::R_MD))
         .bg(motion::mix(theme::ink(0.0), theme::wash_hover(), hover_t))
         .child(match mark {
             Some(m) => thumbnail(&project.name, m),
             None => div()
                 .flex_shrink_0()
-                .size(px(20.0))
+                .size(px(16.0))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -361,7 +348,8 @@ pub fn project_head(
 pub fn thumbnail(name: &str, icon: &Icon) -> Div {
     let frame = div()
         .flex_shrink_0()
-        .size(px(22.0))
+        // `size-4` on the rail's folder header (`SidebarProjectFolderHeader.tsx:79`).
+        .size(px(16.0))
         .flex()
         .items_center()
         .justify_center()
@@ -369,11 +357,11 @@ pub fn thumbnail(name: &str, icon: &Icon) -> Div {
     match icon {
         Icon::Glyph(g) => frame
             .bg(theme::chip())
-            .text_size(px(13.0))
+            .text_size(px(theme::SMALL))
             .child(g.clone()),
         Icon::Gradient(n) => {
             let (a, b) = theme::gradient(*n);
-            frame.bg(a).text_size(px(theme::SMALL)).font_weight(FontWeight::MEDIUM).text_color(b).child(
+            frame.bg(a).text_size(px(theme::MICRO)).font_weight(FontWeight::MEDIUM).text_color(b).child(
                 name.chars().next().unwrap_or('?').to_uppercase().to_string(),
             )
         }
@@ -383,7 +371,7 @@ pub fn thumbnail(name: &str, icon: &Icon) -> Div {
             .border_1()
             .border_color(theme::line())
             .bg(theme::chip())
-            .text_size(px(theme::SMALL))
+            .text_size(px(theme::MICRO))
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme::muted())
             .child(name.chars().next().unwrap_or('?').to_uppercase().to_string()),
@@ -427,24 +415,49 @@ pub enum State {
 
 impl State {
     /// The word a row shows for it.
+    ///
+    /// t3code's own vocabulary, in its own title case: `Working`, `Approval`, `Done`,
+    /// `Failed` (`SidebarThreadRow.tsx:723`-`:778`). This is the file's largest finding -
+    /// the source draws a **word plus icon** and never a dot, because a dot cannot say
+    /// which of three needs-you states it means and forty rows of coloured dots is a
+    /// Christmas tree. `Settled` says nothing at all: it is the absence of a state, so
+    /// the row keeps showing its age instead.
     pub fn label(self) -> &'static str {
         match self {
-            State::Ask => "needs you",
-            State::Failed => "failed",
-            State::Working => "working",
-            State::Waiting => "waiting",
-            State::Settled => "settled",
+            State::Ask => "Approval",
+            State::Failed => "Failed",
+            State::Working => "Working",
+            State::Waiting => "Done",
+            State::Settled => "",
         }
     }
 
-    /// The hue its mark and its word wear. `Settled` is the quiet one, which is
+    /// The mark that stands beside the word, theirs: `CircleDashedIcon` while a run is in
+    /// flight, `ShieldQuestionIcon` for an approval, `CircleCheckIcon` for a finished run
+    /// nobody has read, `CircleAlertIcon` for a failure.
+    pub fn mark(self) -> Option<IconName> {
+        match self {
+            State::Ask => Some(IconName::ShieldQuestionMark),
+            State::Failed => Some(IconName::CircleAlert),
+            State::Working => Some(IconName::CircleDashed),
+            State::Waiting => Some(IconName::CircleCheckBig),
+            State::Settled => None,
+        }
+    }
+
+    /// The hue the word and its mark wear. `Settled` is the quiet one, which is
     /// what makes the other four read as states rather than as decoration.
+    ///
+    /// `Done` is green (`success`), not `unread`: the source's unread is "the run
+    /// finished and you have not looked", and it renders as that word in the success
+    /// colour (`SidebarThreadRow.tsx:775`-`:778`). The blue `unread` token stays for the
+    /// job it was made for and gets no second meaning here.
     pub fn tone(self) -> Hsla {
         match self {
             State::Ask => theme::state_permission(),
             State::Failed => theme::state_failed(),
             State::Working => theme::state_working(),
-            State::Waiting => theme::accent(),
+            State::Waiting => theme::success(),
             State::Settled => theme::ghost(),
         }
     }
@@ -489,10 +502,20 @@ pub fn row_state(
 
 /// A session's row.
 ///
-/// Two levels and no more, the same shape as their `WorkspaceListItem`: a mark,
-/// then a name that takes the width, then the trailing fact in a fixed column. A
-/// row that reflows when its trailing fact changes is a row you lose your place
-/// in.
+/// **One line, 36px, whatever it holds.** `flex h-9 items-center gap-2.5 px-2.5`
+/// (`SidebarThreadRow.tsx:1223`): `ROW`, `ROW_PAD`, `ROW_PAD`. t3code's rail uses the
+/// one-line `slim` and `folder` layouts - the two-line layouts in that file are for a
+/// row that carries a branch, a machine and a diff stat, and a rail of forty of those
+/// is a wall. A second line is what made this rail read as a list of paragraphs.
+///
+/// Inside a project the row is indented `ps-9` (`:1228`) - `ROW`, one row's height as
+/// the indent, which is the chevron and the folder mark wide - so a session's title
+/// lines up with the project's own name above it.
+///
+/// The trailing slot is where a row says what it is doing, and it says it in a **word
+/// and an icon** (`:1268`, `:1313`): never a dot. A settled row has nothing to say and
+/// shows its age instead, in the same fixed 32px slot so the column does not jitter
+/// as ages tick over.
 ///
 /// The selected row wears a wash of the *foreground* (`--fill-selected`, 10%),
 /// their own rule, and not a left bar: an accent edge down every selection is a
@@ -501,7 +524,7 @@ pub fn session_row(
     session: &Session,
     selected: bool,
     hover_t: f32,
-    caption: &Caption,
+    in_folder: bool,
     state: State,
     on_rename: impl Fn(&ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
     on_delete: impl Fn(&ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
@@ -513,71 +536,31 @@ pub fn session_row(
         motion::mix(theme::ink(0.0), theme::wash_hover(), hover_t)
     };
     let name_tone = if selected { theme::text() } else { theme::text_soft() };
-    // The leading mark is the state while there is one to show, and the terminal
-    // glyph otherwise. The icon slot is the one place a state can live without
-    // costing the name a character of width.
-    let lead = match state {
-        State::Ask => icon(IconName::ShieldQuestionMark, 13.0, theme::state_permission()),
-        State::Failed => icon(IconName::CircleX, 13.0, theme::state_failed()),
-        State::Working => spinner(13.0, theme::state_working()),
-        State::Waiting => icon(IconName::CircleDot, 13.0, theme::accent()),
-        State::Settled => icon(
-            IconName::SquareTerminal,
-            13.0,
-            if selected { theme::muted() } else { theme::ghost() },
-        ),
-    };
     let mut row = h_flex()
         .w_full()
-        // The height is **derived from the content**, never typed. Two lines of
-        // 16px plus the 8px of padding a row carries is the height of a row with
-        // a caption; one line plus the same padding is a row without.
-        .py(px(theme::ROW_PAD))
-        .min_h(px(theme::ROW))
+        .h(px(theme::ROW))
         .flex_shrink_0()
         .items_center()
-        .gap(px(theme::SPACE_SM))
+        .gap(px(theme::ROW_PAD))
+        .rounded(px(theme::R_SM))
         .bg(wash)
-        .pl(px(30.0))
-        .pr(px(theme::SPACE_MD))
+        .pl(px(if in_folder { theme::ROW } else { theme::ROW_PAD }))
+        .pr(px(theme::ROW_PAD))
         .child(
             div()
-                .flex_shrink_0()
-                .size(px(16.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(lead),
-        )
-        .child(
-            v_flex()
                 .flex_1()
                 .min_w(px(0.))
-                .gap(px(1.0))
-                .child(
-                    div()
-                        .w_full()
-                        .truncate()
-                        .text_size(px(theme::BODY))
-                        .line_height(px(theme::NAME_LINE))
-                        .text_color(name_tone)
-                        .child(session.label()),
-                )
-                .children(caption.two_line().then(|| {
-                    div()
-                        .w_full()
-                        .truncate()
-                        .font(font(theme::MONO))
-                        .text_size(px(theme::MICRO))
-                        .line_height(px(theme::CAPTION_LINE))
-                        .text_color(theme::ghost())
-                        .child(caption.text())
-                })),
+                .truncate()
+                .text_size(px(theme::BODY))
+                .line_height(px(theme::NAME_LINE))
+                .font_weight(if selected { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                .text_color(name_tone)
+                .child(session.label()),
         );
     // The trailing slot, and it is one slot. The age is what a settled row says;
     // while a run is in flight or a turn is waiting on you, the **state** takes the
     // slot, because that is the thing that wants attention. Under the pointer it is
-    // the archive control instead - one slot, and what is in it is whatever you are
+    // the three row actions instead - one slot, and what is in it is whatever you are
     // most likely to want from this row right now.
     if hover_t > 0.02 {
         let t = hover_t;
@@ -606,23 +589,34 @@ pub fn session_row(
         ));
         return row;
     }
-    row.child(if state.speaks() {
-        div()
+    row.child(
+        h_flex()
+            // `relative ml-auto flex h-6 min-w-8 shrink-0 items-center justify-end`:
+            // 32 is the floor, so an age going from `9m` to `12m` does not move the
+            // column (`SidebarThreadRow.tsx:1268`).
             .flex_shrink_0()
-            .text_size(px(theme::MICRO))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(state.tone())
-            .child(state.label())
-            .into_any_element()
-    } else {
-        div()
-            .flex_shrink_0()
-            .text_size(px(theme::SMALL))
-            .font(font(theme::MONO))
-            .text_color(theme::ghost())
-            .child(session.age())
-            .into_any_element()
-    })
+            .h(px(theme::SPACE_XL))
+            .min_w(px(theme::CONTROL))
+            .items_center()
+            .justify_end()
+            .gap(px(theme::SPACE_XS))
+            .child(if state.speaks() {
+                h_flex()
+                    .items_center()
+                    .gap(px(theme::SPACE_XS))
+                    .text_size(px(theme::SMALL))
+                    .text_color(state.tone())
+                    .children(state.mark().map(|m| icon(m, 12.0, state.tone())))
+                    .child(state.label())
+                    .into_any_element()
+            } else {
+                div()
+                    .text_size(px(theme::SMALL))
+                    .text_color(theme::muted())
+                    .child(session.age())
+                    .into_any_element()
+            }),
+    )
 }
 
 /// One of a rail row's trailing controls: a 20px target that lifts under the pointer.
@@ -672,34 +666,55 @@ pub fn composer_scrim(height: f32) -> Div {
 
 /// A group heading: sentence case and quiet. An uppercase grey micro-label is
 /// the strongest "a tool made this" tell there is.
+///
+/// Their `CollapsibleSectionHeader` is `h-8 ... gap-2 ... text-xs font-medium` at
+/// `px-2` inside a `mx-0.5 h-8` wrapper (`collapsible-section-header.tsx:30`,
+/// `SidebarListMarkers.tsx:125`) - so 32 tall, 11px type, and a rule beside the
+/// name that fills the row. The wrapper's 2px plus the group's 8px inset is the same
+/// 10px a row's content sits at, which is what makes the whole rail line up.
+///
+/// **No hover style at all**: the source's class list carries none, so the head is
+/// where the pointer does nothing.
 pub fn group_head(label: &str) -> Div {
     h_flex()
         .w_full()
+        .h(px(theme::CONTROL))
         .flex_shrink_0()
         .items_center()
-        .px(px(theme::SPACE_MD))
-        .pt(px(theme::SPACE_MD))
-        .pb(px(theme::SPACE_XS))
+        .gap(px(theme::SPACE_SM))
+        .px(px(2.0))
         .child(div().text_size(px(theme::SMALL)).text_color(theme::faint()).child(label.to_string()))
+        // `h-px min-w-2 flex-1` in `bg-sidebar-border/50` - a hairline, not a border:
+        // 50% of the rail's 8% white.
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(theme::SPACE_SM))
+                .h(px(1.0))
+                .bg(theme::hairline(0.04)),
+        )
 }
 
 /// The rail's foot: add a repository, and settings. Their own footer is exactly
 /// these two controls, a ghost button that takes the width and an icon beside it.
+///
+/// `flex flex-col gap-2 px-[--sidebar-content-inset] py-1` with `size-8` utility
+/// buttons (`sidebar.tsx:633`, `:722`): 8 at the sides, 4 above and below, 8 between,
+/// and 32-high controls. No rule above it - the source draws none, and the rail is
+/// already two surfaces deep.
 pub fn rail_foot(add_t: f32, gear_t: f32) -> Div {
     h_flex()
         .w_full()
-        .h(px(theme::HEAD))
         .flex_shrink_0()
         .items_center()
-        .gap(px(theme::SPACE_XS))
+        .gap(px(theme::SPACE_SM))
         .px(px(theme::SPACE_SM))
-        .border_t_1()
-        .border_color(theme::line())
+        .py(px(theme::SPACE_XS))
         .child(
             h_flex()
                 .flex_1()
                 .min_w(px(0.))
-                .h(px(theme::CONTROL_SM))
+                .h(px(theme::CONTROL))
                 .items_center()
                 .gap(px(theme::SPACE_SM))
                 .rounded(px(theme::R_MD))
@@ -722,7 +737,7 @@ pub fn rail_foot(add_t: f32, gear_t: f32) -> Div {
         .child(
             div()
                 .flex_shrink_0()
-                .size(px(theme::CONTROL_SM))
+                .size(px(theme::CONTROL))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -732,24 +747,28 @@ pub fn rail_foot(add_t: f32, gear_t: f32) -> Div {
         )
 }
 
-/// The rail with nothing in it at all. Their own sidebar's empty state is two
-/// lines of text, centered, muted.
+/// The rail with nothing in it at all. Their own sidebar's empty state is
+/// `flex flex-col items-center gap-2 px-2 py-6 text-center text-xs
+/// text-muted-foreground/60` - `Sidebar.tsx:3481`: 8, 24, and one size of type.
 pub fn rail_empty() -> Div {
     v_flex()
         .w_full()
         .items_center()
-        .gap(px(2.0))
-        .px(px(theme::SPACE_LG))
-        .pt(px(32.0))
+        .gap(px(theme::SPACE_SM))
+        .px(px(theme::SPACE_SM))
+        .py(px(theme::SPACE_XL))
         .child(
             div()
-                .text_size(px(theme::BODY))
-                .text_color(theme::muted())
+                .text_size(px(theme::SMALL))
+                .text_color(theme::faint())
                 .child("No projects yet"),
         )
         .child(
             div()
                 .text_size(px(theme::SMALL))
+                // The source's "Add project" chip (`Sidebar.tsx:3484`-`:3491`, `R_SM` 6,
+                // `size-3` icon) is the rail's foot's own add control here, so this line
+                // points at it instead of drawing a second one.
                 .text_color(theme::ghost())
                 .child("Add a directory below."),
         )
@@ -775,28 +794,57 @@ pub fn rail_empty() -> Div {
 /// off at the right edge where nothing showed it. A strip that draws the control
 /// and a caller that wraps a different one is two controls on one row, and one of
 /// them is always wrong.
-pub fn topbar(subtitle: &str, toggle: AnyElement) -> Div {
+///
+/// **One plane, not two stacked strips.** The strip and the 40px head under it are
+/// the same surface, and there is no border between them: a `border-b` here is
+/// exactly what made the shell read as two bars with buttons piled on one
+/// (`docs/design/01-window-shell.md`). The plane is `page` across the
+/// conversation and `rail` over the rail's own column, so the top of the window
+/// continues into the column beneath it instead of cutting across both.
+///
+/// `band` is the rail's width while it is open. Collapsed, there is no rail to
+/// continue, and the toggle stands on the page where the traffic lights' room
+/// ends.
+pub fn topbar(band: Option<f32>, subtitle: &str, toggle: AnyElement) -> Div {
+    let (w, bg) = match band {
+        Some(w) => (w, theme::rail()),
+        None => (theme::LIGHTS + theme::CONTROL_SM + theme::SPACE_MD, theme::page()),
+    };
     h_flex()
         .w_full()
         .h(px(theme::TOPBAR))
         .flex_shrink_0()
-        .items_center()
-        .gap(px(theme::SPACE_SM))
-        .bg(theme::rail())
-        .border_b_1()
-        .border_color(theme::line())
-        // The room the traffic lights need, because they float over this row.
-        .pl(px(theme::LIGHTS))
+        .bg(theme::page())
         .pr(px(theme::SPACE_MD))
-        .child(toggle)
         .child(
-            div()
+            h_flex()
+                .h_full()
+                .w(px(w))
+                .flex_shrink_0()
+                .items_center()
+                .bg(bg)
+                // The room the traffic lights need, because they float over this row.
+                .pl(px(theme::LIGHTS))
+                .pr(px(theme::SPACE_MD))
+                .child(toggle),
+        )
+        .child(
+            h_flex()
                 .flex_1()
-                .min_w(px(0.))
-                .truncate()
-                .text_size(px(theme::BODY))
-                .text_color(theme::faint())
-                .child(subtitle.to_string()),
+                .min_w(px(0.0))
+                .h_full()
+                .items_center()
+                .gap(px(theme::SPACE_SM))
+                .pl(px(theme::SPACE_MD))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_size(px(theme::BODY))
+                        .text_color(theme::faint())
+                        .child(subtitle.to_string()),
+                ),
         )
 }
 
@@ -835,24 +883,7 @@ pub fn topbar_toggle(t: f32) -> Div {
     icon_button(IconName::PanelLeft, t, theme::faint())
 }
 
-// ---------------------------------------------------------------- controls// ---------------------------------------------------------------- controls// ---------------------------------------------------------------- controls
-
-/// Their `Button`, `ghost` variant at `size-sm`: a muted label that lifts to the
-/// foreground under the pointer.
-pub fn ghost_button(label: &str, t: f32) -> Div {
-    h_flex()
-        .flex_shrink_0()
-        .h(px(theme::CONTROL_SM))
-        .items_center()
-        .gap(px(6.0))
-        .rounded(px(theme::R_MD))
-        .px(px(theme::SPACE_SM))
-        .bg(motion::mix(theme::ink(0.0), theme::wash_selected(), t))
-        .text_size(px(theme::BODY))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(motion::mix(theme::muted(), theme::text(), t))
-        .child(label.to_string())
-}
+// ---------------------------------------------------------------- controls
 
 /// Their `Button`, `outline` variant: an edge, a plate, and a `shadow-xs`.
 pub fn outline_button(label: &str, t: f32) -> Div {
@@ -903,31 +934,20 @@ pub fn icon_button(name: IconName, t: f32, tone: Hsla) -> Div {
         .child(icon(name, 15.0, motion::mix(tone, theme::text(), t)))
 }
 
-/// Their `Badge`: a pill with a wash behind it.
-pub fn badge(text: &str, tone: Hsla, wash: Hsla) -> Div {
-    h_flex()
-        .flex_shrink_0()
-        .h(px(20.0))
-        .items_center()
-        .rounded(px(theme::R_CHIP))
-        .bg(wash)
-        .px(px(6.0))
-        .text_size(px(theme::SMALL))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(tone)
-        .child(text.to_string())
-}
-
 // ---------------------------------------------------------------- the content
 
 /// The content's own head: the strip the conversation sits under.
 ///
-/// Theirs is the group strip, a row of tabs across the top of the pane. One
-/// session is one tab, so in this window it is the session you are looking at
-/// and where it stands: the same strip, with nothing to switch between until the
-/// window can open a second one. Their selected tab is `text-foreground
-/// bg-border/30` with a hairline down its right.
-pub fn content_head(session: Option<&Session>, caption: &str) -> Div {
+/// Their `ChatHeader` (`apps/web/src/components/chat/ChatHeader.tsx:279`) is a
+/// favicon, the project's name, a literal `/`, then the thread's own title taking
+/// the rest of the row at `text-sm font-medium`. It carries **no border under it**:
+/// the header and the conversation are one page (`ChatView.tsx:3134`, `bg-background`,
+/// `items-center`, and nothing else).
+///
+/// `path` is the fallback for the first crumb: a session standing somewhere the
+/// user never promoted has no project to name, and its own directory is the honest
+/// answer rather than the word "project".
+pub fn content_head(session: Option<&Session>, project: Option<&str>, path: &str) -> Div {
     let row = h_flex()
         .w_full()
         .h(px(theme::HEAD))
@@ -935,63 +955,37 @@ pub fn content_head(session: Option<&Session>, caption: &str) -> Div {
         .items_center()
         .gap(px(theme::SPACE_SM))
         .bg(theme::page())
-        .border_b_1()
-        .border_color(theme::line());
+        .px(px(theme::SPACE_MD));
     let Some(s) = session else {
-        return row.px(px(theme::SPACE_LG)).child(
-            div().text_size(px(theme::BODY)).text_color(theme::ghost()).child("No session"),
-        );
+        return row
+            .child(div().text_size(px(theme::BODY)).text_color(theme::ghost()).child("No session"));
     };
-    row.child(
-        h_flex()
-            .h_full()
-            .flex_shrink_0()
-            .items_center()
-            .gap(px(theme::SPACE_SM))
-            .border_r_1()
-            .border_color(theme::line())
-            .bg(theme::chip())
-            .px(px(theme::SPACE_MD))
-            .child(icon(IconName::SquareTerminal, 14.0, theme::muted()))
-            .child(
-                div()
-                    .max_w(px(300.0))
-                    .truncate()
-                    .text_size(px(theme::BODY))
-                    .text_color(theme::text())
-                    .child(s.label()),
-            ),
-    )
-    .child(
-        div()
-            .flex_1()
-            .min_w(px(0.))
-            .truncate()
-            .text_size(px(theme::SMALL))
-            .font(font(theme::MONO))
-            .text_color(theme::ghost())
-            .child(caption.to_string()),
-    )
-}
-
-/// A state badge, the way their `WorkspaceStatusBadge` does it: a wash of the
-/// state's own tone with the state's word in it, at the micro size.
-pub fn state_badge(label: &str, tone: Hsla) -> Div {
-    h_flex()
-        .flex_shrink_0()
-        .h(px(18.0))
-        .items_center()
-        .gap(px(4.0))
-        .rounded(px(theme::R_CHIP))
-        .bg(tone.opacity(0.14))
-        .px(px(6.0))
-        .child(dot(tone))
+    row.child(icon(IconName::SquareTerminal, 14.0, theme::muted()))
         .child(
             div()
-                .text_size(px(theme::MICRO))
+                .flex_shrink_0()
+                .max_w(px(160.0))
+                .truncate()
+                .text_size(px(theme::BODY))
+                .text_color(theme::muted())
+                .child(project.unwrap_or(path).to_string()),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(theme::BODY))
+                .text_color(theme::ghost())
+                .child("/"),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .truncate()
+                .text_size(px(theme::BODY))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(tone)
-                .child(label.to_string()),
+                .text_color(theme::text())
+                .child(s.label()),
         )
 }
 
@@ -1024,14 +1018,16 @@ pub fn empty_state(home: &str, add_t: f32, none_t: f32) -> Div {
                 .gap(px(theme::SPACE_SM))
                 .child(
                     div()
-                        .text_size(px(18.0))
-                        .font_weight(FontWeight::MEDIUM)
+                        // `H1` 20: their empty title is `text-xl font-semibold`
+                        // (`ui/empty.tsx:92`), the one new type size 09 asks for.
+                        .text_size(px(theme::H1))
+                        .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::text())
                         .child("No projects yet"),
                 )
                 .child(
                     div()
-                        .text_size(px(14.0))
+                        .text_size(px(theme::BODY))
                         .line_height(px(21.0))
                         .text_color(theme::muted())
                         .child("Promote a directory and the sessions standing in it appear here."),
@@ -1080,70 +1076,13 @@ pub fn sidebar_tab(index: usize, label: &str, on: bool, t: f32) -> Div {
         .child(icon(mark, 14.0, if on { theme::text() } else { theme::faint() }))
         .child(
             div()
-                .text_size(px(12.0))
+                .text_size(px(theme::SMALL))
                 .text_color(if on {
                     theme::text()
                 } else {
                     motion::mix(theme::faint(), theme::muted(), t)
                 })
                 .child(label.to_string()),
-        )
-}
-
-/// The session's own facts, as a small block under the tabs.
-pub fn session_facts(session: Option<&Session>, project: Option<&Project>) -> Div {
-    let mut col = v_flex().w_full().gap(px(theme::SPACE_SM)).px(px(theme::SPACE_MD));
-    let Some(s) = session else {
-        return col.child(
-            div().text_size(px(12.0)).text_color(theme::ghost()).child("Nothing selected"),
-        );
-    };
-    col = col.child(
-        div()
-            .w_full()
-            .truncate()
-            .text_size(px(12.0))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(theme::text())
-            .child(s.label()),
-    );
-    if let Some(p) = project {
-        col = col.child(fact("project", &p.name));
-    }
-    if !s.cwd.trim().is_empty() {
-        col = col.child(fact("directory", &state_short(&s.cwd)));
-    }
-    if !s.model.trim().is_empty() {
-        col = col.child(fact(
-            "model",
-            &if s.provider.trim().is_empty() {
-                s.model.clone()
-            } else {
-                format!("{} \u{b7} {}", s.model, s.provider)
-            },
-        ));
-    }
-    col
-}
-
-fn state_short(s: &str) -> String {
-    crate::state::short_path(Path::new(s))
-}
-
-/// One fact: a quiet label over a value in the mono face.
-pub fn fact(label: &str, value: &str) -> Div {
-    v_flex()
-        .w_full()
-        .gap(px(2.0))
-        .child(div().text_size(px(theme::SMALL)).text_color(theme::faint()).child(label.to_string()))
-        .child(
-            div()
-                .w_full()
-                .font(font(theme::MONO))
-                .text_size(px(theme::SMALL))
-                .line_height(px(16.0))
-                .text_color(theme::muted())
-                .child(value.to_string()),
         )
 }
 
@@ -1178,7 +1117,7 @@ pub fn category_head(title: &str, kind: &str, count: usize, open: bool, t: f32) 
                 .flex_1()
                 .min_w(px(0.))
                 .truncate()
-                .text_size(px(12.0))
+                .text_size(px(theme::SMALL))
                 .text_color(theme::muted())
                 .child(title.to_string()),
         )
@@ -1231,7 +1170,7 @@ pub fn file_row(file: &Changed, t: f32, selected: bool) -> Div {
                 .flex_1()
                 .min_w(px(0.))
                 .truncate()
-                .text_size(px(12.0))
+                .text_size(px(theme::SMALL))
                 .text_color(if selected { theme::text() } else { theme::text_soft() })
                 .child(file.name()),
         )
@@ -1314,7 +1253,7 @@ pub fn tree_row(node: &Node, depth: usize, t: f32, selected: bool, open: bool) -
                 .flex_1()
                 .min_w(px(0.))
                 .truncate()
-                .text_size(px(12.0))
+                .text_size(px(theme::SMALL))
                 .text_color(if selected || node.is_dir() {
                     theme::text_soft()
                 } else {
@@ -1324,14 +1263,19 @@ pub fn tree_row(node: &Node, depth: usize, t: f32, selected: bool, open: bool) -
         )
 }
 
-/// Their `getStatusColor`, as this palette's tones./// Their `getStatusColor`, as this palette's tones.
+/// Their `getStatusColor`, as this palette's tones.
+///
+/// **Two of their nine have no tone here, and that is the answer rather than a
+/// gap**: git's `renamed` is blue and its `copied` is purple, and this palette spends
+/// its blue on `unread` and has no purple at all. They draw `muted` and the *glyph*
+/// carries which they are ([`status_mark`]), which is the one signal that does not
+/// need a new colour.
 fn status_tone(status: &str) -> Hsla {
     match status {
         "added" | "untracked" => theme::diff_added(),
         "modified" => theme::warning(),
         "deleted" => theme::diff_removed(),
-        "renamed" => theme::hex(0x61afef, 1.0),
-        "copied" => theme::hex(0xc678dd, 1.0),
+        "renamed" | "copied" => theme::muted(),
         _ => theme::ghost(),
     }
 }
@@ -1391,7 +1335,7 @@ pub fn changes_body(changes: &Changes, dir: &str) -> Div {
                     .flex_1()
                     .min_w(px(0.))
                     .truncate()
-                    .text_size(px(12.0))
+                    .text_size(px(theme::SMALL))
                     .text_color(theme::muted())
                     .child(changes.branch.clone()),
             )
@@ -1511,7 +1455,7 @@ fn code_lines(text: &str, patch: Option<()>) -> Div {
                         .flex_1()
                         .min_w(px(0.))
                         .font(font(theme::MONO))
-                        .text_size(px(12.0))
+                        .text_size(px(theme::SMALL))
                         .line_height(px(18.0))
                         .text_color(tone)
                         .child(line.to_string()),
@@ -1582,7 +1526,7 @@ pub fn plan_row(text: &str, state: &str) -> Div {
             div()
                 .flex_1()
                 .min_w(px(0.))
-                .text_size(px(12.0))
+                .text_size(px(theme::SMALL))
                 .line_height(px(18.0))
                 .text_color(if done || dropped { theme::ghost() } else { theme::muted() })
                 .child(text.to_string()),
@@ -1652,36 +1596,68 @@ pub fn not_yet(sentence: &str) -> Div {
 // answer to a thought that sometimes shows and sometimes does not: it is always
 // one row, and what changes is its *label*, not whether it exists.
 
+/// What a markdown block needs from the window's state, bundled because every
+/// builder from [`answer`] down needs both and two more parameters each was a wall of
+/// arguments with no name.
+///
+/// - `open` answers whether a `<details>` at `(document, block)` is open.
+/// - `press` wraps its summary row so a press can open or shut it. It takes the row
+///   and returns it, which is how a `&dyn Fn` can carry a click without an `ElementId`
+///   of its own: the caller's closure is the one that owns the id and the listener.
+pub struct Notes<'a> {
+    pub open: &'a dyn Fn(u64, usize) -> bool,
+    pub press: &'a dyn Fn(u64, usize, AnyElement) -> AnyElement,
+    /// Whether a fence at `(document, block)` is wrapped, and what its wrap mark does.
+    /// The same pair as the disclosure's, for the same reason.
+    pub wrapped: &'a dyn Fn(u64, usize) -> bool,
+    pub wrap_press: &'a dyn Fn(u64, usize, AnyElement) -> AnyElement,
+}
+
+/// Everything a row of the transcript needs from the window that owns it: what a fold
+/// does when pressed, whether it is open, what a turn's verbs are, and the markdown
+/// state above. One struct rather than six parameters.
+pub struct Rows<'a> {
+    pub run: &'a dyn Fn(usize, AnyElement) -> AnyElement,
+    pub is_open: &'a dyn Fn(usize) -> bool,
+    /// A turn's own verbs, wrapped so a press reaches the window. `said` draws them
+    /// under the bubble.
+    pub retry: &'a dyn Fn(usize, &str, AnyElement) -> AnyElement,
+    pub notes: Notes<'a>,
+    /// The column's own width. `MEASURE` is the ideal; the caller narrows it when the
+    /// window is tight, so the strip beside the text always has somewhere to be.
+    pub measure: f32,
+}
+
 /// The transcript: the rows a session's own record holds, oldest first.
 ///
 /// Every row is **id'd by its own index** (`row:n`) and that id is the only thing
 /// the minimap needs: `scroll_to_top_of_item` takes an index into the scroller's
 /// children, and the children are exactly these rows in this order. A jump is
 /// therefore "put row N at the top", with no arithmetic about anybody's height.
-pub fn transcript(rows: &[Row], run: &dyn Fn(usize, AnyElement) -> AnyElement, is_open: &dyn Fn(usize) -> bool) -> Div {
-    transcript_with(rows, run, is_open, theme::MEASURE, None)
-}
-
-/// The same transcript, with a listener that reports each row's laid-out extent.
 ///
-/// A `prepaint` listener sees its own children's bounds, and this column's children are
-/// exactly the rows - so this is where the row positions come from. They are what makes
-/// the minimap say **where** a turn is instead of only how many there are, and what a
-/// strip's jump lands on. `None` for a caller that does not need them (`--print`, a test).
+/// `on_rows` is a listener that reports each row's laid-out extent: a `prepaint`
+/// listener sees its own children's bounds, and this column's children are exactly the
+/// rows - so this is where the row positions come from. They are what makes the
+/// minimap say **where** a turn is instead of only how many there are, and what a
+/// strip's jump lands on.
 pub fn transcript_with(
     rows: &[Row],
-    run: &dyn Fn(usize, AnyElement) -> AnyElement,
-    is_open: &dyn Fn(usize) -> bool,
-    // The column's own width. `MEASURE` is the ideal; the caller narrows it when the
-    // window is tight, so the strip beside the text always has somewhere to be.
-    measure: f32,
+    st: &Rows,
     on_rows: Option<Box<dyn Fn(Vec<Bounds<Pixels>>, &mut Window, &mut gpui_kit::App) + 'static>>,
 ) -> Div {
+    let measure = st.measure;
     let mut col = v_flex()
         .w_full()
         .max_w(px(measure))
-        .gap(px(theme::SPACE_MD))
-        .px(px(theme::SPACE_XL))
+        // **No gap on the list.** The vertical rhythm is each row's own bottom padding,
+        // chosen by what the row is (`MessagesTimeline.tsx:1435`-`:1445`): 8 under a fold or
+        // an answer, 16 under anything that ends a turn. A uniform gap is what makes a
+        // conversation read as a stack of equal blocks.
+        //
+        // No horizontal padding either: their row frame is `padding-inline: 0`, and the
+        // lane itself is the measure (`index.css:959`). The 24px this used to keep put the
+        // text 48px inside the composer's own edges, so the column and the box you answer
+        // in disagreed about where the column was.
         .pt(px(theme::SPACE_LG))
         // The floor is the composer's height, and it is **room to scroll past**, not a
         // margin: the composer floats over this column, so without it the last row of a
@@ -1699,17 +1675,37 @@ pub fn transcript_with(
         col = col.on_children_prepainted(listener);
     }
     for (i, row) in rows.iter().enumerate() {
+        // A row's own air, by kind. A turn ends with 16 under it, which is what groups a
+        // conversation into turns; a fold and an answer end with 8, which is what keeps
+        // the several rows of one turn reading as one block.
+        let (el, after) = match row {
+            Row::Said(text) => (
+                said(
+                    text,
+                    measure,
+                    &format!("said:{i}"),
+                    (st.retry)(
+                        i,
+                        text,
+                        icon(IconName::RotateCcw, theme::SMALL + 1.0, theme::faint())
+                            .into_any_element(),
+                    ),
+                )
+                .into_any_element(),
+                theme::SPACE_LG,
+            ),
+            Row::Answer(text) => (answer(text, &st.notes).into_any_element(), theme::SPACE_SM),
+            Row::Run { note, secs, steps } => (
+                run_block(note.as_deref(), *secs, steps, (st.is_open)(i), i, st).into_any_element(),
+                theme::SPACE_SM,
+            ),
+        };
         col = col.child(
             div()
                 .id(ElementId::Name(format!("row:{i}").into()))
                 .w_full()
-                .child(match row {
-                    Row::Said(text) => said(text).into_any_element(),
-                    Row::Answer(text) => answer(text).into_any_element(),
-                    Row::Run { note, secs, steps } => {
-                        run_block(note.as_deref(), *secs, steps, is_open(i), i, run).into_any_element()
-                    }
-                }),
+                .pb(px(after))
+                .child(el),
         );
     }
     col
@@ -1718,22 +1714,97 @@ pub fn transcript_with(
 
 /// A person's turn: the one row that is spoken rather than reported, so it is
 /// the one row with a face of its own.
-pub fn said(text: &str) -> Div {
-    v_flex()
-        .w_full()
-        .rounded(px(theme::R_MD))
-        .bg(theme::plate())
-        .border_1()
-        .border_color(theme::line())
-        .px(px(theme::SPACE_MD))
-        .py(px(theme::SPACE_SM))
-        .child(
-            div()
-                .text_size(px(theme::BODY))
-                .line_height(px(20.0))
-                .text_color(theme::text())
-                .child(text.to_string()),
-        )
+///
+/// `group flex flex-col items-end gap-1` (`TimelineUserMessageRow.tsx:446`): the only
+/// row in the transcript that is **right-aligned**, and the only one with a bubble
+/// (`:470`) - `max-w-[80%] rounded-2xl` on `--message-surface` at `p-3`. Everything the
+/// model or a tool says is text on the page.
+///
+/// `measure` is the lane's width, because the bubble's ceiling is a fraction of it and
+/// the lane is what this row is laid out in.
+///
+/// Under the bubble, the **hover strip** (`TimelineUserMessageRow.tsx:648`):
+/// `flex w-full max-w-[80%] items-center justify-end pe-1 text-xs tabular-nums
+/// opacity-0 ... group-hover:opacity-100`, at `SMALL` and riding the window's own hover
+/// clock (so its fade is `motion::FAST` and nothing here declares a duration).
+///
+/// It holds **one verb**: copy. The source's other one is retry, and a retry here would
+/// be a send from a row into a worker the composer owns - the row has no session binding
+/// and `send` reads the field - so the strip carries what this window can actually do.
+/// The turn's time is not in the strip either: `messages.jsonl` carries the text and the
+/// stamp is the file's own, not the record's, so there is no per-turn time to print.
+///
+/// ponytail: the copy mark does not swap to a tick for 1200ms (`:183`-`:200`) - that is
+/// a timer per row, and the strip appearing under the pointer is the acknowledgement.
+///
+/// **Not verified on screen.** gpui's `on_hover` never fires under the headless test
+/// platform (`tests/shot.rs` parks a pointer there and the blend stays at 0), so this
+/// strip's own state is read from the code, not from a frame: what the frame shows is
+/// the space it reserves under every turn.
+pub fn said(text: &str, measure: f32, key: &str, retry: AnyElement) -> Stateful<Div> {
+    let t = motion::hover_t(key);
+    motion::mark_hover_el(
+        v_flex()
+            .w_full()
+            .items_end()
+            .gap(px(theme::SPACE_XS))
+            .child(
+                v_flex()
+                    .max_w(px(measure * 0.8))
+                    .rounded(px(theme::R_COMPOSER))
+                    .bg(theme::composer())
+                    .p(px(theme::SPACE_MD))
+                    .child(
+                        div()
+                            .text_size(px(theme::BODY))
+                            .line_height(px(theme::ANSWER_LINE))
+                            .text_color(theme::text())
+                            .child(text.to_string()),
+                    ),
+            )
+            // The strip's own height is reserved at rest, so a row does not grow under
+            // the pointer; what appears is the control, not the space for it.
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(measure * 0.8))
+                    .h(px(theme::NAME_LINE))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .when(t > 0.0, |d| {
+                        d.child(
+                            h_flex()
+                                .items_center()
+                                .gap(px(theme::SPACE_XS))
+                                .child(turn_verb(text, t, key))
+                                .child(retry),
+                        )
+                    }),
+            ),
+        key,
+    )
+}
+
+/// The copy verb under a turn.
+fn turn_verb(text: &str, t: f32, key: &str) -> Stateful<Div> {
+    let text = text.to_string();
+    div()
+        // An id, because a click handler is a `StatefulInteractiveElement` method: the
+        // same trap `rust/AGENTS.md` names for a scroll container.
+        .id(ElementId::Name(format!("copy:{key}").into()))
+        .flex()
+        .items_center()
+        .rounded(px(theme::R_CHIP))
+        .px(px(theme::SPACE_XS))
+        // `SMALL` is the strip's 12px step, and the clock's own value is the fade.
+        .opacity(t)
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::wash_hover()))
+        .child(icon(IconName::Copy, theme::SMALL + 1.0, theme::faint()))
+        .on_click(move |_, _, cx: &mut gpui_kit::App| {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text.clone()));
+        })
 }
 
 /// The answer: the model's own words, as the markdown it actually is.
@@ -1750,69 +1821,158 @@ pub fn said(text: &str) -> Div {
 /// So it is blocks, and a block is a paragraph as markdown defines one: the text
 /// keeps its words and its own spaces, and only a fence, a list, a heading or a
 /// quote gets a box of its own. `md` does the parsing; this does the drawing.
-pub fn answer(text: &str) -> Div {
-    let mut col = v_flex().w_full().gap(px(theme::SPACE_SM));
-    for block in md::parse(text) {
-        col = col.child(block_el(&block));
+///
+/// `relative min-w-0 px-1 py-0.5` (`TimelineAssistantRows.tsx:32`): the lane's full
+/// width, 4 at the sides and 2 above and below, and **no fill, no radius, no bubble**.
+/// Only the person gets a bubble; the model is text on the page.
+pub fn answer(text: &str, notes: &Notes) -> Div {
+    let blocks = md::parse(text);
+    let doc = doc_id(text);
+    let mut col = v_flex().w_full().px(px(theme::SPACE_XS)).py(px(2.0));
+    for (i, block) in blocks.iter().enumerate() {
+        // The rhythm is the **gap between two blocks**, and it is one `pt` never a
+        // `pb`: two 10s around a block would be 20 where CSS's collapsed margins
+        // give 10. See [`block_gap`].
+        col = col.child(
+            div()
+                .w_full()
+                .pt(px(block_gap(&blocks, i)))
+                .child(block_el(block, doc, i, notes)),
+        );
     }
     col
 }
 
+/// A stable name for a document, so the scroll offset of one code block is not
+/// shared with another answer's.
+fn doc_id(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
+}
+
+/// The air above one block: the document's own rhythm.
+///
+/// Their rule is `margin: 0.65rem 0` on `p, ul, ol, blockquote, pre` with the first
+/// child's top and the last child's bottom suppressed (`index.css:1865`-`:1882`), and
+/// it is `BLOCK_GAP` 10 rather than the 8 the column used to gap by. The **items of
+/// one list are one block**, and `li + li { margin-top: 0.25rem }` (`:2010`) is why
+/// two items are `SPACE_XS` apart where two paragraphs are `BLOCK_GAP`.
+fn block_gap(blocks: &[md::Block], i: usize) -> f32 {
+    if i == 0 {
+        return 0.0;
+    }
+    let item = |b: &md::Block| matches!(b, md::Block::Item { .. });
+    if item(&blocks[i]) && item(&blocks[i - 1]) {
+        theme::SPACE_XS
+    } else {
+        theme::BLOCK_GAP
+    }
+}
+
 /// One block of a document.
-fn block_el(block: &md::Block) -> AnyElement {
+///
+/// `doc` and `i` are only for a fence's scroll state, which is keyed by where the
+/// block is: the window remembers how far into a long code line the reader got, and
+/// two blocks must not answer to the same key.
+fn block_el(block: &md::Block, doc: u64, i: usize, notes: &Notes) -> AnyElement {
+    let sans = font(theme::SANS);
     match block {
-        md::Block::Para(spans) => v_flex().w_full().child(runs(spans, theme::BODY, theme::text())).into_any_element(),
+        md::Block::Para(spans) => v_flex()
+            .w_full()
+            .child(runs(spans, theme::BODY, theme::ANSWER_LINE, theme::text(), &sans, md::Align::Start))
+            .into_any_element(),
         md::Block::Head { level, spans } => {
-            // A heading is a size, not just a weight: three levels of heading that
-            // all drew at 14px bold were three levels you could not tell apart.
-            let size = match level {
-                1 => 18.0,
-                2 => 16.0,
-                _ => 14.5,
+            // `h1` is `H1`, a heading above `BODY`; `h2`..`h6` draw at `BODY` weight 600,
+            // because a three-step heading ladder in a 736px column is three sizes doing
+            // one job (`09-type-and-spacing.md`). The leading is the spec's own row:
+            // `ANSWER_LINE` 22 under the 20px title and `LINE` 20 below it.
+            // ponytail: `h2`..`h6` share the one rung - a per-level ladder needs its own
+            // constants, which step 09 owns.
+            let (size, line) = if *level == 1 {
+                (theme::H1, theme::ANSWER_LINE)
+            } else {
+                (theme::BODY, theme::LINE)
             };
             v_flex()
                 .w_full()
-                .pt(px(if *level == 1 { theme::SPACE_XS } else { 0.0 }))
-                .child(runs(spans, size, theme::text()))
+                .child(runs(spans, size, line, theme::text(), &sans.clone().bold(), md::Align::Start))
                 .into_any_element()
         }
-        md::Block::Item { depth, mark, spans } => {
-            let indent = (*depth as f32) * 18.0;
+        md::Block::Item { mark, spans, .. } => {
+            // A **hanging gutter**: the mark wears the first `SPACE_LG` of the row
+            // and the item's text starts on that edge, so a wrapped line hangs under
+            // the text and not under the bullet. **Nesting changes the mark and not
+            // the indent** (`index.css:1922`-`:1944`), which is why `depth` is not
+            // read here: `md` has already chosen the mark its level wears.
             h_flex()
                 .w_full()
                 .items_start()
-                .pl(px(indent))
-                .gap(px(theme::SPACE_SM))
                 .child(
                     div()
                         .flex_shrink_0()
+                        .w(px(theme::SPACE_LG))
+                        .pr(px(theme::SPACE_XS))
+                        .text_align(TextAlign::Right)
                         .text_size(px(theme::BODY))
                         .line_height(px(theme::ANSWER_LINE))
                         .text_color(theme::faint())
                         .child(mark.clone()),
                 )
-                .child(div().flex_1().min_w(px(0.)).child(runs(spans, theme::BODY, theme::text())))
+                .child(div().flex_1().min_w(px(0.)).child(runs(
+                    spans,
+                    theme::BODY,
+                    theme::ANSWER_LINE,
+                    theme::text(),
+                    &sans,
+                    md::Align::Start,
+                )))
                 .into_any_element()
         }
-        md::Block::Code { lang, text } => code_box(lang.as_deref(), text),
+        md::Block::Code { lang, text } => {
+            code_box(lang.as_deref(), text, format!("code:{doc:x}:{i}"), doc, i, notes)
+        }
         md::Block::Quote(spans) => h_flex()
             .w_full()
             .items_start()
             .gap(px(theme::SPACE_MD))
             .child(div().flex_shrink_0().w(px(2.0)).self_stretch().rounded_full().bg(theme::line_strong()))
-            .child(div().flex_1().min_w(px(0.)).child(runs(spans, theme::BODY, theme::muted())))
+            .child(div().flex_1().min_w(px(0.)).child(runs(
+                spans,
+                theme::BODY,
+                theme::ANSWER_LINE,
+                theme::muted(),
+                &sans,
+                md::Align::Start,
+            )))
             .into_any_element(),
         md::Block::Rule => div()
             .w_full()
-            .py(px(theme::SPACE_SM))
             .child(div().w_full().h(px(1.0)).bg(theme::line()))
             .into_any_element(),
+        md::Block::Table { head, rows, aligns } => table_box(head, rows, aligns),
+        md::Block::Footnotes(notes) => footnotes(notes),
+        md::Block::Details { summary, body } => details(summary, body, doc, i, notes),
     }
 }
 
-/// A fenced block: mono, on the plate, with the language on its own line as a
-/// label rather than inside the code.
-fn code_box(lang: Option<&str>, text: &str) -> AnyElement {
+/// A mono line at `SMALL`: their `leading-snug` (1.375) at 11px, which is 15.
+fn code_line() -> f32 {
+    theme::SMALL + theme::SPACE_XS
+}
+
+/// A fenced block: the fence's language over its code, in one box on the plate.
+///
+/// **Nested boxes**, not a band of text: the shell is `chat-markdown-codeblock
+/// overflow-hidden rounded-lg border border-border/70 bg-secondary`
+/// (`MarkdownCodeBlock.tsx:66`-`:71`) and the block inside it is a scroll region
+/// whose own frame is neutralised while its padding is not (`index.css:2163`-
+/// `:2168`). The header is the fence's language, a **copy mark**, and the **wrap
+/// toggle** (`MarkdownCodeBlock.tsx:154`-`:241`) - the two verbs the source puts there,
+/// and both of them are the window's, not a control this transcript invents.
+fn code_box(lang: Option<&str>, text: &str, name: String, doc: u64, i: usize, notes: &Notes) -> AnyElement {
+    let wrapped = (notes.wrapped)(doc, i);
     v_flex()
         .w_full()
         // A block keeps its height: this column is inside a scroller, and gpui
@@ -1824,27 +1984,314 @@ fn code_box(lang: Option<&str>, text: &str) -> AnyElement {
         .border_color(theme::line())
         .bg(theme::plate())
         .overflow_hidden()
-        .children(lang.filter(|l| !l.trim().is_empty()).map(|l| {
-            div()
-                .w_full()
-                .px(px(theme::SPACE_MD))
-                .pt(px(theme::SPACE_SM))
-                .text_size(px(theme::MICRO))
-                .text_color(theme::ghost())
-                .child(l.trim().to_string())
-        }))
+        // The header exists **with or without a language** (`:74`-`:116` draws a file
+        // mark, the label and the verbs even for a bare fence), so the two marks have a
+        // row to sit in. Both are per-block state (`Notes`), for the reason `<details>`
+        // has it: a block is rebuilt from the answer's text every frame.
         .child(
+            h_flex()
+                .w_full()
+                .flex_shrink_0()
+                .items_center()
+                .gap(px(theme::SPACE_SM))
+                // Their header is `pt-1.5 pr-1.5 pb-0 pl-3` (`:74`-`:77`): room above
+                // the label and none below it, because the code's own padding is the
+                // space under it.
+                .px(px(theme::SPACE_SM))
+                .pt(px(theme::SPACE_XS))
+                .font(font(theme::MONO))
+                .text_size(px(theme::SMALL))
+                .line_height(px(code_line()))
+                .text_color(theme::text_soft())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .truncate()
+                        .child(lang.unwrap_or("text").trim().to_string()),
+                )
+                .child(code_copy(text, &name))
+                .child((notes.wrap_press)(
+                    doc,
+                    i,
+                    icon(IconName::TextWrap, theme::SMALL + 1.0, if wrapped { theme::text() } else { theme::faint() })
+                        .into_any_element(),
+                )),
+        )
+        .child(if wrapped {
+            // Wrapped: no scroll region at all. Their rule is `[data-wrap="true"] pre
+            // { white-space: pre-wrap; overflow-wrap: anywhere }` (`index.css:2170`-
+            // `:2173`), so the one thing that changes is the wrap.
             div()
                 .w_full()
+                .flex_shrink_0()
                 .px(px(theme::SPACE_MD))
                 .py(px(theme::SPACE_SM))
                 .font(font(theme::MONO))
                 .text_size(px(theme::SMALL))
-                .line_height(px(17.0))
+                .line_height(px(code_line()))
                 .text_color(theme::text())
-                .child(text.to_string()),
+                .child(text.to_string())
+                .into_any_element()
+        } else {
+            // The fence's own scroll region. `overflow_x_scroll` asks gpui for the
+            // region and keeps its offset in the element's keyed state, which is why it
+            // needs an `id` (`rust/AGENTS.md`, "Traps"). `SCROLLBAR` 6 is the one width
+            // the spec asks for, shared with the page's own bar.
+            //
+            // The tone is the component theme's (`main.rs::dress`), set once for the
+            // code region and the page alike: `line` at 78%.
+            div()
+                .id(ElementId::Name(name.clone().into()))
+                .w_full()
+                .flex_shrink_0()
+                .overflow_x_scroll()
+                .scrollbar_width(px(theme::SCROLLBAR))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        // A code line is one line: it keeps its indentation (a code
+                        // line's own spaces survive `md`'s parse) and it is the region
+                        // that moves, not the wrap.
+                        .whitespace_nowrap()
+                        .px(px(theme::SPACE_MD))
+                        .py(px(theme::SPACE_SM))
+                        .font(font(theme::MONO))
+                        .text_size(px(theme::SMALL))
+                        .line_height(px(code_line()))
+                        .text_color(theme::text())
+                        .child(text.to_string()),
+                )
+                .into_any_element()
+        })
+        .into_any_element()
+}
+
+/// A table: the head row over its body, with **horizontal rules only**.
+///
+/// Their table is `width: 100%; border-collapse: collapse`, cells at `padding:
+/// 0.45rem 0.75rem`, and a `border-bottom: 1px solid color-mix(border 60%)` on the
+/// head and every body row, with **no head fill** (`index.css:2201`-`:2236`). The
+/// target's numbers are in `12`'s table: `BODY` 13, `SPACE_XS` down and `SPACE_SM`
+/// across, `line` at 60%; the cell cap of 24rem is dropped rather than becoming a
+/// fourth number the palette is not allowed.
+///
+/// ponytail: a column's width is its longest cell in **characters**, clamped, because
+/// gpui has no intrinsic-width flex; see the note in the body. Rows stay aligned, which
+/// is the property a table cannot lose.
+fn table_box(head: &[Vec<md::Span>], rows: &[Vec<Vec<md::Span>>], aligns: &[md::Align]) -> AnyElement {
+    let rule = theme::line().opacity(0.6);
+    // **How wide each column is.** A browser lays a table out to its content; gpui has
+    // no intrinsic-width flex and no table layout, and measuring text needs the window's
+    // text system, which this builder has no handle to. So a column's share is the
+    // longest cell in it, in characters - clamped, because one 200-character cell in a
+    // three-column table must not squeeze its neighbours to nothing.
+    // ponytail: a character count is a proxy for a shaped width. Replace it with a
+    // `shape_line` measure if a table ever reads wrong.
+    let cols = head.len();
+    let mut weights = vec![4usize; cols];
+    let mut weigh = |row: &[Vec<md::Span>]| {
+        for (c, cell) in row.iter().enumerate().take(cols) {
+            let chars: usize = cell
+                .iter()
+                .map(|s| match s {
+                    md::Span::Text { text, .. } => text.chars().count(),
+                    md::Span::Break => 0,
+                })
+                .sum();
+            weights[c] = weights[c].max(chars);
+        }
+    };
+    weigh(head);
+    for row in rows {
+        weigh(row);
+    }
+    let weights: Vec<f32> = weights.iter().map(|w| (*w).clamp(4, 16) as f32).collect();
+    let cell = |spans: &Vec<md::Span>, col: usize, bold: bool, top: f32| {
+        let mut f = font(theme::SANS);
+        if bold {
+            f = f.bold();
+        }
+        let align = aligns.get(col).copied().unwrap_or_default();
+        div()
+            .flex_grow(weights.get(col).copied().unwrap_or(4.0))
+            .flex_shrink(1.0)
+            .flex_basis(px(0.0))
+            .min_w(px(0.0))
+            .px(px(theme::SPACE_SM))
+            .py(px(top))
+            .child(runs(spans, theme::BODY, theme::ANSWER_LINE, theme::text(), &f, align))
+    };
+    let mut col = v_flex().w_full().flex_shrink_0();
+    col = col.child(
+        h_flex()
+            .w_full()
+            .items_start()
+            .border_b_1()
+            .border_color(rule)
+            .children(head.iter().enumerate().map(|(c, spans)| cell(spans, c, true, theme::SPACE_SM))),
+    );
+    for row in rows {
+        col = col.child(
+            h_flex()
+                .w_full()
+                .items_start()
+                .border_b_1()
+                .border_color(rule)
+                .children(row.iter().enumerate().map(|(c, spans)| cell(spans, c, false, theme::SPACE_XS))),
+        );
+    }
+    col.into_any_element()
+}
+
+/// The foot of the document: a rule, then the notes, small and quiet.
+///
+/// Theirs is `margin-top: 1.25rem; border-top: 1px; padding-top: 0.75rem; color:
+/// muted; font-size: 0.75rem`, `li + li` at `0.35rem` (`index.css:2090`-`:2104`).
+/// No rung is 1.25rem, so the top margin is `SPACE_LG`; 0.75rem is `SPACE_MD`, and
+/// the notes are `SMALL` in `muted`.
+fn footnotes(notes: &[md::Footnote]) -> AnyElement {
+    let sans = font(theme::SANS);
+    v_flex()
+        .w_full()
+        .flex_shrink_0()
+        .pt(px(theme::SPACE_LG))
+        .child(
+            v_flex()
+                .w_full()
+                .border_t_1()
+                .border_color(theme::line())
+                .pt(px(theme::SPACE_MD))
+                .gap(px(theme::SPACE_XS))
+                .children(notes.iter().map(|note| {
+                    h_flex()
+                        .w_full()
+                        .items_start()
+                        .gap(px(theme::SPACE_XS))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .font(sans.clone().bold())
+                                .text_size(px(theme::SMALL))
+                                .line_height(px(theme::ANSWER_LINE))
+                                .text_color(theme::muted())
+                                .child(note.id.clone()),
+                        )
+                        .child(div().flex_1().min_w(px(0.)).child(runs(
+                            &note.spans,
+                            theme::SMALL,
+                            theme::ANSWER_LINE,
+                            theme::muted(),
+                            &sans,
+                            md::Align::Start,
+                        )))
+                })),
         )
         .into_any_element()
+}
+
+/// A disclosure: a summary row over a body, inside two hairlines.
+///
+/// Theirs is `my-2 border-y border-border/60`, a summary row at `py-2 text-sm
+/// font-medium` with a `size-4` chevron rotating 90 degrees, and a body at `pb-3 ps-6`
+/// (`MarkdownDetails.tsx:37`-`:57`), which in the target's numbers is `SPACE_SM` above
+/// and below the row and `SPACE_XL` down the body's left.
+///
+/// **The row is a control, and the body is behind it.** Open/shut is the window's own
+/// state keyed by `(document, block)`, the same shape the fold's `open_runs` uses: a
+/// block cannot own a boolean, because it is rebuilt from the answer's text every
+/// frame. gpui-pre has no element rotation, so the chevron is swapped (`ChevronRight`
+/// for shut, `ChevronDown` for open) rather than turned; that is the one place this
+/// differs from the source's 90-degree turn.
+fn details(summary: &str, body: &[md::Block], doc: u64, i: usize, notes: &Notes) -> AnyElement {
+    let sans = font(theme::SANS);
+    let open = (notes.open)(doc, i);
+    let head = h_flex()
+        .w_full()
+        .items_center()
+        .gap(px(theme::SPACE_SM))
+        .py(px(theme::SPACE_SM))
+        .child(icon(
+            if open { IconName::ChevronDown } else { IconName::ChevronRight },
+            14.0,
+            theme::faint(),
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .truncate()
+                .font(sans.bold())
+                .text_size(px(theme::BODY))
+                .line_height(px(theme::ANSWER_LINE))
+                .text_color(theme::text())
+                .child(summary.to_string()),
+        )
+        .into_any_element();
+    // Their summary row is the button; here the caller's closure is, because it owns
+    // the id and the listener.
+    let head = (notes.press)(doc, i, head);
+    v_flex()
+        .w_full()
+        .flex_shrink_0()
+        .border_t_1()
+        .border_b_1()
+        .border_color(theme::line().opacity(0.6))
+        .child(head)
+        .children(open.then(|| {
+            v_flex()
+                .w_full()
+                .pb(px(theme::SPACE_MD))
+                .pl(px(theme::SPACE_XL))
+                .children(body.iter().enumerate().map(|(n, b)| {
+                    div()
+                        .w_full()
+                        // The same rhythm the column uses, not a flat gap: the items of
+                        // one list are `SPACE_XS` apart and two blocks are `BLOCK_GAP`.
+                        .pt(px(block_gap(body, n)))
+                        .child(block_el(b, doc, i.wrapping_mul(31).wrapping_add(n), notes))
+                }))
+        }))
+        .into_any_element()
+}
+
+/// The reference mark a `[^1]` leaves in the prose.
+///
+/// Theirs is `min-width: 1rem; border-radius: 0.25rem; font-size: 0.6875rem;
+/// font-weight: 600` (`index.css:2106`-`:2116`) - `SMALL` 11 at 600 in `muted`, with
+/// `SPACE_XS`/2 of air so it does not run into the word before it.
+fn note_mark(id: &str) -> AnyElement {
+    div()
+        .flex_shrink_0()
+        .px(px(2.0))
+        .font(font(theme::SANS).bold())
+        .text_size(px(theme::SMALL))
+        .line_height(px(theme::ANSWER_LINE))
+        .text_color(theme::muted())
+        .child(id.to_string())
+        .into_any_element()
+}
+
+/// The copy mark in a fence's header (`MarkdownCodeBlock.tsx:154`-`:165`).
+///
+/// ponytail: no Copy-to-Check swap for 1200ms - that is a timer per block, and the
+/// mark dimming under the pointer is the acknowledgement until the block has state.
+fn code_copy(text: &str, name: &str) -> Stateful<Div> {
+    let text = text.to_string();
+    div()
+        .id(ElementId::Name(format!("{name}:copy").into()))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(theme::R_CHIP))
+        .px(px(theme::SPACE_XS))
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::wash_hover()))
+        .child(icon(IconName::Copy, theme::SMALL + 1.0, theme::faint()))
+        .on_click(move |_, _, cx: &mut gpui_kit::App| {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text.clone()));
+        })
 }
 
 /// A run of inline spans as one wrapping line.
@@ -1853,57 +2300,124 @@ fn code_box(lang: Option<&str>, text: &str) -> AnyElement {
 /// sentence is spaced by its font and not by a layout number. That distinction is
 /// the whole difference between prose and a word cloud, and it is why this is not
 /// a `StyledText` with runs: a run's background has no padding and no corner, so a
-/// code span drawn as one comes out as a highlighter band hugging the glyphs
-/// rather than as the chip it should be.
-fn runs(spans: &[md::Span], size: f32, tone: Hsla) -> AnyElement {
-    let line = size * 1.55;
+/// code span drawn as one comes out as a highlighter band hugging the glyphs rather
+/// than as the box it should be (`rust/AGENTS.md`, "Traps").
+///
+/// So a code span is drawn as an **inset box per fragment** ([`code_inset`]): a span
+/// that wraps across a line break gives each of its words its own box, and the
+/// spaces *between* those boxes stay in the row as word gaps, which is the space
+/// the old single chip ate.
+fn runs(
+    spans: &[md::Span],
+    size: f32,
+    line: f32,
+    tone: Hsla,
+    base: &Font,
+    // Where the words sit in the row: a table column's own alignment, `Start`
+    // everywhere else.
+    align: md::Align,
+) -> AnyElement {
     let mut items: Vec<AnyElement> = Vec::new();
     for span in spans {
         match span {
             // A break forces the wrap: a full-width item cannot share a line with
             // anything, so putting one in the row ends the line at that point.
             md::Span::Break => items.push(div().flex_shrink_0().w_full().h(px(0.)).into_any_element()),
+            md::Span::Text { text, style } if style.note => {
+                items.push(note_mark(text));
+            }
+            md::Span::Text { text, style } if style.code => {
+                items.extend(code_insets(text, size));
+            }
             md::Span::Text { text, style } => {
                 for token in tokens(text) {
                     if token.trim().is_empty() {
-                        // A run of spaces between two chips is still a word gap.
-                        let spaces = token.chars().count();
-                        items.push(
-                            div().flex_shrink_0().w(px(spaces as f32 * size * 0.26)).into_any_element(),
-                        );
+                        // A run of spaces between two items is a word gap: kept as
+                        // its own item because it is where the row may wrap.
+                        items.push(word_gap(token.chars().count(), size));
                         continue;
                     }
-                    items.push(span_el(&token, *style, size, line, tone));
+                    items.push(span_el(&token, *style, size, line, tone, base));
                 }
             }
         }
     }
-    h_flex()
-        .w_full()
-        .min_w(px(0.))
-        .flex_wrap()
-        .items_baseline()
-        .child(div().h(px(line)))
-        .children(items)
+    let row = h_flex().w_full().min_w(px(0.)).flex_wrap().items_baseline();
+    let row = match align {
+        md::Align::Start => row.justify_start(),
+        md::Align::Center => row.justify_center(),
+        md::Align::End => row.justify_end(),
+    };
+    row.child(div().h(px(line))).children(items).into_any_element()
+}
+
+/// A word gap between two items, as a box the row may wrap at.
+///
+/// A plain word carries its own space inside itself, so the font is what spaces a
+/// sentence; this is only for the spaces that fall *between* two boxes, where there
+/// is no glyph to carry one.
+fn word_gap(spaces: usize, size: f32) -> AnyElement {
+    div().flex_shrink_0().w(px(spaces as f32 * size * 0.26)).into_any_element()
+}
+
+/// A code span as the boxes it wraps into: one inset per word, with the spaces
+/// between them kept as word gaps.
+fn code_insets(text: &str, size: f32) -> Vec<AnyElement> {
+    let mut out: Vec<AnyElement> = Vec::new();
+    let mut word = String::new();
+    for c in text.chars() {
+        if c == ' ' {
+            if !word.is_empty() {
+                out.push(code_inset(&word));
+                word.clear();
+            }
+            out.push(word_gap(1, size));
+        } else {
+            word.push(c);
+        }
+    }
+    if !word.is_empty() {
+        out.push(code_inset(&word));
+    }
+    out
+}
+
+/// One inset of a code span: the box the glyphs sit in.
+///
+/// Their inline code is `border-radius: 0.25rem; background: ... 10%;
+/// padding: 0.1em 0.35em; font-size: 0.85em` (`index.css:2118`-`:2127`): `R_CHIP`,
+/// `wash_selected`, `SPACE_XS` across and 1px down (their `0.1em` at 11px - `SPACE_XS`
+/// is a whole line's worth at this size), at `SMALL` in `MONO`. The box's own line is
+/// its glyphs, so it hugs the text instead of being a 22px band around it.
+fn code_inset(text: &str) -> AnyElement {
+    div()
+        .flex_shrink_0()
+        .rounded(px(theme::R_CHIP))
+        .bg(theme::wash_selected())
+        .px(px(theme::SPACE_XS))
+        .py(px(1.0))
+        .font(font(theme::MONO))
+        .text_size(px(theme::SMALL))
+        .line_height(px(code_line()))
+        .text_color(theme::text())
+        .child(text.to_string())
         .into_any_element()
 }
 
 /// One word, in its own face.
-fn span_el(token: &str, style: md::Style, size: f32, line: f32, tone: Hsla) -> AnyElement {
-    if style.code {
-        return div()
-            .flex_shrink_0()
-            .rounded(px(theme::R_CHIP))
-            .bg(theme::chip())
-            .px(px(4.0))
-            .font(font(theme::MONO))
-            .text_size(px(size - 1.0))
-            .line_height(px(line))
-            .text_color(theme::text())
-            .child(token.trim_end().to_string())
-            .into_any_element();
-    }
-    let mut f = font(theme::SANS);
+///
+/// `base` is the block's own face - sans for a paragraph, bold sans for a heading -
+/// and a span's own flags are laid over it, so `**bold**` inside an `h2` and inside a
+/// paragraph are both bold without either being a second definition of the font.
+fn span_el(
+    token: &str,
+    style: md::Style,
+    size: f32,
+    line: f32,
+    tone: Hsla,
+    base: &Font,
+) -> AnyElement {
+    let mut f = base.clone();
     if style.bold {
         f = f.bold();
     }
@@ -1924,6 +2438,8 @@ fn span_el(token: &str, style: md::Style, size: f32, line: f32, tone: Hsla) -> A
         .line_height(px(line))
         .text_color(ink)
         .whitespace_nowrap()
+        // The word keeps the space that follows it, which is how a sentence is
+        // spaced by its font and not by a layout gap.
         .child(token.to_string());
     match (style.link, style.strike) {
         (true, _) => el.underline(),
@@ -1967,23 +2483,15 @@ pub fn run_block(
     steps: &[Step],
     open: bool,
     index: usize,
-    wrap: &dyn Fn(usize, AnyElement) -> AnyElement,
+    st: &Rows,
 ) -> Div {
     let failed = steps.iter().any(|s| s.failed);
     let mut col = v_flex().w_full().gap(px(theme::SPACE_XS));
 
-    // The head: the run's own line, and it says **how long it worked**, not how
-    // many calls it made. That is t3code's row and the reason is simple: a count
-    // of calls is the agent's own bookkeeping, while a duration is the thing the
-    // person waiting actually felt. The tools it touched are the quiet tail of
-    // the same line, which is what makes the row scannable without being a log.
-    //
-    // The note - what the run was working from - folds in **behind** the head
-    // rather than sitting above it as its own line: a thought and the work it led
-    // to are one thing, and two lines for one turn is the stack the fold exists
-    // to prevent.
+    // The head: the run's own line. Its label is the thought's name and its tail is what
+    // the run did, which is what makes the row scannable without being a log.
     if !steps.is_empty() || note.is_some() {
-        col = col.child(wrap(index, run_summary(note, secs, steps, open, failed)));
+        col = col.child((st.run)(index, run_summary(note, secs, steps, open, failed)));
     }
 
     // The steps, behind the head. Opened by a press, and the whole run opens as
@@ -1995,11 +2503,22 @@ pub fn run_block(
     // appears in one frame is the difference between an app and a web form, and the
     // fold is the one place in this conversation where a box arrives from nothing.
     // Keyed by the run's index so a second run opening does not disturb the first.
-    if open && !steps.is_empty() {
-        let mut inner = v_flex().w_full().gap(px(theme::SPACE_XS));
-        for step in steps {
-            inner = inner.child(step_row(step));
+    // A thought with no calls opens too: its own text is what is behind the name.
+    if open && (!steps.is_empty() || note.is_some()) {
+        let mut inner = v_flex().w_full().gap(px(theme::SPACE_SM));
+        // **The thought, whole, first.** The head names it in one clause; this is the rest
+        // of what it said, as prose rather than as mono text, which is what the source does
+        // for an opened reasoning row (`TimelineWorkEntryRow.tsx:120`-`:145` renders
+        // markdown there). Without it the name is all the thought there is, and the fold
+        // opened onto nothing but its tool calls.
+        if let Some(note) = note {
+            inner = inner.child(answer(note, &st.notes));
         }
+        let mut calls = v_flex().w_full().gap(px(theme::SPACE_XS));
+        for step in steps {
+            calls = calls.child(step_row(step));
+        }
+        inner = inner.child(calls);
         let box_ = run_body(inner);
         col = col.child(motion::arrive(
             motion::BLOCK,
@@ -2029,38 +2548,16 @@ pub fn run_body(body: Div) -> Div {
         .child(body)
 }
 
-/// The reasoning row: their `ReasoningTrigger`, which is `flex w-full items-center
-/// gap-2 text-muted-foreground` with a brain, the label, and a chevron.
+/// The run's head line: **what it did**, then how long it worked.
 ///
-/// The label is the point. "Thinking..." while it is being written and "Thought
-/// for 4 seconds" once it is done is one row either way, so a thought never
-/// appears and disappears - it changes its name.
-pub fn reasoning_row(note: &str) -> Div {
-    h_flex()
-        .w_full()
-        .h(px(28.0))
-        .items_center()
-        .gap(px(theme::SPACE_SM))
-        .px(px(theme::SPACE_XS))
-        .child(icon(IconName::Brain, 13.0, theme::faint()))
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .truncate()
-                .text_size(px(12.0))
-                .text_color(theme::faint())
-                .child(note.to_string()),
-        )
-}
-
-/// The run's head line: **how long it worked**, then what it touched.
-///
-/// The label is t3code's (`Worked for 2m 13s`) and the tail is ours: the tools,
-/// once each, in the order the run first used them. Theirs is a bare duration with
-/// a chevron; a person scanning a long session wants to know *what* a folded run
-/// was about, and one word per tool is the cheapest way to say it without
-/// unfolding anything.
+/// Theirs is `min-h-6` with a `size-4` icon, `row.summary` as a `block truncate` label
+/// and a timestamp strip beside it at `h-6 text-sm ... tabular-nums
+/// text-muted-foreground` (`TimelineWorkGroupRows.tsx:374`, `:591`, `:621`, `:295`).
+/// **The summary string's wording is `not specified`** in the files that were read -
+/// it is built by the timeline projection - so the label stays this tree's own
+/// `5 calls \u{b7} read, edit`, which names the count and the kinds (`11`, disagreement 1).
+/// The duration takes the timestamp's place: it is the second fact about the same
+/// thing, and a person scanning a long session wants both.
 ///
 /// A run the worker could not stamp says `Worked` - not `Worked for 0s`, because
 /// an absence is not a zero.
@@ -2071,8 +2568,7 @@ pub fn run_summary(
     open: bool,
     failed: bool,
 ) -> AnyElement {
-    let label = summary(secs);
-    let tone = if failed { theme::danger() } else { theme::muted() };
+    let (label, touched) = summary(secs, steps, note);
     let mut row = h_flex()
         .w_full()
         .h(px(theme::RUN_LINE))
@@ -2091,43 +2587,31 @@ pub fn run_summary(
             } else {
                 IconName::SquareTerminal
             },
-            13.0,
+            // `size-4`: 16, which is `NAME_LINE`.
+            theme::NAME_LINE,
             if failed { theme::danger() } else { theme::faint() },
         ))
         .child(
-            div()
-                .flex_shrink_0()
-                .text_size(px(theme::SMALL))
-                .text_color(if failed { theme::danger() } else { theme::muted() })
-                .child(label),
-        );
-    // The note, when there is one: what the run was working from, on the same line
-    // as how long it took, because they are two facts about one thing. It is
-    // **clamped**, because a thought can be a paragraph and this is a summary line:
-    // a wall of reasoning wedged between the duration and the tools turned the head
-    // into a paragraph with a chevron after it, which no longer reads as a fold.
-    // The whole note is what opening the fold is for.
-    if let Some(note) = note {
-        row = row.child(
+            // The name is the label, and it owns the width: a name is up to 54 bytes and
+            // the tail beside it is short, so the label truncates and the tail keeps its
+            // place. A label that could not shrink was clipped by the row's edge instead
+            // of ellipsised, which reads as a rendering bug.
             div()
                 .flex_1()
-                .min_w(px(0.))
+                .min_w(px(0.0))
                 .truncate()
-                .text_size(px(theme::SMALL))
-                .text_color(theme::ghost())
-                .child(state::clip(note, 120)),
+                .text_size(px(theme::BODY))
+                .line_height(px(theme::ANSWER_LINE))
+                .text_color(if failed { theme::danger() } else { theme::text_soft() })
+                .child(label),
         );
-    } else {
-        row = row.child(div().flex_1().min_w(px(0.)));
-    }
-    // What it touched, quiet, before the chevron: the same words the old head
-    // used, in the place a tail goes.
-    let touched = tools(steps);
+    // What the row did, quiet, before the chevron: the count and the kinds of its calls
+    // and the time they took, which is the second fact about the same thing.
     if !touched.is_empty() {
         row = row.child(
             div()
                 .flex_shrink_0()
-                .text_size(px(theme::MICRO))
+                .text_size(px(theme::SMALL))
                 .text_color(theme::ghost())
                 .child(touched),
         );
@@ -2140,13 +2624,43 @@ pub fn run_summary(
     .into_any_element()
 }
 
-/// What a run's line says about the time it took.
-fn summary(secs: Option<f64>) -> String {
-    // No stamp to measure with: the run still happened, so the word stays and the
-    // number is left out rather than invented.
-    match secs {
-        Some(s) => format!("Worked for {}", state::duration(s)),
-        None => "Worked".to_string(),
+/// What a run's line says: **what it was doing**, then what it did.
+///
+/// The head is the thought's own name (`thought_name`) - the rule the terminal frontend
+/// names one with, and the reason a fold reads as a row and not as a paragraph. t3code
+/// has no wording to copy here: its `row.summary` is built by its timeline projection and
+/// is `not specified` in the files that were read.
+///
+/// The tail is what the row did: the count and the kinds of its calls and the time they
+/// took, in the place their timestamp strip sits. A run with no calls is a thought, and
+/// its name is the whole of what it has to say, so the tail is only the time. A run the
+/// worker could not stamp has no time - an absence is not a zero.
+fn summary(secs: Option<f64>, steps: &[Step], note: Option<&str>) -> (String, String) {
+    let time = match secs {
+        Some(s) => state::duration(s),
+        None => String::new(),
+    };
+    let calls = if steps.is_empty() {
+        String::new()
+    } else {
+        let n = steps.len();
+        format!("{n} {} \u{b7} {}", if n == 1 { "call" } else { "calls" }, tools(steps))
+    };
+    let join = |a: String, b: String| match (a.is_empty(), b.is_empty()) {
+        (true, _) => b,
+        (_, true) => a,
+        _ => format!("{a}  \u{b7}  {b}"),
+    };
+    match note.map(cuacode::transcript::thought_name) {
+        // A thought names the row; what it did and how long it took are the tail.
+        Some(name) if !name.trim().is_empty() => (name, join(calls, time)),
+        // No thought: the calls are the row's whole subject.
+        _ if !calls.is_empty() => {
+            let tail = time;
+            (calls, tail)
+        }
+        _ if time.is_empty() => ("Worked".to_string(), String::new()),
+        _ => (format!("Worked for {time}"), String::new()),
     }
 }
 
@@ -2225,83 +2739,18 @@ pub fn call_target(text: &str) -> Option<&str> {
     (!target.trim().is_empty()).then_some(target)
 }
 
-/// Prose, laid out a word at a time in wrapping rows, so a code span can be a
-/// chip with padding and a corner.
-pub fn prose(text: &str) -> Vec<AnyElement> {
-    let mut out: Vec<AnyElement> = Vec::new();
-    let mut row: Vec<AnyElement> = Vec::new();
-    let mut code = false;
-    for word in text.split(' ') {
-        let opens = word.starts_with('`');
-        let closes = word.ends_with('`') && word.len() > 1;
-        if opens && !code && !row.is_empty() {
-            out.push(flush(&mut row));
-        }
-        if opens && code {
-            code = false;
-            row.push(code_span(word.trim_matches('`')));
-        } else if opens {
-            let bare = word.trim_matches('`');
-            if !closes {
-                code = true;
-            }
-            row.push(code_span(bare));
-        } else if code {
-            if closes {
-                code = false;
-                row.push(code_span(word.trim_matches('`')));
-            } else {
-                row.push(code_span(word));
-            }
-        } else {
-            row.push(word_span(word));
-        }
-    }
-    if !row.is_empty() {
-        out.push(flush(&mut row));
-    }
-    out
-}
-
-/// The words so far, as one wrapping line.
-fn flush(row: &mut Vec<AnyElement>) -> AnyElement {
-    h_flex()
-        .flex_wrap()
-        .w_full()
-        .items_center()
-        .gap(px(4.0))
-        .children(std::mem::take(row))
-        .into_any_element()
-}
-
-/// One word of prose.
-fn word_span(word: &str) -> AnyElement {
-    div()
-        .text_size(px(theme::BODY))
-        .line_height(px(21.0))
-        .text_color(theme::text())
-        .child(word.to_string())
-        .into_any_element()
-}
-
-/// A code span: the chip the markdown deserves.
-fn code_span(text: &str) -> AnyElement {
-    div()
-        .flex_shrink_0()
-        .rounded(px(theme::R_CHIP))
-        .bg(theme::chip())
-        .px(px(5.0))
-        .py(px(1.0))
-        .font(font(theme::MONO))
-        .text_size(px(theme::SMALL))
-        .line_height(px(18.0))
-        .text_color(theme::text())
-        .child(text.to_string())
-        .into_any_element()
-}
-
 /// The window with sessions on disk and none of them picked.
-pub fn nothing_selected() -> Div {
+///
+/// Their `NoActiveThreadState` body is `max-w-lg px-8 py-12` with a `text-xl
+/// font-semibold` title and a `text-sm text-muted-foreground` description
+/// (`NoActiveThreadState.tsx:22`-`:27`, `ui/empty.tsx:92`, `:100`), which here is
+/// `H1` 20 and `BODY` 13. The one place this differs from the source is the **way out**:
+/// their file imports no button, so their empty screen names the problem and offers
+/// nothing to do about it (`13-furniture.md`, "The empty state has no way out"). This one
+/// gets the action the window already has.
+pub fn nothing_selected(
+    on_new: impl Fn(&ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
+) -> Div {
     v_flex().size_full().items_center().justify_center().child(
         v_flex()
             .items_center()
@@ -2309,10 +2758,22 @@ pub fn nothing_selected() -> Div {
             .child(icon(IconName::MousePointerClick, 20.0, theme::ghost()))
             .child(
                 div()
+                    .text_size(px(theme::H1))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::text())
+                    .child("Pick a session to continue"),
+            )
+            .child(
+                div()
                     .text_size(px(theme::BODY))
                     .text_color(theme::muted())
-                    .child("Pick a session from the rail"),
-            ),
+                    .child("Select an existing session or create a new one to get started."),
+            )
+            .child(motion::mark_on_hover(
+                accent_button("New conversation", motion::hover_t("empty:new")),
+                "empty:new",
+                on_new,
+            )),
     )
 }
 
@@ -2334,8 +2795,14 @@ pub fn split(side: &str, dragging: bool) -> Div {
     let line = if dragging { theme::accent() } else { theme::line() };
     let rule = div().h_full().w(px(1.0)).bg(line);
     let rule = if side == "left" { rule.ml(px(2.5)) } else { rule.mr(px(2.5)) };
-    h_flex().h_full().w(px(6.0)).flex_shrink_0().cursor_col_resize().child(rule)
+    h_flex().h_full().w(px(SPLIT_W)).flex_shrink_0().cursor_col_resize().child(rule)
 }
+
+/// How wide a sidebar's grab strip is. Not a design token: it is the width of a
+/// control that has to be wider than the 1px line it draws, and the strip belongs to
+/// the column it sits beside - which is why the topbar's rail band is `RAIL` plus
+/// this, or the band stops 6px short of the rail under it.
+pub const SPLIT_W: f32 = 6.0;
 
 /// The divider while a drag is live: the strip, painted at the pointer's own x on
 /// top of the layout, in the accent.
@@ -2451,7 +2918,7 @@ pub fn menu_item(row: &MenuRow, t: f32, keyboard: bool) -> Div {
                 .flex_1()
                 .min_w(px(0.))
                 .truncate()
-                .text_size(px(14.0))
+                .text_size(px(theme::BODY))
                 .text_color(value_tone)
                 .child(row.value.clone()),
         )
@@ -2514,14 +2981,14 @@ pub fn menu_foot(sentence: &str) -> Div {
 /// pb-2.5` - and it is one surface rather than a boxed field with a row of boxed
 /// chips beneath it, which is what reads as a form and not as a composer.
 ///
-/// The focus ring is the card's, not the field's: `focus-within:ring-ring/40`
-/// there, the same idea here, so the whole card lights up when you are typing in
-/// it.
+/// One edge, and the rim: nothing on the card changes when the field has focus,
+/// because the source paints no focus state on it (`04-composer-card.md`, states).
+/// The caret is where focus shows.
 pub fn composer(
     field: AnyElement,
     chips: Vec<AnyElement>,
     send: AnyElement,
-    focused: bool,
+    _focused: bool,
     status: Option<AnyElement>,
     prompt: bool,
 ) -> Div {
@@ -2529,7 +2996,8 @@ pub fn composer(
         .w_full()
         .flex_shrink_0()
         .items_center()
-        .px(px(theme::SPACE_LG))
+        // No gutter: the card's edges are the conversation lane's edges, so the
+        // card is `MEASURE` wide like the rows above it.
         .pb(px(theme::SPACE_LG))
         .pt(px(theme::SPACE_SM))
         .child(
@@ -2537,24 +3005,22 @@ pub fn composer(
                 .w_full()
                 .max_w(px(theme::MEASURE))
                 .rounded(px(theme::R_COMPOSER))
-                // One edge, and it says something: the accent while this is a rename
-                // prompt, the stronger outline while you are typing. At rest the border is
-                // the transparent one and the **rim** is the whole edge.
+                // One edge, always there: `line_strong` at rest and while typing, the
+                // accent only while this is a rename prompt. `line` is too faint on
+                // `composer()`.
                 .border_1()
                 .border_color(if prompt {
                     theme::accent()
-                } else if focused {
-                    theme::line_strong()
                 } else {
-                    theme::ink(0.0)
+                    theme::line_strong()
                 })
                 // **Opaque.** See `theme::composer`: there is no per-element backdrop
                 // blur in gpui-pre, so a translucent sheet here could only ever show a
-                // sharp page through itself. Solid, one rung above the page, with the rim
-                // and the float saying it is raised.
+                // sharp page through itself. Solid, one rung above the page, and the rim
+                // plus the hairline are the whole lift: the source's dark card is
+                // `shadow-none`, so there is no `float()` here. It stays for menus.
                 .bg(theme::composer())
                 .shadow(theme::lift())
-                .shadow(theme::float())
                 .overflow_hidden()
                 // The run's own line, when there is one: above the field, because it is
                 // about what happens when you press the control below it.
@@ -2581,10 +3047,13 @@ pub fn composer(
                         .pt(px(theme::COMPOSER_PAD_TOP))
                         .pb(px(theme::COMPOSER_PAD_BOTTOM))
                         .child(
+                            // The **two-line floor**, derived: two field lines plus the 8px
+                            // the source adds to them (`min-h-[calc(2lh+--spacing(2))]`).
+                            // An empty composer is two lines tall, so it does not grow under
+                            // the pointer on the first keystroke.
                             h_flex()
                                 .w_full()
-                                .min_h(px(theme::COMPOSER_LINE))
-                                .items_center()
+                                .min_h(px(2.0 * theme::COMPOSER_LINE + theme::SPACE_SM))
                                 .child(field),
                         ),
                 )
@@ -2597,12 +3066,19 @@ pub fn composer(
                         .w_full()
                         .min_w(px(0.))
                         .items_center()
-                        .gap(px(theme::SPACE_XS))
-                        .px(px(theme::COMPOSER_PAD_X))
-                        .pb(px(theme::SPACE_MD))
+                        // **2px apart, right-aligned** (`06-triggers-and-popovers.md`):
+                        // a chip is a label and a chevron with nothing between them but
+                        // this gap, so the row reads as one line of words and not as a
+                        // strip of buttons. The spacer is *before* the chips, which is
+                        // what puts them against the send control.
+                        .gap(px(2.0))
+                        // 8, not 16: the body's own 16px already holds the chips off
+                        // the edge, and the source's row is `px-2 pb-2`.
+                        .px(px(theme::SPACE_SM))
+                        .pb(px(theme::SPACE_SM))
                         .flex_wrap()
-                        .children(chips)
                         .child(div().flex_1().min_w(px(0.)))
+                        .children(chips)
                         .child(send),
                 ),
         )
@@ -2618,8 +3094,9 @@ pub fn composer(
 /// - **One mark per turn**, spaced evenly, in a rail shorter than the column. The
 ///   strip is a table of contents, not a scale drawing of the scroll height, so a
 ///   long session does not turn every mark into a hairline.
-/// - **The turn the reader is in runs hot** and widens; the rest are quiet. That
-///   is `resolveTimelineMinimapCurrentIndex`: the first mark whose row is in view.
+/// - **The turn the reader is in runs hot**; the rest are quiet, and the strips nearer to
+///   it are **shorter** rather than brighter. That is
+///   `resolveTimelineMinimapCurrentIndex`: the first mark whose row is in view.
 /// - **A press jumps to that turn's row**, not to a computed offset: the row is
 ///   what "that message" means, and one row's height is not knowable from here.
 ///
@@ -2628,11 +3105,13 @@ pub fn composer(
 pub fn minimap(
     marks: &[state::Anchor],
     active: Option<usize>,
+    // **The hit box, measured at run time** - see [`map_hit_w`].
+    hit_w: f32,
     // `FnMut`, not `Fn`: the call site's closure needs `&mut` to reach the window
     // context, and the loop calls it once per mark, so nothing here needs it twice.
     //
     // It is handed the **target box**, not the strip's face: the face is 2px and the box
-    // is `MAP_HIT_W` by `MAP_SPACING`, and the box is what a pointer has to land on.
+    // is `hit_w` by `MAP_SPACING`, and the box is what a pointer has to land on.
     pip: &mut dyn FnMut(usize, Div) -> Stateful<Div>,
 ) -> Div {
     // One strip per turn, **evenly spaced**, packed close, in order. This is the placement
@@ -2644,39 +3123,78 @@ pub fn minimap(
     //
     // - **No tooltip.** One was here, and hovering produced "a shitty
     //   notification". A 2px strip is not a thing you hover for information.
-    // - **Every strip's target is the whole gutter**, not the strip: `MAP_HIT_W` by
+    // - **Every strip's target is the whole gutter**, not the strip: `hit_w` by
     //   `MAP_SPACING`, tiling with no gaps, so clicking is not a test of aim.
-    // - **Same size, grey, and near-white when active.** No width variation, and no
-    //   orange: orange is this palette's "you can act on this" and a scroll position is
-    //   not a control.
+    // - **Grey, and the foreground's tone when in view.** No orange: orange is this
+    //   palette's "you can act on this" and a scroll position is not a control.
     let mut col = v_flex().items_end();
     for (i, _mark) in marks.iter().enumerate() {
-        let is_active = active == Some(i);
-        let near = motion::hover_t(&format!("pip:{i}")) > 0.35;
-        let hue = if is_active {
-            // ember's own `foreground`: the warm off-white, never pure white.
+        let distance = active.map(|a| a.abs_diff(i));
+        // **Nearer strips differ by length, not by colour** (`TimelineMinimap.tsx:225`-`:228`
+        // scale them 0.667 at distance 1, 0.417 at 2 and 0.333 beyond). Brightness in this
+        // palette is already spent on "the turn you are in", so dimming the neighbours
+        // too would leave no mark hot; a shorter neighbour reads as "close" and keeps the
+        // one you are in the only bright thing on the rail.
+        let w = map_strip_w(distance);
+        let hue = if distance == Some(0) {
             theme::text_soft()
-        } else if near {
+        } else if motion::hover_t(&format!("pip:{i}")) > 0.35 {
             theme::map_near()
         } else {
             theme::map_rest()
         };
         let face = div()
             .h(px(theme::MAP_STRIP_H))
-            .w(px(theme::MAP_STRIP_W))
+            .w(px(w))
             .rounded_full()
             .bg(hue);
         col = col.child(pip(
             i,
             v_flex()
                 .h(px(theme::MAP_SPACING))
-                .w(px(theme::MAP_HIT_W))
+                .w(px(hit_w))
                 .items_end()
                 .justify_center()
                 .child(face),
         ));
     }
-    col
+    // The rail behind them: their `left-3 h-full w-px bg-border/15`
+    // (`TimelineMinimap.tsx:207`) - `line` at 15%, **12px in from the box's edge**
+    // (`SPACE_MD`), so it shows in the gap between two marks and nowhere else. Clamped
+    // to the measured hit box, because a narrow gutter is narrower than 12.
+    let rail = div()
+        .absolute()
+        .top(px(0.0))
+        .bottom(px(0.0))
+        .left(px(theme::SPACE_MD.min((hit_w - 1.0).max(0.0))))
+        .w(px(1.0))
+        .bg(theme::line().opacity(0.15));
+    div().relative().w(px(hit_w)).child(rail).child(col)
+}
+
+/// How wide a strip's **target** is, from the measured gutter.
+///
+/// `min(MAP_HIT_W, gutter - SPACE_MD)`, floored at zero
+/// (`MessagesTimeline.logic.ts:449`-`:455`): `MAP_HIT_W` 40 is the cap, not the width, so a
+/// gutter just wide enough gets a box just wide enough rather than one that runs into the
+/// text. 352 while a preview card is open is the source's other bound and has no preview
+/// here to apply it to.
+pub fn map_hit_w(gutter: f32) -> f32 {
+    (gutter - theme::SPACE_MD).clamp(0.0, theme::MAP_HIT_W)
+}
+
+/// A strip's own width, by how far its turn is from the one in view.
+///
+/// `scale-x-[0.667]` at distance 1, `[0.417]` at 2 and `[0.333]` beyond
+/// (`TimelineMinimap.tsx:225`-`:228`). `None` is "the reader is nowhere in this session",
+/// and every mark is full length there because none of them is the one you are in.
+fn map_strip_w(distance: Option<usize>) -> f32 {
+    match distance {
+        None | Some(0) => theme::MAP_STRIP_W,
+        Some(1) => theme::MAP_STRIP_W * 0.667,
+        Some(2) => theme::MAP_STRIP_W * 0.417,
+        Some(_) => theme::MAP_STRIP_W * 0.333,
+    }
 }
 
 /// The one control a scrolled-away reader needs: get me back to the end.
@@ -2743,15 +3261,19 @@ pub fn chip(mark: Option<IconName>, value: &str, t: f32, locked: bool) -> Div {
         // chip clipped to `...` names nothing, and one crushed to its mark alone reads as
         // an icon with no label. The row gives way, not the chip.
         .flex_shrink_0()
-        .h(px(26.0))
+        // `CONTROL_SM` 28: a chip is a control (`06-triggers-and-popovers.md`).
+        .h(px(theme::CONTROL_SM))
         .items_center()
         // 5px between a mark and its word; the strip's own gap is what separates
         // cells.
         .gap(px(5.0))
-        .rounded(px(theme::R_SM))
+        // `R_MD` 8, not `R_CHIP` 4: `06` is explicit that the ladder's 4 is too
+        // tight for a control this tall.
+        .rounded(px(theme::R_MD))
         .bg(motion::mix(theme::ink(0.0), theme::wash_hover(), if locked { 0.0 } else { t }))
         .px(px(theme::SPACE_SM))
-        .text_size(px(12.0))
+        // `text-sm` in the source; `BODY` 13 is this window's one body size.
+        .text_size(px(theme::BODY))
         .font_weight(FontWeight::MEDIUM)
         .text_color(tone)
         // Every mark is 13px and in the chip's own tone: a set of icons at three
@@ -2792,13 +3314,15 @@ pub fn chip_brand(provider: &str, value: &str, t: f32, locked: bool, unkeyed: bo
     };
     h_flex()
         .flex_shrink_0()
-        .h(px(26.0))
+        // `CONTROL_SM` 28: a chip is a control (`06-triggers-and-popovers.md`).
+        .h(px(theme::CONTROL_SM))
         .items_center()
         .gap(px(6.0))
         .rounded(px(theme::R_SM))
         .bg(motion::mix(theme::ink(0.0), theme::wash_hover(), if locked { 0.0 } else { t }))
         .px(px(theme::SPACE_SM))
-        .text_size(px(12.0))
+        // `text-sm` in the source; `BODY` 13 is this window's one body size.
+        .text_size(px(theme::BODY))
         .font_weight(FontWeight::MEDIUM)
         .text_color(tone)
         .child(provider_mark(provider, 13.0))
@@ -2833,18 +3357,25 @@ pub fn send_button(t: f32, lit: bool, stop: bool) -> Div {
     let (face, ink) = if lit {
         (motion::mix(theme::accent(), theme::text(), 0.12 * t), theme::on_accent())
     } else {
-        (theme::chip(), theme::ghost())
+        // Their disabled pair is `disabled:bg-foreground/12 disabled:text-muted-foreground`
+        // (`ComposerPrimaryActions.tsx:310`), which is `chip` and `muted` here.
+        (theme::chip(), theme::muted())
     };
     let mark = if stop { IconName::Square } else { IconName::ArrowUp };
     div()
         .flex_shrink_0()
-        .size(px(26.0))
+        // `CONTROL` 32, and **a circle**: `rounded-full`, not the ladder's 8. It is the
+        // one round control in the window, and one circle is the whole point - mid-run
+        // it is the same control wearing the Stop (`07-send-and-composer-states.md`).
+        .size(px(theme::CONTROL))
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(theme::R_MD))
+        .rounded_full()
         .bg(face)
-        .child(icon(mark, if stop { 11.0 } else { 15.0 }, ink))
+        // No focus ring of its own: the source's send circle omits it, and the card's
+        // edge is what says where you are typing.
+        .child(icon(mark, if stop { 12.0 } else { 16.0 }, ink))
 }
 
 /// How a run's own line reads.
@@ -2871,9 +3402,12 @@ pub fn run_note(text: &str, tone: RunTone) -> AnyElement {
     h_flex()
         .w_full()
         .items_center()
+        // The status line's own numbers (`ThreadStatusLine.tsx:17`): `text-xs` -> `SMALL`,
+        // `muted`, and `gap-1.5 px-1 pb-2`, which is 6/4/8 - the 6 has no rung here and
+        // `SPACE_SM` 8 is the nearest, the other two are `SPACE_XS`.
         .gap(px(theme::SPACE_SM))
-        .px(px(theme::SPACE_SM))
-        .py(px(6.0))
+        .px(px(theme::SPACE_XS))
+        .py(px(theme::SPACE_XS))
         .rounded(px(theme::R_MD))
         // A soft wash behind a state, so it reads as a strip of the card rather than
         // as a sentence that happens to be there. Their own error surfaces are tinted
@@ -2992,8 +3526,23 @@ pub fn ask_row(
 
 #[cfg(test)]
 mod tests {
-    use super::{row_state, State};
+    use super::{map_hit_w, map_strip_w, row_state, State};
+    use crate::theme;
     use std::collections::HashSet;
+
+    /// The minimap's two arithmetic rules, asserted rather than eyeballed: the box is a
+    /// clamp against the gutter, and a strip's length falls away from the turn in view.
+    #[test]
+    fn the_minimap_narrows_with_the_gutter_and_with_distance() {
+        assert_eq!(map_hit_w(400.0), theme::MAP_HIT_W, "a wide gutter hits the cap");
+        assert_eq!(map_hit_w(48.0), 36.0, "the narrowest gutter the strip is drawn in");
+        assert_eq!(map_hit_w(0.0), 0.0, "no gutter, no box, and not a negative one");
+        assert_eq!(map_strip_w(None), theme::MAP_STRIP_W);
+        assert_eq!(map_strip_w(Some(0)), theme::MAP_STRIP_W);
+        assert!(map_strip_w(Some(1)) < theme::MAP_STRIP_W);
+        assert!(map_strip_w(Some(2)) < map_strip_w(Some(1)));
+        assert!(map_strip_w(Some(9)) < map_strip_w(Some(2)));
+    }
 
     /// The ladder, in the order that matters: the most urgent true fact wins, and
     /// a row the worker is not holding can only ever be waiting or settled.

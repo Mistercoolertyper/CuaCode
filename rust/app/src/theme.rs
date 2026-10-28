@@ -101,14 +101,16 @@ pub const LINE: f32 = 20.0;
 pub const CONTROL: f32 = 32.0;
 pub const CONTROL_SM: f32 = 28.0;
 
-/// The composer's field line.
+/// The composer's field line: the text's own leading, 20px.
 ///
-/// t3code has **no min-height on the editor at all**: the field is one line of text
-/// (`text-sm` at its own leading, about 20px) plus `pt-3.5` above it and `pb-2` below,
-/// which lands the whole body at about 42px. This was 40 as a *floor*, which is a
-/// different thing: a floor makes an empty composer as tall as a full one. There is no
-/// floor now.
+/// The field is **two** of these at rest. t3code's editor is `min-h-[calc(2lh+
+/// --spacing(2))]` - a two-line floor - so an empty composer does not jump under the
+/// pointer on the first keystroke (`05-editor.md`). This comment used to say the source
+/// had no min-height on the editor at all; that was wrong, and the floor is back.
 pub const COMPOSER_LINE: f32 = 20.0;
+// The field's ceiling - 208px, `max-h-52`, past which it scrolls inside itself - is
+// **not** a token here. The palette's number set is closed at the three the spec adds
+// (`00-INDEX.md`, "The three new numbers"); this one lives at the field, in `main.rs`.
 /// The field's own padding: their body is `px-3 pt-3.5 pb-2 sm:px-4 sm:pt-4`.
 pub const COMPOSER_PAD_X: f32 = 16.0;
 pub const COMPOSER_PAD_TOP: f32 = 14.0;
@@ -121,8 +123,8 @@ pub const COMPOSER_FOOTER: f32 = 28.0;
 /// The minimap's own numbers, quoted from t3code's `MessagesTimeline`.
 ///
 /// Their strip is `h-0.5 w-6` - **2px tall and 24 wide** - spaced `8px` apart on a
-/// `bg-border/15` rail. Every strip is this size; only the colour says which one is the
-/// turn in view.
+/// `bg-border/15` rail. 24 is as long as a strip gets: the one in view is that long, and
+/// its neighbours are shortened rather than dimmed (`view::map_strip_w`).
 pub const MAP_STRIP_H: f32 = 2.0;
 pub const MAP_STRIP_W: f32 = 24.0;
 pub const MAP_SPACING: f32 = 8.0;
@@ -131,24 +133,47 @@ pub const MAP_SPACING: f32 = 8.0;
 /// The face is 24px; the box you click is the whole gutter, so the pointer does not have
 /// to find a 2px line, which is what made it feel hard to click. The boxes tile
 /// vertically at `MAP_SPACING`, so there is no dead space anywhere in the column.
+///
+/// **This is a cap, not the width.** The source's box is `min(40, floor(gutter) - 12)`
+/// (`MessagesTimeline.logic.ts:440`-`:455`), so a narrow gutter gets a narrower box and
+/// this number is only what it stops growing at. `main.rs` does the clamp against the
+/// measured gutter; 352 while a preview card is open is the source's other bound and has
+/// no preview here to apply it to.
 pub const MAP_HIT_W: f32 = 40.0;
 /// A strip at rest, and one the pointer is on.
 ///
-/// The **active** turn is not here: it is `text_soft` (near-white warm off-white from
-/// ember's own `foreground`), because it is the one mark that means "you are here" and
-/// grey does not say that. These were `map_rest`/`map_near` plus an accent-orange active
-/// strip, which read as ugly - orange is this palette's "you can act on this" and a
-/// scroll position is not a control.
+/// The **active** turn is not here: it is `text_soft`, the foreground's own tone, because
+/// it is the one mark that means "you are here" and grey does not say that. Their own
+/// in-view mark is `bg-foreground/55` (`TimelineMinimap.tsx:242`); `text_soft` is the
+/// existing token for that job, and a second foreground alpha would be a second palette. These were
+/// `map_rest`/`map_near` plus an accent-orange active strip, which read as ugly - orange is
+/// this palette's "you can act on this" and a scroll position is not a control.
 pub fn map_rest() -> Hsla {
     hex(0xa8a5a3, 0.3)
 }
 pub fn map_near() -> Hsla {
     hex(0xa8a5a3, 0.55)
 }
-
 /// The line height of an answer's body text. Their editor is 14px at a 1.625
 /// leading, and prose wants more air than code does.
 pub const ANSWER_LINE: f32 = 22.0;
+
+/// The prose block rhythm: the gap between two blocks of one document.
+///
+/// Their `p, ul, ol, blockquote, pre` all carry `margin: 0.65rem 0`
+/// (`index.css:1873`-`:1882`), which is 10.4px - between `SPACE_SM` 8 and
+/// `SPACE_MD` 12, so a paragraph's air is its own rung rather than either.
+/// Collapsed CSS margins are why this is a *gap* and not padding on both sides.
+pub const BLOCK_GAP: f32 = 10.0;
+
+/// One width for a code block's own scroll region.
+///
+/// Their `pre` scrollbar is `height: var(--app-scrollbar-width)` = 6px
+/// (`index.css:2150`-`:2152`), and the thumb is the border at 78% (`:2154`).
+pub const SCROLLBAR: f32 = 6.0;
+
+/// A heading above `BODY`: their `h1` at 1.25rem (`index.css:1901`).
+pub const H1: f32 = 20.0;
 
 /// A run's own line. Their `TurnFoldTimelineRow` is `text-sm` in a row about
 /// 26px tall; this sits on the same rung as the rail's rows so a run reads as
@@ -425,8 +450,23 @@ pub fn unread() -> Hsla {
 /// A project's gradient circle, by their `grad:<n>` token. Eight rungs, quoted
 /// from the set their own `ColorSelector` offers; an out-of-range byte wraps
 /// rather than panicking, because the token is user data.
+///
+/// **The table is here and not in `state.rs`**, where it used to live: this is the
+/// only file allowed to hold a hex, and a second table of colours three files away
+/// is a second palette however carefully it is labelled.
+pub const GRADIENTS: [(u32, u32); 8] = [
+    (0xe07850, 0xe5c07b),
+    (0x61afef, 0x7ec0f5),
+    (0x5fb37f, 0x98d1a8),
+    (0xc678dd, 0xd494e6),
+    (0x56b6c2, 0x73c7d3),
+    (0xdc6b6b, 0xffcccc),
+    (0xd4a84b, 0xecd08f),
+    (0x7b68ee, 0xad46ff),
+];
+
 pub fn gradient(n: u8) -> (Hsla, Hsla) {
-    let (a, b) = crate::state::GRADIENTS[n as usize % crate::state::GRADIENTS.len()];
+    let (a, b) = GRADIENTS[n as usize % GRADIENTS.len()];
     (hex(a, 1.0), hex(b, 1.0))
 }
 
@@ -487,12 +527,6 @@ pub fn shadow_sm() -> Vec<BoxShadow> {
 pub const SANS: &str = ".SystemUIFont";
 /// Code, paths, and a branch name. macOS's system monospace.
 pub const MONO: &str = "SF Mono";
-
-/// One row of a mono column lines up with the next, which is what a mono face
-/// is for. Both are 0.8em above the body size, their own `font-mono text-[11px]`.
-pub fn mono(size: f32) -> Font {
-    font(MONO)
-}
 
 #[cfg(test)]
 mod tests {

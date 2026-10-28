@@ -24,9 +24,6 @@ use std::time::{Duration, Instant};
 use gpui_kit::component::animation::EffectTransition;
 use gpui_kit::*;
 
-/// How long a hover blend takes. Their own `transition-colors` default.
-pub const HOVER: Duration = Duration::from_millis(150);
-
 struct Fade {
     on: bool,
     since: Instant,
@@ -41,7 +38,7 @@ thread_local! {
 
 impl Fade {
     fn value(&self) -> f32 {
-        let t = (self.since.elapsed().as_secs_f32() / HOVER.as_secs_f32()).min(1.0);
+        let t = (self.since.elapsed().as_secs_f32() / FAST.as_secs_f32()).min(1.0);
         if self.on {
             self.t0 + (1.0 - self.t0) * t
         } else {
@@ -93,8 +90,8 @@ pub fn hover_t(key: &str) -> f32 {
 /// the pointer is still on it. Only settled entries age out.
 pub fn any_blend_alive() -> bool {
     BLENDS.with_borrow_mut(|map| {
-        map.retain(|_, f| f.on || f.since.elapsed() <= HOVER * 4);
-        map.values().any(|f| f.since.elapsed() < HOVER)
+        map.retain(|_, f| f.on || f.since.elapsed() <= FAST * 4);
+        map.values().any(|f| f.since.elapsed() < FAST)
     })
 }
 
@@ -253,19 +250,26 @@ mod tests {
     #[test]
     fn an_elapsed_time_reads_as_words() {
         assert_eq!(format_elapsed_opt(42).as_deref(), Some("42s"));
-        assert_eq!(format_elapsed_opt(725).as_deref(), Some("12m 5s"));
+        // Zero-padded, so the row does not reflow as the seconds tick over.
+        assert_eq!(format_elapsed_opt(725).as_deref(), Some("12m 05s"));
+        assert_eq!(format_elapsed_opt(3900).as_deref(), Some("1h 05m"));
         assert_eq!(format_elapsed_opt(0), None);
     }
 }
 
 /// An elapsed time in words, or nothing when there is nothing to say. The
 /// `Option` is the point: a run with no clock is not a run of zero seconds.
+///
+/// **Zero-padded**, which is t3code's own format: `12s`, `3m 07s`, `2h 05m`
+/// (`AgentElapsed.tsx:6`-`:17`). The padding is not decoration - a bare `3m 7s`
+/// reflows the row every time the seconds cross 10, and the row's own timestamp strip
+/// is drawn `tabular-nums` precisely so that does not happen (`11`, disagreement 3).
 #[allow(dead_code)] // the readout for a run in flight, which this window has none of yet
 pub fn format_elapsed_opt(secs: i64) -> Option<String> {
     match secs {
         s if s <= 0 => None,
         s if s < 60 => Some(format!("{s}s")),
-        s if s < 3600 => Some(format!("{}m {}s", s / 60, s % 60)),
-        s => Some(format!("{}h {}m", s / 3600, (s % 3600) / 60)),
+        s if s < 3600 => Some(format!("{}m {:02}s", s / 60, s % 60)),
+        s => Some(format!("{}h {:02}m", s / 3600, (s % 3600) / 60)),
     }
 }
