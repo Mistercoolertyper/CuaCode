@@ -486,6 +486,75 @@ fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").trim().to_string()
 }
 
+/// What a thought is called: the first sentence of the model's own words, cut to a
+/// head line's length on a word boundary.
+///
+/// A thinking row is a name and not a paragraph. The whole thought is what opening the
+/// row is for; the head has to be the one clause that says what the step is doing, and
+/// the model's own opening sentence is the best name there is - an invented label
+/// (`Working`, `Thinking about the file`) reads as a summary of a summary.
+///
+/// The rules, and why each is one:
+///
+/// - **The first non-empty line**, with its markdown marks stripped: a thought often
+///   opens with a heading or a bullet, and `## ` is not part of the name.
+/// - **A whole sentence if it fits**, else the clause before the first `, `, `: ` or
+///   `; `. A name that stops mid-clause reads as a bug; one that stops at a clause mark
+///   still says what the step is. The colon is here because a model opening with `The
+///   user is asking a simple question: what's the difference` is naming itself after the
+///   colon, and cutting it at 54 bytes instead gave `... a simple question: what's the`.
+/// - **`Thinking` when there is nothing to cut**, because an empty row is not a row.
+///
+/// Lives here rather than in a frontend because both of them name a thought, and two
+/// copies of a cutting rule is how a terminal and a window end up disagreeing about the
+/// same run (this was `quik`'s own `view::thought_name`; the GUI wanted the same thing).
+pub fn thought_name(text: &str) -> String {
+    /// Where a name stops being a name and becomes a sentence again.
+    const MAX: usize = 54;
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .trim_start_matches(|c: char| {
+            c.is_whitespace() || matches!(c, '#' | '*' | '-' | '>' | '`' | '+')
+        })
+        .replace("**", "");
+    let line = line.trim();
+    if line.is_empty() {
+        return "Thinking".to_string();
+    }
+    let end = line
+        .find(['.', '!', '?'])
+        .filter(|&e| e <= MAX)
+        // A clause mark: a comma, a colon or a semicolon, whatever comes first.
+        .or_else(|| line.find([',', ':', ';']).filter(|&e| e >= 12 && e <= MAX))
+        .unwrap_or_else(|| cut_word(line, MAX));
+    let name = line[..end].trim().trim_end_matches('.').trim();
+    if name.is_empty() {
+        "Thinking".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+/// How much of `text` fits before `max` bytes, cut at the last space, and never
+/// inside a character.
+fn cut_word(text: &str, max: usize) -> usize {
+    if text.len() <= max {
+        return text.len();
+    }
+    // `max` is a byte budget, and a slice may not land inside a character: an em
+    // dash straddling byte 54 panicked the frontend off the transcript, and off
+    // the same transcript again on every resume. Step back to the last boundary
+    // at or before the budget.
+    let max = (0..=max).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
+    match text[..max].rfind(' ') {
+        Some(at) => at,
+        None => max,
+    }
+}
+
 /// Wrap one row to `width` columns, on words.
 ///
 /// Here rather than in a widget, because it is what makes a scroll offset
@@ -740,5 +809,21 @@ mod tests {
         t.apply(&ev(r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"shell","result":{"result":{"exit_code":0}}}}"#));
         t.apply(&ev(r#"{"type":"token","id":"a","data":{"state":"content","token":"done"}}"#));
         assert!(matches!(t.rows.last(), Some(Row::Content { .. })));
+    }
+
+    /// A name is cut on a character boundary. The byte budget is 54, and a
+    /// thought whose first line has an em dash straddling that byte used to
+    /// panic the frontend off the transcript, and off it again on every
+    /// resume. This is that line.
+    #[test]
+    fn a_name_never_cuts_inside_a_character() {
+        let said = "Now: what does the app do when a machine is switched \u{2014} sel stays.";
+        assert_eq!(
+            thought_name(said),
+            "Now: what does the app do when a machine is switched"
+        );
+        // No space to cut at before the budget, and a four-byte character on it.
+        let solid = format!("{}\u{1F600}{}", "a".repeat(52), "b".repeat(9));
+        assert!(thought_name(&solid).len() <= 54 * 4);
     }
 }
