@@ -9,7 +9,7 @@ these are the shapes models_at has to survive.
 """
 
 import json, os, sys, threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -29,10 +29,21 @@ PAYLOADS = {}
 
 
 class Served(BaseHTTPRequestHandler):
+    # Keep-alive, and every answer carries its length. The default is HTTP/1.0, which
+    # closes the socket after each response while httpx keeps it in its pool and
+    # reuses it: the reuse lands in the window where the close has happened and has
+    # not been noticed, and surfaces as a connection abort that show_at swallows, so
+    # the failing check reads as a provider bug. Measured at 4 of 300 requests;
+    # ThreadingHTTPServer alone does not fix it (2 of 300), the protocol does.
+    protocol_version = "HTTP/1.1"
+
     def do_GET(self):
         self._send(PAYLOADS.get(self.path))
 
     def do_POST(self):
+        # Drained before answering: under keep-alive an unread request body is parsed
+        # as the start of the next request. test_interrupt.py drains the same way.
+        self.rfile.read(int(self.headers.get("content-length") or 0))
         # The show endpoint answers a body: {"model": ...}, and answers about it. A chat
         # endpoint at /v1 answers 401 to anything, which is what a missing key looks like.
         if self.path.endswith("/chat/completions"):
@@ -42,7 +53,12 @@ class Served(BaseHTTPRequestHandler):
 
     def _send(self, body, status=200):
         if body is None:
-            self.send_response(404); self.end_headers(); return
+            # Still a length, even with no body: under keep-alive a response without
+            # one leaves the client waiting for a body until its timeout expires.
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         raw = json.dumps(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -53,7 +69,8 @@ class Served(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
 
-srv = HTTPServer(("127.0.0.1", 0), Served)
+srv = ThreadingHTTPServer(("127.0.0.1", 0), Served)
+srv.daemon_threads = True
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 base = f"http://127.0.0.1:{srv.server_port}"
 
