@@ -50,10 +50,20 @@ knows which profile owns which file.
 - `app/motion.rs` - the hover clock, the pulse, and the arrival curve a menu
   rides. Reads the clock at paint time.
 - `app/main.rs` - the window, the keys, the four composer menus, and the cache.
+- `app/agent.rs` - one worker, on this machine or on a box, and the little that is
+  live rather than on disk: busy, phase, error, a permission ask, and the listing a
+  box's worker answers `session.list` with.
 - `src/wire.rs` - the envelope and its fields. The format, and nothing else.
 - `src/worker.rs` - find python and `main.py`, spawn, read lines, reap.
+- `src/hosts.rs` - `~/.cuacode/hosts.json`: the boxes a worker can run on, how
+  `ssh` is handed the worker, and the one command that reads a file out of a box's
+  own state root.
 - `src/session.rs` - the conversation's state, folded from events, plus sending.
 - `src/transcript.rs` - events folded into rows: the model a UI draws.
+- `src/code.rs` - a fenced line read as the tones a terminal draws code in: what
+  the fence's language says a comment is, and what the line before it left open. Both
+  TUI frontends map its tones to their own palette; a second vocabulary in a frontend
+  is how two panes end up disagreeing about what a comment looks like.
 - `src/version.rs` - the build stamp `build.rs` gives it, and the one question
   about origin that answers "is this code out of date". Fetches, so it is asked
   on a thread and never from a frame.
@@ -77,6 +87,25 @@ terminal library. A new frontend is a crate under `rust/` with a `[[bin]]`; the
 shell scripts pick it up from the manifest with no other change.
 
 ## The app's own rules
+
+- **A box is a state root, not a label.** `~/.cuacode/hosts.json` names machines a
+  worker can run on, and one is chosen at a time. Changing it swaps everything the
+  screen is a view of: selection, cache, transcript, and the rail, which comes from
+  that worker's own `session.list`. A path is never carried across: the worker
+  stamps the directory on its own sessions, `agent::set_cwd` refuses a local one
+  when the worker is remote, and `session::terminal_for` drops the cwd from the
+  envelope for the same reason. The bug this replaced put a Mac path on a session
+  on a Linux box. A frontend that draws from a disk fetches that box's file with
+  `Host::read_command` on its own thread (`ask_box`/`apply_box`), never in a frame
+  and never on the tick.
+
+  A **detached** run is the one thing that is not a child of the screen: a terminal
+  frontend's `ctrl-d` writes the message to that machine and starts
+  `main.py --detach <file>` there under `nohup`, so closing the frontend stops
+  nothing. The worker forces the permission mode to `off` for exactly that reason
+  (`bypass` still stops for an irreversible call and puts it to a person, and the
+  person is not there), and the run answers on that machine's session list rather
+  than on the wire.
 
 - **The render path does not touch the disk.** `render` runs thirty times a second
   while a hover is travelling, and a frame that opens a file is a frame the
@@ -163,6 +192,27 @@ shell scripts pick it up from the manifest with no other change.
   prose about keys going to the model.
 - **Do not invent a number.** If the wire did not say how long something took,
   how many tokens it cost, or whether it worked, the row says nothing about it.
+- **A prompt waits for the keyboard to go still.** `main.rs`'s `raise_ask` is the
+  only place a permission or a question becomes the panel: an envelope that arrives
+  while someone is typing is held, not drawn, and goes up once the last key is
+  `ASK_AFTER` old. The worker is blocked on the answer either way, so the wait costs
+  nothing but the wait, and the field keeps working while it waits, so the message
+  being typed is still there when the panel goes up. A frontend that set the panel
+  straight from `feed` is the bug this replaced.
+- **A permission is a decision, not a y/n line.** The same panel a question gets,
+  with two rows (`allow`, `refuse`), each naming the keys that send it. Above them
+  the call as the row names it and, under that, the reason the gate stopped it --
+  what is being allowed first, because that is the thing being decided, then why it
+  was stopped. `view::ask_body` is the document and `ask_panel` lays it out; the field
+  is empty while it is up, because the field is not where it is answered. Nothing on
+  that panel is labelled: a heading over one sentence is a form, and a diff is a diff
+  by its colours. The panel is as wide as its content, not as wide as the pane. The
+  document scrolls under the rows with pgup/pgdn/home, because a diff cut off at the
+  pane is the thing a person deciding on a write has to reach.
+- **A permission says nothing after it is answered.** The call's own row is already on
+  the screen and the result lands against it, so a notice under it saying `allowed
+  shell` was the same fact twice, and in the one row of the transcript with no mark to
+  carry. A question still says its answer, because it is the only record of it.
 
 ## Traps
 
