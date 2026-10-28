@@ -54,6 +54,8 @@ fn main() {
         gpui_kit::platform::current_headless_renderer,
     );
     cx.update(gpui_kit::init);
+    // The same bar the app draws: one palette, one thumb tone.
+    cx.update(cuacode_app::dress);
 
     let (handle, _) = cx
         .update(|cx| {
