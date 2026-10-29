@@ -90,6 +90,125 @@ impl Host {
             None => format!("cat \"{path}\""),
         })
     }
+
+    // ---- a worker hosted on that box -------------------------------------------
+    //
+    // The wire is line-JSON on stdin and stdout, so a worker whose stdio belongs to
+    // **tmux** instead of to an `ssh` is a worker that outlives this machine: quit the
+    // frontend, ctrl-c it, shut the laptop, and the pane on that box is still there,
+    // still generating. The frontend is a client of it: commands go in through
+    // `send-keys` (the pane's pty is the worker's stdin) and events come back out of the
+    // file `pipe-pane` writes, which is the one way to read a stream that is not this
+    // process's stdout.
+
+    /// The tmux session that hosts this box's worker. One per machine, because there is
+    /// one live worker per machine: it holds one conversation at a time, and switching
+    /// conversations is `session.load`, which is what the wire already has.
+    pub fn pane(&self) -> &'static str {
+        "cua"
+    }
+
+    /// Where that pane's output is appended. Inside the state root, so a box that is
+    /// read by this window is also a box whose live stream is a file here.
+    pub fn wire_log(&self) -> String {
+        format!("{}/live/{}.log", self.home(), self.pane())
+    }
+
+    /// Whether a worker is already hosted there. Asked before every attach: starting a
+    /// second one would be a second worker on one state root, and the one already
+    /// running would lose its turn.
+    pub fn has_pane_command(&self) -> String {
+        format!("tmux has-session -t {} 2>/dev/null", self.pane())
+    }
+
+    /// Start one: a pane, its output piped to the log, no echo on the pty (or every
+    /// command this end sends would come back down the log as its own event), and then
+    /// the worker itself, with `--detached` so it never stops to ask a person who may
+    /// not be there.
+    ///
+    /// The log is emptied first, because an attach that starts the pane reads it from
+    /// byte one: what is left of an older pane in that file would replay into a screen
+    /// that has nothing to do with it. A worker that outlives this is still a worker whose
+    /// past is the record, which `session.load` replays.
+    ///
+    /// The pane runs `sh -c` and not a login shell: an interactive shell paints a prompt
+    /// and its own escape sequences into the same pty the wire is on, and this box's fish
+    /// does that with OSC 3008 and bracketed-paste markers. The `sleep` before `exec` is
+    /// what lets `pipe-pane` attach first, so the ready line is in the log rather than
+    /// printed into a pane nobody is capturing yet.
+    ///
+    /// `-icanon` matters as much as `-echo`: a canonical pty delivers a line in one piece
+    /// only up to 4095 bytes and **drops the rest**, so a message carrying a picture, or
+    /// a tool result of any size, would vanish on the way into the worker with nothing
+    /// said. Non-canonical keeps `icrnl`, which is what turns the `send-keys` Enter into
+    /// the newline the worker reads lines on.
+    pub fn start_pane_command(&self) -> String {
+        let log = q(&self.wire_log());
+        format!(
+            "mkdir -p {live} && : > {log} && tmux new-session -d -s {pane} -x 220 -y 50 {run} \
+             ; tmux pipe-pane -t {pane} -O {pipe}",
+            live = q(&format!("{}/live", self.home())),
+            pane = self.pane(),
+            run = crate::worker::sh(&self.pane_run()),
+            pipe = crate::worker::sh(&format!("cat >> {log}"))
+        )
+    }
+
+    /// What the pane itself executes: the source tmux hands to `/bin/sh -c`. Split out so
+    /// the line that starts the worker can be *run* in a test, which is the only way to know
+    /// a path with a space in it still starts anything.
+    ///
+    /// The words are double-quoted, not `worker::sh`-quoted: this string is inside single
+    /// quotes already (tmux is given one word for the pane's command), and a single quote
+    /// inside it would end those early and leave the path bare.
+    pub fn pane_run(&self) -> String {
+        format!(
+            "sh -c 'stty -echo -icanon; cd {} && sleep 1 && exec {} {} --detached'",
+            q(self.cwd()),
+            q(self.python()),
+            q(&self.worker())
+        )
+    }
+
+    /// One envelope into that pane's stdin, as the frontend would have written it to a
+    /// pipe. `-l` because the line is JSON and tmux would otherwise read its keys.
+    pub fn send_command(&self, line: &str) -> String {
+        format!(
+            "tmux send-keys -t {pane} -l {line} ; tmux send-keys -t {pane} Enter",
+            pane = self.pane(),
+            line = crate::worker::sh(line.trim_end_matches('\n'))
+        )
+    }
+
+    /// How much of the log is already written, which is where a fresh attach starts
+    /// reading: everything before it is the past, and the past is on the record.
+    pub fn log_size_command(&self) -> String {
+        format!("wc -c < {}", q(&self.wire_log()))
+    }
+
+    /// Everything appended to the log from byte `from` on, followed as it grows. The
+    /// `-f` is what makes this a stream: one `ssh` for the whole attachment, and closing
+    /// it closes the view and nothing else.
+    pub fn tail_command(&self, from: u64) -> String {
+        format!("tail -f -c +{} {}", from.max(1), q(&self.wire_log()))
+    }
+}
+
+/// A path for a **remote** shell: double-quoted, so it is one word and `$HOME` still
+/// expands there. `worker::sh` single-quotes, which is right for a path this machine
+/// built and wrong for one that starts with `$HOME`. `$` is left alone for that reason;
+/// the backslash and the backtick are escaped so a named root cannot end its own word.
+fn q(path: &str) -> String {
+    let mut out = String::with_capacity(path.len() + 2);
+    out.push('"');
+    for c in path.chars() {
+        if matches!(c, '"' | '\\' | '`') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
 }
 
 /// The hosts in `home`, skipping any entry that could not start a worker.

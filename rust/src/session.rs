@@ -159,6 +159,24 @@ impl Session {
         Session::start_on(&Target::Local, home, cwd)
     }
 
+    /// Attach to the worker hosted on `host`, starting one there if there is none.
+    ///
+    /// The **detachable** half of a box: the worker is a child of a pane on that machine,
+    /// so this session is a client of it rather than its parent. Dropping the session ends
+    /// the view, not the work, and a turn in flight keeps going with this machine off.
+    pub fn attach_on(host: &crate::hosts::Host) -> Result<Session, String> {
+        let (worker, events) = Worker::attach(host)?;
+        Ok(Session {
+            worker,
+            snap: Snapshot::default(),
+            terminal: terminal_for(&Target::Remote(host.clone())),
+            sessions: Vec::new(),
+            unhandled: 0,
+            seq: 0,
+            events,
+        })
+    }
+
     /// Start on one machine. `cwd` is a path on *that* machine and is ignored for
     /// a remote worker, whose own entry names where it starts; `home` is only the
     /// local one, for the same reason.

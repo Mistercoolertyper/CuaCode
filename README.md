@@ -492,17 +492,18 @@ worker's own word for where a conversation stands: checked against the machine
 the worker is running on, so on a box it is a path on that box, and refused once
 the conversation has started, because the directory is stamped on the session and
 decides where every tool runs.
-- **Closing the frontend stops an attached worker, and nothing else.** There is no
-reattach: the `ssh` process is the worker's parent, so when the window or the
-terminal that opened it goes, the worker over there sees EOF, commits, and
-exits. A **detached** run is the other way: in the terminal frontends `ctrl-d`
-writes the message to that box and starts `main.py --detach <file>` there under
-`nohup`, so the terminal is not its parent and closing it stops nothing. A
-detached run asks nothing (`off`, since nobody is there to answer a gate), writes
-only to that box's session record, and is read back from the box's session list
-when its first round lands. It needs the **same tree** on that box: a box running
-an older checkout has no `--detach`, and the frontend says so rather than
-starting a worker that would ignore the argument and exit.
+- **A box's worker is hosted there, and this machine is only a client of it.** On a
+box the worker runs in a `tmux` pane of its own (`Host::pane`), and its output is
+followed from `~/.cuacode/live/cua.log` rather than from a pipe this machine owns.
+Quit the frontend, ctrl-c it, shut this machine down: the pane carries on, and a
+turn in flight keeps generating. `ctrl-d` is that on purpose, and `ctrl-g` comes
+back to the conversation where it got to. The worker is started with
+`--detached`, which forces the permission mode to `off`, because a gate would
+otherwise stop for a person who may not be there. One pane per box, one
+conversation at a time, and `session.load` switches it.
+- **Closing a frontend ends a worker it spawned itself.** fastrs still runs a box
+worker as its own `ssh` child: no reattach, and closing it commits and exits.
+quik uses the hosted shape, so on a box it cannot end the work by accident.
 
 The GUI draws a conversation from the bytes of a transcript, so on a box it
 fetches that tail over `ssh`, on a thread and once per change. The terminal

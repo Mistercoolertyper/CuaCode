@@ -18,33 +18,22 @@ from tools._safety import shell as shell_safety
 SETTINGS = config.settings()
 
 
-def detach_prompt(argv: list[str]) -> str:
-    """The message a `--detach` run was given, or empty for a normal launch.
+# `main.py --detached` is a worker **hosted** on a machine by something that outlives
+# any frontend (tmux, through `Host::hosted`). Nothing is attached to it by
+# definition - that is what detach means - so it may never stop to ask a person.
+DETACHED = "--detached" in sys.argv[1:]
 
-    `main.py --detach <file>` is one turn with nobody attached: the frontend that
-    started it is gone (or never stays), so there is no pipe to speak on and nobody
-    to answer a permission. The message comes from a file rather than an argument so
-    that it can be a paragraph with quotes and newlines in it, and so the frontend
-    that wrote it over `ssh` never has to quote anything.
-    """
-    for i, arg in enumerate(argv):
-        if arg == "--detach" and i + 1 < len(argv):
-            path = argv[i + 1]
-            try:
-                return open(path, encoding="utf-8").read().strip()
-            except OSError as e:
-                print(f"--detach {path}: {e}", file=sys.stderr)
-                sys.exit(2)
-    return ""
+# `--detach <file>` was the way before it: one message, run with nobody attached. A
+# frontend from before this flag would start this worker with the old one, it would
+# ignore the message, read the /dev/null it was handed, see end of file and exit -- a
+# run that looks sent and never happens. Stderr is where that frontend's exit report
+# reads from, because stdout here is the wire.
+if "--detach" in sys.argv[1:]:
+    print("main.py --detach <file> is gone: a box's worker is hosted by tmux and started "
+          "with --detached (README, Boxes)", file=sys.stderr)
+    sys.exit(2)
 
-
-DETACHED = detach_prompt(sys.argv[1:])
-
-# A detached run hands the loop its one message before it starts, and reads no
-# stdin: the whole run is that message, and the loop's own EOF shutdown is what
-# commits the session and lets the process go.
-ipc = IPC(script=[{"type": "cmd", "id": "detached", "data": {"action": "chat", "text": DETACHED}}]
-          if DETACHED else None)
+ipc = IPC()
 
 
 class Ctx(dict):
@@ -656,6 +645,11 @@ while True:
         elif action == "permission.mode":
             mode = (env.data.get("mode") or "ask").lower()
             if mode not in ("ask", "auto", "bypass", "off"): mode = "ask"
+            # A detached worker keeps `off`: a gate here would wait for a person who is
+            # not attached and cannot be, which is the hang the flag exists to prevent.
+            # The reply carries what was actually set, so no screen shows a mode that
+            # nothing honours.
+            if DETACHED: mode = "off"
             PERM_MODE = mode
             ipc.reply(env, "status", {"state": "permission", "mode": mode})
         elif action == "tool.detail":
