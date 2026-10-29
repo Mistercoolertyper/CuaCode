@@ -227,7 +227,7 @@ The pointer-and-keyboard ones (`click`, `key`, `scroll`, `type_text`,
 | Name | What it is |
 | --- | --- |
 | `fastrs` | Terminal. One conversation as an action tape rather than a chat log: the model's prose is the unmarked baseline, and what you asked, what it thought and what it did to the machine are what catch the eye. Tool calls fold into one row per run - `5 calls · read, edit` - which opens on a press. `/` opens the worker's own command table (with `help` and `permissions` in front), `$` the skill menu, `@` a file picker. `Ctrl+O` opens the call under the cursor in full, `Ctrl+V` attaches a picture, `Esc` stops the run, `Shift+Enter` (or `Alt+Enter`, or `Ctrl+J`) puts a newline in the message. `/help` lists every key; there is no key row drawn in the corner of the frame. |
-| `quik` | Terminal, compact. Fastrs's code with the design still to be settled: thoughts and calls compressed, the header and the frame cut down. |
+| `quik` | Terminal, compact. The frontend the work goes into, and its design is settled in `rust/quik/AGENTS.md`: one row per thing, no mark that is not a state, no instrument readings, one glyph family, and the conversation is thirty rows of forty. |
 | `cuacode` | GUI window. A rail of promoted projects and the sessions standing in each, the conversation, and a composer that sets provider, model, permissions and location. It reads the state root directly, so the rail draws with no worker up. A run is one row, the same fold fastrs uses. `rust/app/app.sh` builds it as a real macOS bundle so it owns a Dock identity and a menu bar. |
 
 All three are documented at length in `rust/README.md`, which is the page for the

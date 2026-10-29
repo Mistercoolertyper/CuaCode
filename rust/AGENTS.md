@@ -1,14 +1,20 @@
 # Working on the Rust half
 
-Two frontends over one worker, which is the Python process in the parent
-directory: `fastrs` draws one conversation in a terminal, and `app` is the base of
-an orchestrator: bin `cuacode`, it reads the state root itself and drives one
-worker. Both are built on the shared half below.
+Three frontends over one worker, which is the Python process in the parent
+directory: `quik` draws one conversation in a terminal and is the one the work
+goes into, `fastrs` is the older terminal frontend and is frozen, and `app` is the
+base of an orchestrator: bin `cuacode`, it reads the state root itself and drives
+one worker. All three are built on the shared half below.
 
-The `app` crate is where new work goes. It is meant to be the app: projects and
-the sessions standing in each, the conversation, and a composer that sets
-provider, model, permissions and location. `README.md` says what this is; this
-file is the rules. Read both before the first change, and neither is long.
+**`quik/AGENTS.md` is the screen's own law.** Read it before touching anything
+under `quik/`. It wins where it and this file disagree, including about density,
+glyphs, colour and what may be drawn at all.
+
+The `app` crate is meant to be the app: projects and the sessions standing in
+each, the conversation, and a composer that sets provider, model, permissions and
+location. It is parked for now; the terminal frontend is where the work goes.
+`README.md` says what this is; this file is the rules. Read both before the first
+change, and neither is long.
 
 ## First, the test command
 
@@ -73,6 +79,9 @@ knows which profile owns which file.
   branch's upstream, which a fork can leave pointing at the fork. Its tiny
   `cuacode-doctor` binary keeps Windows from having to overwrite a running
   frontend. Prints and exits, before any window is made.
+- `quik/view.rs` - what a row looks like in cells, and `ink`, quik's only palette.
+- `quik/keys.rs` - every global key as a named action, and `~/.cuacode/keys.json`.
+- `quik/main.rs`, `quik/menu.rs` - the window, the keys, and the `/`, `$`, `@` menus.
 - `fastrs/view.rs` - what a row looks like on the page, in cells.
 - `fastrs/menu.rs` - the `/`, `$` and `@` menus: the rows, the filter, and
   what choosing one writes onto the message. The calls list behind ctrl-o is the
