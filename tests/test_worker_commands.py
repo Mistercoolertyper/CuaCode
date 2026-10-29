@@ -18,6 +18,7 @@ import os
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -99,6 +100,16 @@ class Worker:
                 return text, seen
         return "", seen
 
+    def wait(self, kind, timeout=10.0):
+        """The first reply envelope of one type, whatever else is on the wire."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try: e = self.lines.get(timeout=0.2)
+            except queue.Empty: continue
+            if e.get("type") == kind:
+                return e.get("data") or {}
+        return {}
+
     def alive(self): return self.proc.poll() is None
 
     def close(self):
@@ -118,8 +129,68 @@ try:
         raise SystemExit(1)
     sid = ready[0]["data"].get("session_id")
 
+    # `/cwd` before the first record. The bug this exists for: the parser only
+    # accepted an argument that started like a word, so `/cwd /home/me/work` ran
+    # `/cwd` with no argument, printed where it stood, and left the path to be
+    # sent to the model as prose.
+    shop = Path(tempfile.mkdtemp(prefix="cwd-"))
+    (shop / "sub").mkdir()
+    (shop / "file.txt").write_text("x")
+    (shop / "with space").mkdir()
+
+    w.chat(f"/cwd {shop}")
+    said, _ = w.notice("starts there")
+    check("an absolute path is an argument", str(shop) in said, said)
+
+    w.chat("/cwd")
+    said, _ = w.notice("cwd:")
+    check("/cwd says where it stands", str(shop) in said, said)
+
+    # A relative path is read against that directory, not against the worker's
+    # own launch directory.
+    w.chat("/cwd sub")
+    said, _ = w.notice("starts there")
+    check("a relative path is read from the conversation's own directory",
+          str(shop / "sub") in said, said)
+
+    # `~` is a path, and quoting is how a path with a space in it is one word.
+    w.chat('/cwd "' + str(shop / "with space") + '"')
+    said, _ = w.notice("starts there")
+    check("a quoted path with a space is one argument", str(shop / "with space") in said, said)
+
+    w.chat(f"/cwd {shop / 'nope'}")
+    said, _ = w.notice("not a directory")
+    check("a path that is not a directory says so", "not a directory" in said, said)
+
+    # The `/cwd` menu's list: directories anywhere on this machine, and only
+    # directories, because a file can never be an answer to "where does this
+    # stand".
+    w.send("cmd", {"action": "dir.list", "dir": str(shop)})
+    listed = w.wait("dirs")
+    names = [e["name"] for e in listed.get("entries", [])]
+    check("dir.list lists the subdirectories and nothing else",
+          names == ["sub", "with space"], names)
+    check("dir.list names the absolute directory it read",
+          listed.get("dir") == str(shop), listed.get("dir"))
+    check("dir.list offers the directory above it",
+          listed.get("parent") == str(shop.parent), listed.get("parent"))
+
+    w.send("cmd", {"action": "dir.list", "dir": "~"})
+    listed = w.wait("dirs")
+    check("dir.list reads `~` as home",
+          listed.get("dir") == os.path.expanduser("~"), listed.get("dir"))
+
+    w.send("cmd", {"action": "dir.list", "dir": str(shop / "nope")})
+    listed = w.wait("dirs")
+    check("dir.list says why it cannot read one", bool(listed.get("error")), listed)
+
     # A turn, so there is a conversation for /compress to find.
     w.chat("hello")
+
+    w.chat(f"/cwd {shop}")
+    said, _ = w.notice("fixed")
+    check("a started conversation cannot move, and says what to do instead",
+          "open a new session" in said, said)
     # Don't wait for a model reply; the command paths below are what is under test.
 
     # Every read-only and blocking inline command, through the real dispatcher.

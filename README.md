@@ -487,11 +487,15 @@ worker's `session.list`. It groups under each session's directory, because that
 box's `projects.json` was not read. In a terminal frontend the same question is
 the conversation picker, which leads with a `new session` row whose help line is
 the directory that session would stand in.
-- **`/cwd <path>` decides that directory before the first message.** It is the
-worker's own word for where a conversation stands: checked against the machine
-the worker is running on, so on a box it is a path on that box, and refused once
-the conversation has started, because the directory is stamped on the session and
-decides where every tool runs.
+- **`/cwd` is where the conversation stands, and `/cwd <path>` moves it.** It is the
+worker's own word for the directory: checked against the machine the worker is
+running on, so on a box it is a path on that box, and refused once the
+conversation has started, because the directory is stamped on the session and
+decides where every tool runs. A quoted path is one path even with a space in
+it, and a relative one is read from where the conversation stands rather than
+from wherever the worker was launched. In the terminal frontends the space after
+the word opens that machine's directories: a row walks in, `use this directory`
+is the answer, and choosing one writes the path onto the message.
 - **A box's worker is hosted there, and this machine is only a client of it.** On a
 box the worker runs in a `tmux` pane of its own (`Host::pane`), and its output is
 followed from `~/.cuacode/live/cua.log` rather than from a pipe this machine owns.

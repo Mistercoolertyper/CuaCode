@@ -800,6 +800,9 @@ impl App {
                 // Which provider a catalog belongs to travels with it, rather
                 // than being guessed from what the frontend last heard.
                 open.provider = reply.provider.clone();
+                // Why a directory could not be read, which is the difference
+                // between an empty folder and a folder that is not there.
+                open.error = reply.error.clone();
                 // A `/` menu is filled twice: from the rows in hand when it
                 // opens, and again from the list that lands under it. The
                 // second fill must carry this frontend's own verbs too, or the
@@ -2317,7 +2320,7 @@ impl App {
             // are this frontend's own list, and the calls are read off the
             // transcript it already holds.
             Kind::Permissions | Kind::Calls => return,
-            Kind::Files => {
+            Kind::Files | Kind::Dirs => {
                 let (dir, _) = open.walked();
                 let dir = dir.to_string();
                 if open.dir.as_deref() == Some(dir.as_str()) {
@@ -2327,7 +2330,13 @@ impl App {
                 // The rows on hand are the last directory's, and a name that
                 // happens to match in both would be the wrong file.
                 open.fill(Vec::new());
-                ("fs.list", serde_json::json!({ "dir": dir }))
+                if open.kind == Kind::Dirs {
+                    // Anywhere on this machine, and only directories: the
+                    // answer to `/cwd` is a directory, never a file.
+                    ("dir.list", serde_json::json!({ "dir": dir }))
+                } else {
+                    ("fs.list", serde_json::json!({ "dir": dir }))
+                }
             }
         };
         let _ = sess.command(ask.0, ask.1);
@@ -2400,8 +2409,18 @@ impl App {
                 // the trigger opened, the menu goes, and the space is typed. That
                 // is what makes "something / something else" a sentence -- and
                 // it is the same reading the worker's parser takes of it.
+                //
+                // The one space that opens a menu instead: `/cwd ` is followed
+                // by a path, and a path is a place on a disk. The list starts at
+                // the directory the conversation stands in, so the answer to
+                // "where am I" and the answer to "where instead" are the same
+                // menu.
+                let wants_dirs = self.input.trim_end() == "/cwd";
                 self.menu = None;
                 self.insert(c);
+                if wants_dirs {
+                    self.open_cwd_picker();
+                }
             }
             KeyCode::Char(c) if !ctrl => {
                 // Typed after a trigger, the character is on the line as well as
@@ -2500,6 +2519,28 @@ impl App {
                     self.open(i);
                 }
             }
+            // A path is written, not switched to: the worker reads `/cwd <path>`
+            // off the finished line, so choosing a directory only writes it. One
+            // with a slash on the end is a directory to walk into, and the list
+            // stays up at it -- the row that finishes is the one without.
+            Kind::Dirs => {
+                let keep: String = self.input.chars().take(anchor).collect();
+                // A path with a space in it is one word only when it is quoted, and the
+                // worker's parser is what has to read it back. The row that walks in keeps
+                // its slash and no quotes: everything after the space is then the whole
+                // path, which is what the list is asked for.
+                let written = if value.ends_with('/') || !value.contains(char::is_whitespace) {
+                    value.to_string()
+                } else {
+                    format!("\"{value}\"")
+                };
+                self.input = format!("{keep}{written}");
+                self.caret = self.chars();
+                self.menu = None;
+                if written.ends_with('/') {
+                    self.open_cwd_picker();
+                }
+            }
             _ => {
                 let keep: String = self.input.chars().take(anchor).collect();
                 self.input = format!("{keep}{value} ");
@@ -2534,6 +2575,24 @@ impl App {
         let mut open = Menu::open_apart(Kind::Hosts);
         open.fill(menu::hosts(&self.hosts, now.as_deref()));
         self.menu = Some(open);
+    }
+
+    /// The list `/cwd`'s argument is picked from.
+    ///
+    /// A trigger menu rather than a picker: it is a view of the path typed after
+    /// the word, so choosing a row writes onto the line and enter still sends it.
+    /// The anchor is the character after the space, which makes the filter the
+    /// path itself. Starts at the directory the conversation stands in -- the
+    /// worker answers an empty filter with its own -- so the list a person opens
+    /// to ask where they are is the list they would open to move.
+    fn open_cwd_picker(&mut self) {
+        let seen: Vec<char> = self.input.chars().take(self.caret).collect();
+        let Some(space) = seen.iter().rposition(|c| c.is_whitespace()) else { return };
+        let anchor = space + 1;
+        let mut open = Menu::open(Kind::Dirs, anchor);
+        open.filter = seen[anchor..].iter().collect();
+        self.menu = Some(open);
+        self.ask_for_rows();
     }
 
     /// Move this screen onto another machine.
@@ -4125,6 +4184,53 @@ mod tests {
         app.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert_eq!(app.input, "hello");
         assert!(app.menu.is_none(), "taking the trigger itself off closes the menu");
+    }
+
+    /// `/cwd ` opens the directories rather than a filter of commands. The list
+    /// is a view of the path typed after the word, so the anchor is the space and
+    /// what is typed after it is the path; choosing a row writes it and nothing is
+    /// sent, because the worker parses the finished line.
+    #[test]
+    fn the_space_after_cwd_opens_the_directories() {
+        let mut app = App::new(None);
+        typed(&mut app, "/cwd");
+        app.menu = Some(Menu::open(Kind::Commands, 0));
+        app.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let open = app.menu.as_ref().expect("no list after /cwd ");
+        assert_eq!(open.kind, Kind::Dirs);
+        assert_eq!(open.anchor, 5, "the path starts after the space");
+        assert_eq!(open.filter, "");
+
+        // A directory to walk into writes its path with the slash that means
+        // "keep going", and the list stays up at it.
+        let mut walk = Menu::open(Kind::Dirs, 5);
+        walk.fill(vec![menu::Item::new("work", "/home/me/work", "/home/me/work/")]);
+        app.menu = Some(walk);
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.input, "/cwd /home/me/work/");
+        assert_eq!(app.menu.as_ref().map(|m| m.kind), Some(Kind::Dirs),
+                   "walking in keeps the list");
+
+        // The directory itself is the answer: that row writes it, the list goes,
+        // and enter after it is what sends the command.
+        let mut done = Menu::open(Kind::Dirs, 5);
+        done.fill(vec![menu::Item::new("use this directory", "/home/me/work", "/home/me/work")]);
+        app.menu = Some(done);
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.input, "/cwd /home/me/work");
+        assert!(app.menu.is_none());
+
+        // And a path with a space in it goes on the line quoted, or the worker reads
+        // it back as two words and sets nothing.
+        let mut spaced = Menu::open(Kind::Dirs, 5);
+        spaced.fill(vec![menu::Item::new(
+            "use this directory",
+            "/home/my work",
+            "/home/my work",
+        )]);
+        app.menu = Some(spaced);
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.input, "/cwd \"/home/my work\"");
     }
 
     /// What the command line means, including the id that skips the question.
