@@ -6227,17 +6227,16 @@ mod chrome {
         }
     }
 
+    /// The five rows the worker's table plus this frontend's own verb make: the
+    /// `handler/agent/inline.py` list, and `help`, which is the keys and so belongs
+    /// to the side that knows them.
     fn commands() -> Vec<Item> {
         [
-            ("provider", "which provider answers, from here on"),
-            ("model", "which model that provider runs"),
-            ("vision", "which provider looks at pictures"),
-            ("effort", "how hard it thinks: off low medium high max"),
+            ("help", "the keys"),
+            ("settings", "who answers, and how hard it thinks"),
             ("cwd", "where the next conversation stands"),
             ("compact", "fold the conversation now"),
-            ("context", "how much of the window it fills"),
             ("usage", "what this and every other session has cost"),
-            ("version", "which build of cuacode this worker runs"),
         ]
         .iter()
         .map(|(n, d)| Item::new(*n, *d, format!("/{n}")))

@@ -22,21 +22,24 @@ from dataclasses import dataclass
 # it is a path, a URL, or prose with a slash in it. The description is what the
 # frontend's `/` menu shows, so a command added here reaches the parser and the
 # menu in the same edit.
+#
+# Four, not nine. A menu is a list of things you do to the conversation; the
+# things you set once (provider, model, vision, effort) are underneath `settings`,
+# and `context` and `version` are facts the screen already carries: the window's own
+# fill beside the model, and the build in `--version`.
 COMMANDS = (
-    ("provider", "which provider answers, from here on", True),
-    ("model",    "which model that provider runs", True),
-    ("vision",   "which provider looks at pictures", True),
-    ("effort",   "how hard it thinks: off low medium high max", True),
+    ("settings", "who answers, and how hard it thinks: provider model vision effort", True),
     ("cwd",      "where the next conversation stands; a space lists directories", True),
     ("compact",  "fold the conversation now, or set the limit it folds at", True),
-    ("context",  "how much of the window the conversation fills", False),
     ("usage",    "what this and every other session has cost", False),
-    ("version",  "which build of cuacode this worker is running", False),
 )
 
-# The old spelling, kept working and kept out of the menu. A command someone has
-# in their fingers should go on working; a menu listing two names for one thing is
-# a menu asking a question that has no answer.
+# Kept working, kept out of the menu. A command someone has in their fingers should
+# go on working, and a menu that lists a name whose only job is to be an argument of
+# another command is a menu asking a question with no answer in it.
+HIDDEN = frozenset({"provider", "model", "vision", "effort", "context", "version"})
+
+# The old spelling, kept working and kept out of the menu.
 ALIASES = {"compress": "compact"}
 
 # A command whose argument is a **path** rather than a word. `/cwd /home/me/work`
@@ -45,8 +48,13 @@ ALIASES = {"compress": "compact"}
 # space in it, and every other command keeps the word rule.
 PATHS = frozenset({"cwd"})
 
-_ALL = frozenset(name for name, _, _ in COMMANDS) | frozenset(ALIASES)
-_BLOCKING = frozenset(name for name, _, blocking in COMMANDS if blocking) | frozenset(ALIASES)
+# A command whose argument is the rest of the line rather than one word:
+# `/settings model some-model-with-a-space`. It is an action and not an aside, so a
+# `/settings` in the middle of a sentence takes the sentence with it.
+REST = frozenset({"settings"})
+
+_ALL = frozenset(name for name, _, _ in COMMANDS) | HIDDEN | frozenset(ALIASES)
+_BLOCKING = frozenset(name for name, _, blocking in COMMANDS if blocking) | HIDDEN | frozenset(ALIASES)
 
 
 def _argument(text: str, k: int) -> tuple[str, int]:
@@ -107,7 +115,9 @@ def parse(text: str) -> Result:
                 if name in _BLOCKING:
                     while k < n and text[k].isspace():
                         k += 1
-                    if k < n and (name in PATHS or text[k].isalnum() or text[k] in "._:"):
+                    if name in REST:
+                        arg, k = text[k:].strip(), n
+                    elif k < n and (name in PATHS or text[k].isalnum() or text[k] in "._:"):
                         arg, k = _argument(text, k)
                 (blocking if name in _BLOCKING else parallel).append((name, arg))
                 i = k
@@ -130,7 +140,12 @@ if __name__ == "__main__":
 
     r = parse("explain X then /provider fr now")
     assert names(r) == [("provider", "fr")] and "fr" not in r.text
-    assert names(parse("/context")) == [("context", "")]
+    assert names(parse("/context")) == [("context", "")], "the old spelling still runs"
+    # Settings are one command with a key and a value, and the value is the rest of
+    # the line, not one word: a model name can have a space in it.
+    assert names(parse("/settings")) == [("settings", "")]
+    assert names(parse("/settings model a b c")) == [("settings", "model a b c")]
+    assert tuple(names(parse("/settings model a b c"))[0][1].split(" ", 1)) == ("model", "a b c")
     assert names(parse("/usage plus rest")) == [("usage", "")] and "rest" in parse("/usage plus rest").text
     # A slash glued to a word, a path, or an unknown name is prose.
     assert names(parse("a /providerfr /etc/passwd /nope")) == []

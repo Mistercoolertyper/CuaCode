@@ -496,6 +496,16 @@ def inline_command(env, text: str):
 def _run_inline(name, arg) -> str:
     """Run one inline command, returning the notice line to show the user."""
     global SETTINGS, messages
+    if name == "settings":
+        # One door for the four things that are set once, and the four old spellings
+        # still work on their own: this is a menu shorter by four, not four commands
+        # taken away. `/settings` alone says what they all are.
+        key, _, rest = arg.partition(" ")
+        if not key.strip():
+            return "  ·  ".join(_run_inline(k, "") for k in ("provider", "vision", "effort"))
+        if key not in ("provider", "model", "vision", "effort"):
+            return f"settings: no {key.strip()}; one of provider, model, vision, effort"
+        return _run_inline(key, rest.strip())
     if name == "provider":
         if not arg:
             return f"provider: {SETTINGS['provider']} - {SETTINGS.get('model', 'no model')}"
