@@ -2676,10 +2676,19 @@ impl App {
             // stays up at it -- the row that finishes is the one without.
             Kind::Dirs => {
                 let keep: String = self.input.chars().take(anchor).collect();
-                self.input = format!("{keep}{value}");
+                // A path with a space in it is one word only when it is quoted, and the
+                // worker's parser is what has to read it back. The row that walks in keeps
+                // its slash and no quotes: everything after the space is then the whole
+                // path, which is what the list is asked for.
+                let written = if value.ends_with('/') || !value.contains(char::is_whitespace) {
+                    value.to_string()
+                } else {
+                    format!("\"{value}\"")
+                };
+                self.input = format!("{keep}{written}");
                 self.caret = self.chars();
                 self.menu = None;
-                if value.ends_with('/') {
+                if written.ends_with('/') {
                     self.open_cwd_picker();
                 }
             }
@@ -4598,6 +4607,18 @@ mod tests {
         app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.input, "/cwd /home/me/work");
         assert!(app.menu.is_none());
+
+        // And a path with a space in it goes on the line quoted, or the worker reads
+        // it back as two words and sets nothing.
+        let mut spaced = Menu::open(Kind::Dirs, 5);
+        spaced.fill(vec![menu::Item::new(
+            "use this directory",
+            "/home/my work",
+            "/home/my work",
+        )]);
+        app.menu = Some(spaced);
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.input, "/cwd \"/home/my work\"");
     }
 
     /// Enter at a menu whose filter matches nothing sends the message instead of
