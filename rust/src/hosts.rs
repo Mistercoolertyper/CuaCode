@@ -126,25 +126,47 @@ impl Host {
     /// the worker itself, with `--detached` so it never stops to ask a person who may
     /// not be there.
     ///
+    /// The log is emptied first, because an attach that starts the pane reads it from
+    /// byte one: what is left of an older pane in that file would replay into a screen
+    /// that has nothing to do with it. A worker that outlives this is still a worker whose
+    /// past is the record, which `session.load` replays.
+    ///
     /// The pane runs `sh -c` and not a login shell: an interactive shell paints a prompt
     /// and its own escape sequences into the same pty the wire is on, and this box's fish
     /// does that with OSC 3008 and bracketed-paste markers. The `sleep` before `exec` is
     /// what lets `pipe-pane` attach first, so the ready line is in the log rather than
     /// printed into a pane nobody is capturing yet.
+    ///
+    /// `-icanon` matters as much as `-echo`: a canonical pty delivers a line in one piece
+    /// only up to 4095 bytes and **drops the rest**, so a message carrying a picture, or
+    /// a tool result of any size, would vanish on the way into the worker with nothing
+    /// said. Non-canonical keeps `icrnl`, which is what turns the `send-keys` Enter into
+    /// the newline the worker reads lines on.
     pub fn start_pane_command(&self) -> String {
         let log = q(&self.wire_log());
         format!(
-            "mkdir -p {live} && tmux new-session -d -s {pane} -x 220 -y 50 {run} \
+            "mkdir -p {live} && : > {log} && tmux new-session -d -s {pane} -x 220 -y 50 {run} \
              ; tmux pipe-pane -t {pane} -O {pipe}",
             live = q(&format!("{}/live", self.home())),
             pane = self.pane(),
-            run = crate::worker::sh(&format!(
-                "sh -c 'stty -echo; cd {} && sleep 1 && exec {} {} --detached'",
-                self.cwd(),
-                self.python(),
-                self.worker()
-            )),
+            run = crate::worker::sh(&self.pane_run()),
             pipe = crate::worker::sh(&format!("cat >> {log}"))
+        )
+    }
+
+    /// What the pane itself executes: the source tmux hands to `/bin/sh -c`. Split out so
+    /// the line that starts the worker can be *run* in a test, which is the only way to know
+    /// a path with a space in it still starts anything.
+    ///
+    /// The words are double-quoted, not `worker::sh`-quoted: this string is inside single
+    /// quotes already (tmux is given one word for the pane's command), and a single quote
+    /// inside it would end those early and leave the path bare.
+    pub fn pane_run(&self) -> String {
+        format!(
+            "sh -c 'stty -echo -icanon; cd {} && sleep 1 && exec {} {} --detached'",
+            q(self.cwd()),
+            q(self.python()),
+            q(&self.worker())
         )
     }
 
@@ -174,9 +196,19 @@ impl Host {
 
 /// A path for a **remote** shell: double-quoted, so it is one word and `$HOME` still
 /// expands there. `worker::sh` single-quotes, which is right for a path this machine
-/// built and wrong for one that starts with `$HOME`.
+/// built and wrong for one that starts with `$HOME`. `$` is left alone for that reason;
+/// the backslash and the backtick are escaped so a named root cannot end its own word.
 fn q(path: &str) -> String {
-    format!("\"{}\"", path.replace('"', "\\\""))
+    let mut out = String::with_capacity(path.len() + 2);
+    out.push('"');
+    for c in path.chars() {
+        if matches!(c, '"' | '\\' | '`') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
 }
 
 /// The hosts in `home`, skipping any entry that could not start a worker.

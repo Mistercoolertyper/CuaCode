@@ -2731,7 +2731,13 @@ impl App {
         };
         // Dropping the session is the whole of it: `Worker::close` on a hosted worker kills
         // the tail and never sends `stop`, so nothing on that box hears about this.
+        //
+        // The machine goes with it. `host` is what the picker reads as "already on this
+        // one" and what the next command is addressed to, and a screen attached to nothing
+        // is on nothing: left set, ctrl-g could not pick the box it had just left, which is
+        // the one thing the line below promises.
         self.sess = None;
+        self.host = None;
         self.log = Transcript::default();
         self.menu = None;
         self.follow = true;
@@ -3770,6 +3776,29 @@ mod tests {
         assert!(
             said.iter().any(|s| s.contains("detach is for a box")),
             "said {said:?}"
+        );
+    }
+
+    /// Letting go of a box has to leave the screen able to come back: the picker refuses
+    /// the machine it thinks it is already on, so detaching has to clear that as well as
+    /// the session, or the `ctrl-g` the line promises cannot reach the box it just left.
+    #[test]
+    fn detaching_a_box_leaves_the_screen_on_no_machine() {
+        let mut app = App::new(None);
+        app.host = Some(Host {
+            name: "box".into(),
+            ssh: "me@box".into(),
+            dir: "/srv/cuacode".into(),
+            ..Host::default()
+        });
+        app.hosts = app.host.clone().into_iter().collect();
+        assert!(app.sess.is_none(), "the test starts with no worker attached");
+
+        app.detach_box();
+
+        assert!(
+            app.host.is_none(),
+            "nothing is attached, so the screen is on nothing and the picker can offer the box again"
         );
     }
 

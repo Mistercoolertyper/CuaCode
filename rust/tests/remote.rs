@@ -92,6 +92,39 @@ fn a_path_with_a_space_survives_the_shell() {
     );
 }
 
+/// The line that starts the pane's worker is a shell string built out of `hosts.json`, and
+/// it is the one place a path with a space in it would silently start nothing: `cd` fails,
+/// `&&` stops, and the pane dies without saying why. Run it, the way tmux does.
+#[test]
+fn a_pane_starts_the_worker_from_a_path_with_a_space() {
+    let dir = std::env::temp_dir().join(format!("cuacode pane {}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("main.py"), "import sys\nprint('started', *sys.argv[1:])\n")
+        .unwrap();
+    let h = host(&dir.display().to_string());
+
+    let line = h.start_pane_command();
+    assert!(
+        line.contains("-icanon"),
+        "a canonical pty drops any line past 4095 bytes, pictures included: {line}"
+    );
+    assert!(
+        line.contains(": > \"$HOME/.cuacode/live/cua.log\""),
+        "the log is emptied first, or a fresh attach replays the last pane's: {line}"
+    );
+
+    let out =
+        Command::new("sh").arg("-c").arg(h.pane_run()).output().expect("sh starts");
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.contains("started --detached"),
+        "the worker runs out of a directory with a space in it: {said:?} {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// A read of that box's disk is the same transport: no pty, nothing can prompt, and
 /// the command it runs is the one the caller asked for rather than a worker.
 #[test]

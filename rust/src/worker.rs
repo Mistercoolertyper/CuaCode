@@ -63,7 +63,7 @@ pub fn remote_command(h: &Host) -> String {
     format!(
         "cd {} && exec {} {}",
         sh(h.cwd()),
-        h.python(),
+        sh(h.python()),
         sh(&h.worker())
     )
 }
@@ -85,6 +85,14 @@ pub fn ssh_argv_for(h: &Host, command: &str) -> Vec<String> {
         "BatchMode=yes".to_string(),
         "-o".to_string(),
         "ConnectTimeout=10".to_string(),
+        // A connection that is up but has gone quiet -- the box slept, the wifi did --
+        // is the one that hangs: `ConnectTimeout` only covers getting in, and a send
+        // blocks the frontend's own thread until ssh returns. Three missed keepalives
+        // is under a minute, which is a stall rather than a freeze.
+        "-o".to_string(),
+        "ServerAliveInterval=15".to_string(),
+        "-o".to_string(),
+        "ServerAliveCountMax=3".to_string(),
     ];
     argv.push(h.ssh.clone());
     argv.push(command.to_string());
