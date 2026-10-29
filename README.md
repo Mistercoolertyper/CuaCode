@@ -103,6 +103,7 @@ Everything else the agent keeps lives beside it:
 
 ```
 ~/.cuacode/config.json      providers, keys, models, your permission lists
+~/.cuacode/keys.json        quik's keys: one action per row, optional
 ~/.cuacode/AGENTS.md        your standing instructions, in every conversation
 ~/.cuacode/sessions/        one directory per conversation
 ~/.cuacode/memory/          what the agent has learned about you, one fact per file

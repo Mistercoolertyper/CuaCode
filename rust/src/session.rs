@@ -154,6 +154,23 @@ pub fn compact_state(snap: &mut Snapshot, stage: &str, folded: i64, freed: i64) 
     }
 }
 
+/// This worker now holds a different conversation: everything the last one measured
+/// goes, and the one thing that is the worker's rather than a conversation's stays.
+///
+/// Called on the `status {state:"session"}` envelope the worker sends *before* it
+/// replays, which is what makes a status row belong to one conversation: the gauge,
+/// the rate and the counts of the one just left would otherwise be read against the
+/// next one's. `session_id`, the provider, the model and the effort are written by
+/// that same envelope a moment later, so they are not carried across here. `mode` is,
+/// because it is the process's permission mode and no session owns it.
+///
+/// Free, rather than a method, so it can be asserted without a spawned worker.
+pub fn rehomed(snap: &mut Snapshot) {
+    let mode = std::mem::take(&mut snap.mode);
+    *snap = Snapshot::default();
+    snap.mode = mode;
+}
+
 impl Session {
     pub fn start(home: Option<&Path>, cwd: Option<&Path>) -> Result<Session, String> {
         Session::start_on(&Target::Local, home, cwd)
@@ -569,6 +586,34 @@ mod tests {
         compact_state(&mut snap, "start", 2, 100);
         compact_state(&mut snap, "done", 0, 0);
         assert_eq!(snap.state, State::Idle);
+    }
+
+    /// The next conversation's status row is its own: the figures of the one just
+    /// left go, and the permission mode, which is the worker's, stays.
+    #[test]
+    fn a_rehomed_snapshot_keeps_only_what_is_not_the_conversation() {
+        let mut snap = Snapshot {
+            state: State::Done,
+            session_id: "old".into(),
+            mode: "bypass".into(),
+            model: "old-model".into(),
+            msgs: 12,
+            turns: 3,
+            context_used: 40_000,
+            context_max: 200_000,
+            tps: 61.5,
+            error: "boom".into(),
+            peer_waiting: Some("someone".into()),
+            ..Snapshot::default()
+        };
+        rehomed(&mut snap);
+        assert_eq!(snap.mode, "bypass", "the permission mode is the worker's, not a session's");
+        assert_eq!(snap.state, State::Idle);
+        assert!(snap.session_id.is_empty());
+        assert_eq!((snap.msgs, snap.turns), (0, 0));
+        assert_eq!((snap.context_used, snap.context_max), (0, 0));
+        assert_eq!(snap.tps, 0.0);
+        assert!(snap.error.is_empty() && snap.peer_waiting.is_none());
     }
 
     #[test]

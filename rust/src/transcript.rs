@@ -385,6 +385,19 @@ pub fn describe_args(args: &Value) -> String {
 /// command is quoted instead: its own words are the most useful thing a row can
 /// carry. Bulky values are measured, never quoted.
 fn brief(result: &Value) -> String {
+    // A plan is the one result that is not a result to summarise. It is the state
+    // of the work -- which steps exist, which is being worked, what each turned up
+    // -- and a line of `current:{3} \u{b7} next:{3} \u{b7} open 4 \u{b7} summary 0/4
+    // done \u{b7} +1` is the wall a checklist replaces. So the payload travels whole
+    // and the frontend that draws a plan reads the items out of it.
+    //
+    // ponytail: it rides the row's one result string as JSON, because `Row::Tool`
+    // has no field for a value and adding one breaks the frontends' own exhaustive
+    // destructuring of the row. Give it `result_value: Option<Value>` once those
+    // change; `view::plan` is the only reader, and it parses defensively.
+    if let Some(plan) = plan(result) {
+        return plan.to_string();
+    }
     let Value::Object(map) = result else {
         return short(result);
     };
@@ -424,6 +437,20 @@ fn brief(result: &Value) -> String {
         return format!("{{{}}}", inner.len());
     }
     truncate(&parts.join(" · "), 150)
+}
+
+/// The plan inside a `todo` result, if that is what this is: the list the tool
+/// keeps, with the summary and the step it is on. Every shape else -- another
+/// tool's result, an error, the wrapper the worker puts every answer in -- is not
+/// a plan, and says so rather than being guessed at.
+fn plan(result: &Value) -> Option<&Value> {
+    let inner = match result.get("result") {
+        Some(inner @ Value::Object(_)) => inner,
+        _ => result,
+    };
+    let is_plan = inner.get("todo").is_some_and(Value::is_array)
+        && inner.get("summary").is_some_and(Value::is_string);
+    is_plan.then_some(inner)
 }
 
 /// One key of a result as a phrase. `None` means nothing worth saying.
