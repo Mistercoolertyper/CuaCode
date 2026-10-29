@@ -64,7 +64,7 @@ use cuacode::worker::Target;
 
 use keys::Action;
 use menu::{Act, Item, Kind, Menu};
-use view::{ink, Drawn, PROMPT};
+use view::{ink, Drawn};
 
 /// How long two clicks on the same row must be apart to be a fold rather than
 /// two clicks.
@@ -108,7 +108,6 @@ const RAIL_W: usize = 1;
 /// The rail's own end, at the bottom-left of the input, and the half block the surface
 /// leaves under it. The foot is not a rule: it is the shadow the composer sits on.
 const RAIL_FOOT: &str = "\u{2579}";
-const PEDESTAL: &str = "\u{2580}";
 /// The blank row above the message, so the first thing typed does not sit against the
 /// top edge of the surface. Given up in a short pane before the message is.
 const PAD_TOP: usize = 1;
@@ -121,8 +120,9 @@ const HOME_WIDTH: usize = 75;
 /// The shortest pane that still carries the title and the path.
 const HEAD_MIN: u16 = 18;
 
-/// The cells a row of the message owes before its text: the prompt glyph and the
-/// space after it. The wrap, the caret and a click all count from the same two.
+/// The cells a row of the message owes before its text. Nothing: the text starts on the
+/// rail's own inset, and a wrapped line keeps that column. It was two, which was the
+/// prompt glyph and the space after it, and the glyph is gone.
 const LEAD: usize = 2;
 
 /// What the launch asked for before the first frame.
@@ -1153,45 +1153,26 @@ impl App {
         self.log.rows.is_empty() && self.prompt.is_none() && self.opened.is_none()
     }
 
-    /// The design's header: what this is, and where. The model moved to the row
-    /// under the message, where it is read while typing rather than looked for at
-    /// the top of the screen.
-    fn header(&self) -> Vec<Line<'static>> {
-        let mut out = vec![Line::from(vec![
-            Span::styled(" Cuacode-RS", Style::new().fg(ink::text()).add_modifier(Modifier::BOLD)),
-            Span::raw("  "),
-            Span::styled(format!("v{}", version::ID), Style::new().fg(ink::faint())),
-        ])];
-        // The conversation's own directory, read off the worker's list of its own
-        // sessions: on a box that is a path on that machine, where this process's cwd
-        // is a path on this one. A conversation with no record yet is not in the list,
-        // and there the launch's directory is the honest answer.
-        let dir = self
-            .sess
-            .as_ref()
-            .and_then(|s| s.sessions.iter().find(|m| m.id == s.snap.session_id))
-            .map(|m| m.cwd.clone())
-            .unwrap_or_else(session::working_dir);
-        if !dir.is_empty() {
-            out.push(Line::from(Span::styled(format!(" {dir}"), Style::new().fg(ink::dim()))));
-        }
-        // The one thing this screen says on its own account, and only when origin
-        // has a commit the tree does not. Yellow, since it is neither a failure
-        // nor a finished thing, with the two commands that answer it beside it in
-        // the quiet tone so the fact is what is read first.
-        if let Some(n) = self.news.as_ref().and_then(|n| n.behind()) {
-            out.push(Line::from(vec![
-                Span::styled(
-                    format!(" you are behind {n} {}", if n == 1 { "update" } else { "updates" }),
-                    Style::new().fg(ink::warn()),
-                ),
-                Span::styled(
-                    "  \u{b7}  cuacode doctor, or cuacode doctor --upgrade",
-                    Style::new().fg(ink::dim()),
-                ),
-            ]));
-        }
-        out
+    /// The one thing this screen says on its own account: that origin has a commit
+    /// this tree does not. `None` every other day.
+    ///
+    /// There is no header. What one would hold is the model, which is under the field
+    /// because that is one line from the key, and the directory, which is the last row
+    /// of the frame. The build id is `--version`, not a cell. A title bar that repeats
+    /// two facts the frame already says is three rows of a forty-row screen spent on
+    /// nothing.
+    fn news(&self) -> Option<Line<'static>> {
+        let n = self.news.as_ref().and_then(|n| n.behind())?;
+        Some(Line::from(vec![
+            Span::styled(
+                format!(" you are behind {n} {}", if n == 1 { "update" } else { "updates" }),
+                Style::new().fg(ink::warn()),
+            ),
+            Span::styled(
+                "  \u{b7}  cuacode doctor, or cuacode doctor --upgrade",
+                Style::new().fg(ink::dim()),
+            ),
+        ]))
     }
 
     /// The line under the card, as three zones on one row: what the round is doing,
@@ -1297,7 +1278,9 @@ impl App {
             // The prompt is the one control on the screen, so it is drawn in the tone
             // that means "you can act on this": the accent. A continuation row owes a
             // blank of the same width and nothing else.
-            let lead = if first { format!("{PROMPT} ") } else { " ".repeat(LEAD) };
+            // No prompt glyph: the rail down the left is the mark that this is a place
+            // to type, and a second one beside it was the accent spent on a caret.
+            let lead = " ".repeat(LEAD);
             let (line, tags): (Vec<char>, Vec<u8>) = cols[rows[li].0..rows[li].1]
                 .iter()
                 .map(|(c, t)| (*c, *t))
@@ -1357,7 +1340,7 @@ impl App {
             }
             // An empty box says what it is for, the way opencode's does.
             if self.input.is_empty() && self.shots.is_empty() {
-                let said = if first { "Ask anything, or /help" } else { "" };
+                let said = if first { "Ask anything" } else { "" };
                 if !said.is_empty() {
                     // `dim`, not `quiet`: this sits on the raised surface, where the
                     // quietest rung of the page measures 2.2:1 and reads as a smudge.
@@ -3689,18 +3672,21 @@ fn draw(f: &mut Frame, app: &mut App) {
         draw_home(f, app, column);
         return;
     }
-    let head = app.header();
+    let head: Vec<Line<'static>> = app.news().into_iter().collect();
     let status = app.status_text(column.width as usize);
     // Read once and used twice: the row's highlight and the status line's are the same
     // sweep off the same clock, which is what keeps the two moving at one speed.
     let shimmer = app.shimmer();
 
-    // The frame is the header, the conversation, the composer and the status row, and
-    // what a pane cannot hold goes in this order: the status row first, then the header,
-    // then the composer's own breathing room, then the model row. The message the person
-    // is typing is the last thing to go, and one row of it is never given up.
+    // The frame is the conversation, the composer and the status row, plus the one
+    // notice this screen says on its own account. There is no header. What a pane
+    // cannot hold goes in this order: the status row first, then the composer's own
+    // breathing room, then the model row. The message the person is typing is the last
+    // thing to go, and one row of it is never given up.
     let pad = usize::from(column.width >= 44) * PAD_TOP;
-    let meta = app.composer_meta(composer_inside(column.width as usize));
+    // The meta line carries the same gutter the message does, so it is measured
+    // against that much less of the box.
+    let meta = app.composer_meta(field_room(composer_inside(column.width as usize)));
     let mut head_on = area.height >= HEAD_MIN;
     let mut status_on = status.is_some();
     let mut meta_on = meta.is_some();
@@ -4056,7 +4042,7 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 }
 
 /// The columns the message gets on a row of the composer's inside: the inside less the
-/// prompt.
+/// gutter the first row owes before its text.
 fn field_room(width: usize) -> usize {
     width.saturating_sub(LEAD).max(1)
 }
@@ -4108,7 +4094,12 @@ fn composer_rows(
     out.extend(field);
     if let Some(meta) = meta {
         out.push(Line::from(""));
-        out.push(meta);
+        // The meta line starts on the column the message does, so the model and the
+        // round's readout read as a caption under the words rather than as a second
+        // thing in the box.
+        let mut line = Line::from(Span::raw(" ".repeat(LEAD)));
+        line.spans.extend(meta.spans);
+        out.push(line);
     }
     (railed(out, width, inset), composer_foot(width))
 }
@@ -4116,13 +4107,8 @@ fn composer_rows(
 /// The row the composer ends on: the rail's foot, then the surface as a half block under
 /// the whole width. The foot is the shadow the input sits on, not a rule drawn over it.
 fn composer_foot(width: usize) -> Vec<Span<'static>> {
-    vec![
-        Span::styled(RAIL_FOOT, Style::new().fg(ink::faint())),
-        Span::styled(
-            PEDESTAL.repeat(width.saturating_sub(RAIL_W)),
-            Style::new().fg(ink::bar()),
-        ),
-    ]
+    let _ = width;
+    vec![Span::styled(RAIL_FOOT, Style::new().fg(ink::faint()))]
 }
 
 /// How far the message sits in from the rail: two cells, which is the breathing room
@@ -4155,7 +4141,9 @@ fn draw_home(f: &mut Frame, app: &mut App, column: Rect) {
     // The message grows this composer the same way it grows the session's: one row per
     // row it wraps to, up to the ceiling. The model row is there when there is something to
     // put on it, which on an opening screen means a round already in flight.
-    let meta = app.composer_meta(inside);
+    // The meta line carries the same gutter the message does, and is measured against
+    // that much less of the box.
+    let meta = app.composer_meta(field_room(inside));
     let meta_h = usize::from(meta.is_some()) * META_ROWS;
     let message_rows = app.field_height(field_room(inside)).max(1);
     let composer_h = (PAD_TOP + message_rows as usize + meta_h + FOOT_ROWS) as u16;
@@ -4164,16 +4152,10 @@ fn draw_home(f: &mut Frame, app: &mut App, column: Rect) {
     // Centred, dead on: a third of the way down left more empty page under the input
     // than above it, and the block read as something that had fallen off the top.
     let top = column.y + free / 2;
-    let mark = [
-        Line::from(Span::styled(
-            "Cuacode-RS",
-            Style::new().fg(ink::text()).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::styled("quik", Style::new().fg(ink::dim())),
-            Span::styled(format!(" {}", version::ID), Style::new().fg(ink::faint())),
-        ]),
-    ];
+    let mark = [Line::from(Span::styled(
+        "cuacode",
+        Style::new().fg(ink::text()).add_modifier(Modifier::BOLD),
+    ))];
     for (n, line) in mark.into_iter().enumerate() {
         f.render_widget(Paragraph::new(centre_in(line, width as usize)), Rect { x, y: top + n as u16, width, height: 1 });
     }
@@ -4612,36 +4594,36 @@ mod tests {
         );
     }
 
-    /// The build id and the update notice have to reach the row a person reads,
-    /// not just the struct: the header is the only place this screen says which
-    /// code it is, and the only thing it says on its own account.
+    /// The update notice has to reach the row a person reads, and it is the only line
+    /// the screen says on its own account. Nothing else is a header: the build is
+    /// `--version`, not a cell.
     #[test]
-    fn the_header_names_the_build_and_the_update() {
-        fn header(app: &App) -> String {
-            app.header()
+    fn the_update_notice_is_the_only_header() {
+        fn head(app: &App) -> String {
+            app.news()
                 .iter()
                 .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
                 .collect()
         }
         let mut app = App::new(None);
-        let quiet = header(&app);
-        assert!(quiet.contains(version::ID), "header was {quiet:?}");
-        assert!(!quiet.contains("behind"), "no news is no line: {quiet:?}");
+        let quiet = head(&app);
+        assert!(quiet.is_empty(), "no news is no line: {quiet:?}");
 
         // One update is a word, three are a number with an s on it: a screen that
         // says "1 updates" is the tell that nobody read it.
         app.news = Some(version::News::Behind(1));
-        let one = header(&app);
+        let one = head(&app);
         assert!(one.contains("behind 1 update"), "header was {one:?}");
         assert!(!one.contains("1 updates"), "header was {one:?}");
         app.news = Some(version::News::Behind(3));
-        let loud = header(&app);
+        let loud = head(&app);
         assert!(loud.contains("you are behind 3 updates"), "header was {loud:?}");
         assert!(loud.contains("cuacode doctor --upgrade"), "header was {loud:?}");
+        assert!(!loud.contains(version::ID), "a build id is not a row: {loud:?}");
 
         // A check that could not be made says nothing rather than guessing.
         app.news = Some(version::News::Unknown("no network".into()));
-        assert!(!header(&app).contains("behind"));
+        assert!(head(&app).is_empty(), "a check that could not be made says nothing");
     }
 
     /// The mark goes up where the question does and comes down on every way out
@@ -5248,11 +5230,10 @@ mod tests {
         let body = lines[2..h as usize - 2].join("\n");
         assert!(body.contains("skill"), "{body}");
         assert!(body.contains("unslop"), "{body}");
-        assert!(
-            said(&lines[h as usize - 2], w as usize).starts_with('\u{276f}'),
-            "{:?}",
-            lines[h as usize - 2]
-        );
+        // The field is left alone: what was typed is still on the row, with the
+        // caret at its end. There is no prompt glyph to look for.
+        let field = said(&lines[h as usize - 2], w as usize);
+        assert!(field.contains("$un"), "{field:?}");
 
         // And it draws in a pane with no room for it, rather than panicking.
         for (w, h) in [(30u16, 6u16), (12, 5), (4, 3)] {
@@ -5505,8 +5486,13 @@ mod tests {
         let buf = term.backend().buffer();
         let lines: Vec<String> =
             (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
-        // The message row: the words and the caret, and no figures over them.
-        let field = lines.iter().find(|l| l.contains('\u{276f}')).expect("no field line");
+        // The message row: the words and the caret, and no figures over them. It is
+        // found by what was typed, because the round's gauge is a thin bar of its own
+        // and a caret is not the only thing on the screen drawn from U+258F.
+        let field = lines
+            .iter()
+            .find(|l| l.contains(&"x".repeat(30)))
+            .expect("no field line");
         assert!(!field.contains("tok"), "the readout is on the message row: {field}");
         assert!(said(field, w as usize).trim_end().ends_with('\u{258f}'), "{field}");
         // The model row under it: the readout at the end of the line.
@@ -5598,9 +5584,9 @@ mod tests {
         term.draw(|f| draw(f, &mut app)).unwrap();
         let buf = term.backend().buffer();
         let lines: Vec<String> = (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
-        let first = lines.iter().position(|l| l.contains('\u{276f}')).expect("no field line");
-        assert!(said(&lines[first], w as usize).starts_with('\u{276f}'), "{:?}", lines[first]);
-        assert!(said(&lines[first + 1], w as usize).starts_with("  second"), "{:?}", lines[first + 1]);
+        let first = lines.iter().position(|l| l.contains("first")).expect("no field line");
+        assert!(said(&lines[first], w as usize).contains("first"), "{:?}", lines[first]);
+        assert!(said(&lines[first + 1], w as usize).contains("second"), "{:?}", lines[first + 1]);
 
         // Ten lines is more than the box will show, so the window moves to the
         // line the caret is on and the first line goes off the top of it.
@@ -5633,13 +5619,13 @@ mod tests {
         let buf = term.backend().buffer();
         let lines: Vec<String> =
             (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
-        let first = lines.iter().position(|l| l.contains('\u{276f}')).expect("no field line");
+        let first = lines.iter().position(|l| l.contains("alpha")).expect("no field line");
         let field: Vec<&String> = lines[first..first + 3].iter().collect();
-        // The prompt is on the first row and the continuations are not, and each
-        // one starts with a word rather than with half of one.
-        assert!(said(field[0], 30).starts_with('\u{276f}'), "{:?}", field[0]);
-        assert!(said(field[1], 30).starts_with("  "), "{:?}", field[1]);
-        assert!(said(field[2], 30).starts_with("  "), "{:?}", field[2]);
+        // Every row of the message starts on the one column. There is no prompt glyph
+        // for the first row to hang off, so a continuation is not indented past it.
+        let column = |l: &String| l.chars().position(|c| c != '\u{2503}' && c != ' ').unwrap_or(0);
+        assert_eq!(column(field[0]), column(field[1]), "{field:?}");
+        assert_eq!(column(field[0]), column(field[2]), "{field:?}");
         // Everything typed is on the screen, word for word: wrapping is not
         // clipping, and it is not cutting a word at the edge either.
         let shown = field.iter().map(|l| l.trim_end()).collect::<Vec<_>>().join(" ");
@@ -5673,7 +5659,7 @@ mod tests {
             .iter()
             .filter(|l| {
                 let l = l.trim_start_matches('\u{2503}');
-                l.starts_with("  ") || l.starts_with('\u{276f}')
+                l.starts_with("  ")
             })
             .collect();
         // The label is on one row and undivided, wherever the wrap fell.
@@ -5704,7 +5690,7 @@ mod tests {
         // bar is at its end.
         // The caret is drawn, it is inside the composer, and it is on the last of the
         // message's rows: the window followed it and the foot is the row under it.
-        let caret = lines.iter().position(|l| l.contains('\u{258f}')).expect("no caret row");
+        let caret = lines.iter().position(|l| l.contains('\u{258f}')).unwrap_or_else(|| panic!("no caret row in {lines:#?}"));
         assert!(lines[caret].starts_with('\u{2503}'), "the caret is not in the composer: {:?}", lines[caret]);
         assert!(lines[caret + 1].starts_with('\u{2579}'), "the caret is not on the last row: {:?}", lines[caret + 1]);
     }

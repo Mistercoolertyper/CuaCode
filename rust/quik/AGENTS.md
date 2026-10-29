@@ -34,11 +34,13 @@ Nine rules. A change that breaks one is reverted, not argued with.
 3. **Nothing on screen is an instrument reading.** `content:26B`, `v142.a0e3f78`,
    `4.2k tok`, a byte count under a call, a commit hash in the header. If the
    reader cannot act on it and it is not the conversation, it is a measurement of
-   the program, and it belongs in a log.
-4. **The header is not a title bar.** One dim line, and it carries what you would
-   otherwise leave the screen to find out: which session, which model, which box.
-   Not the product name, not the version, not the working directory unless it
-   changed. It goes away first when the pane is short.
+   the program, and it belongs in a log. A result that is only a body says nothing
+   at all: `read(path)` already said what was read.
+4. **There is no header.** What a title bar would hold is already on the screen
+   twice over: the model is under the field, one line from the key that sends to
+   it, and the directory is the last row of the frame. The build id is `--version`.
+   The one line that may appear above the conversation is the update notice, and
+   only on the day origin has a commit this tree does not.
 5. **One glyph family.** See below. Three glyph families in one frame is why the
    type looks wrong even when the font is right.
 6. **Three levels of ink, not seven.** Text, quiet, and the one live thing in
@@ -65,7 +67,7 @@ One shape per `Row`, and nothing draws a row another way.
 | Row | Shape |
 | --- | --- |
 | `User` | the only surfaced block: rail at the left, `bar` behind it, the text on it, no lead mark |
-| `Content` | unmarked prose at the body column. This is the baseline the rest is read against |
+| `Content` | unmarked prose at the body column, a blank line above it and none below. That one line is what says a run has finished |
 | `Thinking` | one quiet line, the mark only while it is being written, the text dim, folded to its head when the step is closed |
 | `Tool` | mark, `name(arg)` in one line, result folded under it only when opened. No byte counts, no durations |
 | `Notice` | the head only, quiet, no mark. A payload is for the model |
@@ -163,16 +165,16 @@ Measured on 2026-10-29, before the rules above existed.
 
 | Thing | Now | Rule |
 | --- | --- | --- |
-| `main.rs` | 6383 | 1500, and a commit touching it comes out net negative |
-| `view.rs` | 4871 | 1800, same |
+| `main.rs` | 6368 | 1500, and a commit touching it comes out net negative |
+| `view.rs` | 4881 | 1800, same |
 | `App` fields | 42 | a new field names the one it replaces |
 | `impl App` | 2437 lines, 91 methods | it draws, it keys, it feeds and it performs. Split |
 | `draw` | 253 lines | 80. It is four functions: frame, composer, menu, panel |
 | `key` | 245 lines | 80, after `keys.rs` is the table |
 | `view::step` | 297 lines, 11 parameters | 80, and 6 parameters. This is the fold, and it is the one thing that must be readable |
 | `feed`, `perform`, `has_choices` | 162, 161, 163 | 80 |
-| rows in a 24-row frame | 6 | 18 |
-| glyph families | 3 | 1 |
+| rows in a 24-row frame | 22 of 30 non-blank, from 6 | 22 of 30 |
+| glyph families | 1, box drawing and ASCII only | 1 |
 
 ## Traps
 

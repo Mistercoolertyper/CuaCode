@@ -186,7 +186,6 @@ fn thought_style() -> Style {
 /// a character that cannot be mistaken for one.
 const DOT: &str = "\u{25cf}";
 const TICK: &str = "\u{2713}";
-const CROSS: &str = "\u{2717}";
 /// The checklist's own three marks: the step being worked, one not started, and one
 /// crossed out of the plan. Nothing else on the page draws them. The tick above is a
 /// call's own and a finished step's is the same word as this one, so it is shared
@@ -198,14 +197,12 @@ const GONE: &str = "\u{2500}";
 /// row's colour and stays in the glyph column, and unlike a tick or a cross it says
 /// nothing about whether anything worked. U+2726 over the smiling face it started as:
 /// a face is an emoji in a column of dots, and this reads as a mark.
-const BUDDY: &str = "\u{2726}";
-pub const PROMPT: &str = "\u{276f}";
 const HEAD_LEAD: &str = "\u{25cf} ";
 /// It opens up and to the right, so the stroke points back at the head it
 /// dropped from and the arm runs into the text beside it. U+250C is the same
 /// corner the other way up, and reads as the detail having fallen off the
 /// bottom of the head.
-const BODY_LEAD: &str = "  \u{2514} ";
+const BODY_LEAD: &str = "    ";
 /// An opened step's detail. Four columns, which is where a call's own text starts
 /// (`  \u{25cf} `), so a thought and the calls under it share one left edge and the
 /// single corner above them stays the summary's mark alone.
@@ -239,6 +236,9 @@ const SPINNER: [&str; 10] = [
 /// colours down a column is four things to tell apart from memory.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mark {
+    /// No mark: most rows. The room is still kept, so the text of a plain row and the
+    /// text of a marked one start in the same column.
+    None,
     Dot,
     Tick,
     Cross,
@@ -248,15 +248,26 @@ enum Mark {
 }
 
 impl Mark {
-    fn glyph(self) -> &'static str {
+    /// The lead a row draws before its text, columns and all.
+    ///
+    /// A mark is a state, so a row whose state never changes draws none. A dot on every
+    /// row is a bullet list, and the eye learns to skip the column in a frame, which
+    /// means the one row that needed it is skipped too. Failure, a peer and a finished
+    /// thought keep theirs; everything else is air.
+    fn lead(self) -> &'static str {
         match self {
-            Mark::Dot => DOT,
-            Mark::Tick => TICK,
-            Mark::Cross => CROSS,
-            Mark::Buddy => BUDDY,
+            Mark::None => "  ",
+            Mark::Dot => "\u{25cf} ",
+            Mark::Tick => "\u{2713} ",
+            Mark::Cross => "\u{2717} ",
+            Mark::Buddy => "\u{2726} ",
         }
     }
 }
+
+/// The lead a failed row draws: the one state that stays visible when a step is
+/// folded, which is the whole reason it keeps a mark.
+const FAILED_LEAD: &str = "\u{2717} ";
 
 /// What the worker last said about a round's thinking.
 ///
@@ -283,14 +294,12 @@ pub type Run = (String, Style);
 pub struct Piece {
     pub lead: String,
     pub lead_style: Style,
-    /// Whether a blank line sits above this piece, below it, or both. Two flags
-    /// rather than one, because a row showing its detail wants air around the row
-    /// and not inside it: the gap belongs above the head and after the last line
-    /// of the detail, never between the head and the detail the corner joins it
-    /// to.
+    /// Whether a blank line sits above this piece, below it, or both.
     ///
-    /// A row that is only a step sits close to the one above it, which is what
-    /// makes a run of calls read as one list and an answer read as its own thing.
+    /// One row claims air and it is the line you typed: a turn opens with a blank
+    /// line and nothing inside it has one. Thoughts, calls, results and the answer
+    /// that ends them are one block read straight down, because air between them was
+    /// what made six rows fill a screen of twenty-four.
     air_above: bool,
     air_below: bool,
     /// One entry per line the text itself had, so a thought's paragraphs stay
@@ -304,10 +313,7 @@ pub struct Piece {
 
 impl Piece {
     /// Say where this piece is given room: a blank line above it, below it, or
-    /// both. The answer is what the run was for rather than a step through it, so
-    /// it gets both. A row showing its detail gets air above its head and below
-    /// its detail, which keeps a run of heads tight while the detail hangs
-    /// straight off the head it belongs to.
+    /// both.
     fn air(mut self, above: bool, below: bool) -> Piece {
         self.air_above = above;
         self.air_below = below;
@@ -711,7 +717,7 @@ pub fn pieces(
                 let mut piece = plain(
                     "\u{2503} ",
                     Style::new().fg(ink::faint()).bg(ink::bar()),
-                    &format!("{PROMPT} {text}"),
+                    &text,
                     Style::new().fg(ink::text()).bg(ink::bar()),
                 );
                 piece.rail = true;
@@ -731,7 +737,7 @@ pub fn pieces(
                 // under it like a call's result, so a long message collapses to its head
                 // and opens on a press.
                 let shown = expanded(i, row);
-                out.push(Held { row: i, head: i, piece: led(Mark::Buddy, ink::peer(), ink::peer(), head).air(shown, false) });
+                out.push(Held { row: i, head: i, piece: led(Mark::Buddy, ink::peer(), ink::peer(), head) });
                 if shown && !text.trim().is_empty() {
                     let room = width.saturating_sub(columns(BODY_LEAD)).max(1);
                     // A message that just landed is swept once, and a round that is still
@@ -772,15 +778,16 @@ pub fn pieces(
                 ) });
             }
             // The answer is the model's own text, so it is the one head that is
-            // read as markdown. Its dot is white whatever else is true: this is
-            // what the run was for, and the one row that is not a step towards it.
+            // read as markdown, in the bright tone and at the page column. It gets a
+            // blank line above it and none below: that one line is what says a run has
+            // finished, and it is cheaper than a mark on every row above it.
             Row::Content { text, .. } => out.push(Held { row: i, head: i, piece: led_prose(
-                Mark::Dot,
+                Mark::None,
                 ink::text(),
                 ink::text(),
                 text,
                 width.saturating_sub(columns(HEAD_LEAD)).max(1),
-            ).air(true, true) }),
+            ).air(true, false) }),
             Row::Error(text) => out.push(Held { row: i, head: i, piece: led(Mark::Cross, ink::failed(), ink::failed(), text) }),
             // Thought and call rows never reach here: `clusters` has already put
             // them in a step, and `step` draws the lot.
@@ -940,7 +947,11 @@ fn step(
     out.push(Held {
         row: head,
         head,
-        piece: led_runs(format!("{DOT} "), Style::new().fg(lead), said).air(true, false),
+        piece: led_runs(
+            if failed_any { FAILED_LEAD.to_string() } else { "  ".to_string() },
+            Style::new().fg(lead),
+            said,
+        ),
     });
 
     // The plan, in its own words, straight under the head it belongs to: how far along
@@ -1548,7 +1559,7 @@ pub fn foldable(row: &Row) -> bool {
 /// colours down a column is four things to tell apart from memory.
 fn led(mark: Mark, colour: Color, lead: Color, text: &str) -> Piece {
     plain(
-        format!("{} ", mark.glyph()),
+        mark.lead(),
         Style::new().fg(lead),
         text,
         Style::new().fg(colour),
@@ -1571,7 +1582,7 @@ fn led_runs(lead: String, lead_style: Style, runs: Vec<Run>) -> Piece {
 /// A head line whose text is the model's own, drawn as the markdown it is.
 fn led_prose(mark: Mark, colour: Color, lead: Color, text: &str, room: usize) -> Piece {
     prose(
-        format!("{} ", mark.glyph()),
+        mark.lead(),
         Style::new().fg(lead),
         text,
         Style::new().fg(colour),
@@ -2265,7 +2276,7 @@ pub fn call_lead(
         said.push((")".to_string(), Style::new().fg(colour)));
     }
     (
-        format!("{} ", call_state(result).glyph()),
+        format!("{}", call_state(result).lead()),
         Style::new().fg(mark_ink),
         said,
     )
@@ -2280,7 +2291,7 @@ pub fn call_ink(result: Option<&str>) -> Color {
         Mark::Cross => ink::failed(),
         // A call never reports as a peer: the buddy mark belongs to the peer row, and
         // this arm is here so the two marks cannot be confused for each other.
-        Mark::Dot | Mark::Buddy => ink::quiet(),
+        Mark::Dot | Mark::Buddy | Mark::None => ink::quiet(),
     }
 }
 
@@ -3448,7 +3459,7 @@ mod tests {
             r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"file","result":{"result":{"created":true,"path":"/tmp/x","written":7977}}}}"#,
         ]);
         let after = pieces_at(&call, &all_open(), &no_figures(), None, true);
-        assert_eq!(after[0].lead, "\u{25cf} ");
+        assert_eq!(after[0].lead, "  ", "a row whose state does not change draws no mark");
         assert_eq!(after[0].text(), "write(~/…/notebook/SESSION_BREAKDOWN.md)");
         // The way there is fainter than the file, and the file is the row's own
         // colour: what a person is looking for in a list of files is the file.
@@ -4649,7 +4660,7 @@ mod tests {
             screen,
             // One call, still running: nothing to say under the head yet, and
             // the call itself is the line under it.
-            vec!["\u{25cf} one two", "  \u{25cf} shell(date)"]
+            vec!["  one two", "  \u{25cf} shell(date)"]
         );
     }
 
@@ -4719,13 +4730,12 @@ mod tests {
         assert_eq!(
             screen,
             vec![
-                "\u{25cf} shell(date)",
-                "  \u{2514} stdout:7B \u{b7} +1",
+                "  shell(date)",
+                "    stdout:7B \u{b7} +1",
                 "",
-                "\u{25cf} it is Friday",
-                "",
-                "\u{25cf} shell(ls)",
-                "  \u{2514} stdout:10B \u{b7} +1",
+                "  it is Friday",
+                "  shell(ls)",
+                "    stdout:10B \u{b7} +1",
             ]
         );
 
@@ -4742,7 +4752,7 @@ mod tests {
             40,
         );
         let screen: Vec<String> = drawn.lines.iter().map(Line::to_string).collect();
-        assert_eq!(screen, vec!["\u{25cf} shell \u{d7}2"]);
+        assert_eq!(screen, vec!["  shell \u{d7}2"]);
     }
 
     #[test]
@@ -4813,9 +4823,9 @@ mod tests {
         assert_eq!(
             screen,
             vec![
-                "\u{25cf} porting the composer",
-                "  \u{2514} 1/2 done \u{b7} port the composer",
-                "  \u{2514} lines 1",
+                "  porting the composer",
+                "    1/2 done \u{b7} port the composer",
+                "    lines 1",
             ]
         );
         // The plan's own summary is the tone the eye lands on, and the step it is on
@@ -4838,8 +4848,8 @@ mod tests {
         assert_eq!(
             screen,
             vec![
-                "\u{25cf} porting the composer",
-                "  \u{2514} 2/5 done \u{b7} port the composer",
+                "  porting the composer",
+                "    2/5 done \u{b7} port the composer",
                 "  \u{2713}  1  read the tool",
                 "  \u{2713}  2  check the wrap",
                 "  \u{25b8}  3  port the composer",

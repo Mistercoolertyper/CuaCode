@@ -421,6 +421,12 @@ fn brief(result: &Value) -> String {
     let mut parts = Vec::new();
     let mut skipped = 0;
     for (k, v) in inner {
+        // What came back is the call's own name: a read says the file it read, not how
+        // much there was of it, and `content:26B` under a read is a measurement of the
+        // program rather than of the work.
+        if k == "content" {
+            continue;
+        }
         if parts.len() == 4 {
             skipped += 1;
             continue;
@@ -433,9 +439,9 @@ fn brief(result: &Value) -> String {
     if skipped > 0 {
         parts.push(format!("+{skipped}"));
     }
-    if parts.is_empty() {
-        return format!("{{{}}}", inner.len());
-    }
+    // A result with nothing worth saying says nothing. The row above it already names
+    // the call, and a count of its own fields was the shape of the payload, not of the
+    // work.
     truncate(&parts.join(" · "), 150)
 }
 
@@ -692,6 +698,18 @@ mod tests {
         let Row::Tool { result: Some(r), .. } = &t.rows[0] else { panic!("no result") };
         assert!(r.contains("stdout:14B"), "{r}");
         assert!(!r.contains("line"), "the body must not reach a row: {r}");
+    }
+
+    /// A read says the file it read. The body that came back is the call's own name, so
+    /// a result that is only a body says nothing at all rather than how many bytes it
+    /// was: `content:26B` under a read is a measurement of the program.
+    #[test]
+    fn a_result_that_is_only_a_body_says_nothing() {
+        let mut t = Transcript::default();
+        t.apply(&ev(r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"read","args":{"path":"a.py"}}]}}"#));
+        t.apply(&ev(r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"read","result":{"content":"print(1)\nprint(2)\n"}}}"#));
+        let Row::Tool { result: Some(r), .. } = &t.rows[0] else { panic!("no result") };
+        assert!(r.is_empty(), "a body is not news: {r:?}");
     }
 
     #[test]
