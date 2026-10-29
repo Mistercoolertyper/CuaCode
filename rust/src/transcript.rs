@@ -419,7 +419,6 @@ fn brief(result: &Value) -> String {
         }
     }
     let mut parts = Vec::new();
-    let mut skipped = 0;
     for (k, v) in inner {
         // What came back is the call's own name: a read says the file it read, not how
         // much there was of it, and `content:26B` under a read is a measurement of the
@@ -428,16 +427,11 @@ fn brief(result: &Value) -> String {
             continue;
         }
         if parts.len() == 4 {
-            skipped += 1;
-            continue;
+            break;
         }
-        match phrase(k, v) {
-            Some(t) => parts.push(t),
-            None => skipped += 1,
+        if let Some(t) = phrase(k, v) {
+            parts.push(t);
         }
-    }
-    if skipped > 0 {
-        parts.push(format!("+{skipped}"));
     }
     // A result with nothing worth saying says nothing. The row above it already names
     // the call, and a count of its own fields was the shape of the payload, not of the

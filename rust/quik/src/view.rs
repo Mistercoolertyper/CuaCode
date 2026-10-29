@@ -980,37 +980,30 @@ fn step(
     // and lets the individual rounds keep their own rates in the panel. A count and
     // a rate are meta, so they are `faint`; what the calls were is the row's tail
     // and is `quiet`, one rung further from the head it hangs under.
-    if let Some(round) = rounds(think, earlier, figures).filter(|r| r.tokens > 0 || r.tps > 0.0) {
-        said(reasoning(round), ink::faint(), &mut meta);
-    }
-    // One call says what came back, which is the mock's own call box and the row
-    // this screen had before it had steps: a head, and the line under it. It is
-    // also the only way a failure says *what* failed without opening anything.
-    // A run of calls cannot say all their results on one line, so it says what it
-    // ran instead.
-    if counted.len() == 1 && !(open && think.is_some()) {
-        if let Row::Tool { args, result: Some(r), .. } = &rows[counted[0]] {
-            if !r.is_empty() {
-                let ink = if failed(r) { ink::failed() } else { ink::quiet() };
-                said(call_result(args, r), ink, &mut meta);
-            }
-        }
-    }
-    // A failure is the one thing on this line that is worth reading collapsed: a
-    // red dot says something went wrong and this says what. One call says its own
-    // result; a run of them says how much of it failed.
+    // What the step did, and nothing about what it cost. A single call is already
+    // named by the head above, so it says nothing here: `shell(date)` needs no line
+    // under it repeating that it took 0.3s and wrote 29 bytes. A run of them says how
+    // many and which, because that is the one line that says whether to open it.
     let broken: Vec<usize> = counted
         .iter()
         .copied()
         .filter(|&c| matches!(&rows[c], Row::Tool { result: Some(r), .. } if failed(r)))
         .collect();
-    if counted.len() > 1 && think.is_some() {
-        said(ran(&counted, rows), ink::quiet(), &mut meta);
-    }
-    // One call said its own failure above, or says it on its own line when the
-    // step is opened. A run of them cannot, so it says how much of it broke.
-    if !broken.is_empty() && counted.len() > 1 {
-        said(format!("{} of {} failed", broken.len(), counted.len()), ink::failed(), &mut meta);
+    if counted.len() > 1 {
+        // A step with no thought is named by the tally already, and saying it twice on
+        // two lines is the noise this line exists without.
+        if think.is_some() {
+            said(ran(&counted, rows), ink::quiet(), &mut meta);
+        }
+        if !broken.is_empty() {
+            said(format!("{} of {} failed", broken.len(), counted.len()), ink::failed(), &mut meta);
+        }
+    } else if let Some(&c) = broken.first() {
+        // A failure is the one thing worth reading collapsed: the mark says something
+        // went wrong and this says what.
+        if let Row::Tool { args, result: Some(r), .. } = &rows[c] {
+            said(call_result(args, r), ink::failed(), &mut meta);
+        }
     }
     if !meta.is_empty() {
         out.push(Held {
@@ -1132,35 +1125,6 @@ pub fn step_start(rows: &[Row], at: usize) -> usize {
         }
     }
     i
-}
-
-/// What a step's rounds cost, as one figure: the tokens summed, and a rate only
-/// when there is one round to have one.
-fn rounds(
-    think: Option<usize>,
-    earlier: &[usize],
-    figures: &dyn Fn(usize) -> Option<Round>,
-) -> Option<Round> {
-    let mut all: Vec<Round> = earlier.iter().filter_map(|&t| figures(t)).collect();
-    let last = think.and_then(|t| figures(t));
-    let last_tps = last.map(|r| r.tps).unwrap_or(0.0);
-    let last_est = last.map(|r| r.estimated).unwrap_or(false);
-    all.extend(last);
-    if all.is_empty() {
-        return None;
-    }
-    // The rate of a step with several rounds is the rate of all of it: the tokens
-    // of the rounds that timed themselves, over the time they took. Summing their
-    // rates would be a number about nothing; leaving the rate out for every merged
-    // step meant it never showed at all, because most steps merge.
-    let timed: Vec<Round> = all.iter().copied().filter(|r| r.tps > 0.0 && r.tokens > 0).collect();
-    let seconds: f64 = timed.iter().map(|r| r.tokens as f64 / r.tps).sum();
-    let tokens: i64 = timed.iter().map(|r| r.tokens).sum();
-    Some(Round {
-        tokens: all.iter().map(|r| r.tokens).sum(),
-        tps: if seconds > 0.0 { tokens as f64 / seconds } else { last_tps },
-        estimated: all.iter().any(|r| r.estimated) || last_est,
-    })
 }
 
 /// A thought with its text folded away, as an opened step draws it: the rail and a
@@ -2659,26 +2623,6 @@ pub(crate) fn clip(text: &str, most: usize) -> String {
     format!("{head}\u{2026}")
 }
 
-/// The reasoning row's own readout, as the design draws it: the round's thinking
-/// tokens and rate, quoted from the worker and nowhere else. A round that has not
-/// reported either says just "Reasoning".
-fn reasoning(round: Round) -> String {
-    if round.tokens <= 0 && round.tps <= 0.0 {
-        return "Reasoning".to_string();
-    }
-    let mut out = String::from("Reasoning | ");
-    if round.tokens > 0 {
-        out.push_str(&format!("{} tokens", tokens(round.tokens, round.estimated)));
-        if round.tps > 0.0 {
-            out.push_str(", ");
-        }
-    }
-    if round.tps > 0.0 {
-        out.push_str(&format!("{:.0} tok/s", round.tps));
-    }
-    out.trim_end().to_string()
-}
-
 /// A call in full, as the worker keeps it: the arguments and the result, past the
 /// summary a row carries.
 ///
@@ -3479,9 +3423,9 @@ mod tests {
                 (")".to_string(), Style::new().fg(ink::text())),
             ]
         );
-        // The path is said once. The head has it; the summary under the head does
-        // not repeat it, and keeps everything else it was told.
-        assert_eq!(after[1].text(), "created \u{b7} written 7977");
+        // The path is said once, and there is no row under the head repeating that the
+        // file was created and how many bytes went into it.
+        assert_eq!(after.len(), 1, "{:?}", after.iter().map(|p| p.text()).collect::<Vec<_>>());
     }
 
     /// The verb is what says a row is something that ran, so it is the one word on
@@ -3670,12 +3614,12 @@ mod tests {
         );
     }
 
-    /// A call's row is its head and what came back, and nothing else: the input
-    /// the head had no room for -- a file's content -- is the panel's, so the row
-    /// is not a second copy of the call. A call that has not reported yet is only
-    /// its head.
+    /// A call's row is its head. What came back is the panel's, opened on a press: a
+    /// second line under every call saying `created · written 268` is one line of a
+    /// twelve-column box spent repeating what the head already named. The input the
+    /// head had no room for is the panel's too.
     #[test]
-    fn a_call_shows_what_came_back_and_not_its_input() {
+    fn a_call_is_its_head_and_what_came_back_is_the_panel() {
         let write = rows(&[
             r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"file","args":{"action":"write","path":"a.py","content":"one\ntwo"}}]}}"#,
             r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"file","result":{"result":{"created":true,"written":268}}}}"#,
@@ -3683,13 +3627,11 @@ mod tests {
         let open = pieces_at(&write, &all_open(), &no_figures(), None, true);
         assert_eq!(
             open.len(),
-            2,
-            "the head and the result: {:?}",
+            1,
+            "one line, and no result under it: {:?}",
             open.iter().map(|p| p.text()).collect::<Vec<_>>()
         );
         assert_eq!(open[0].text(), "write(a.py)");
-        assert_eq!(open[1].lead, BODY_LEAD);
-        assert_eq!(open[1].text(), "created \u{b7} written 268");
         // The input is nowhere on the row: no code block, no `content`.
         let all: String = open.iter().map(|p| p.text()).collect::<Vec<_>>().join("\n");
         assert!(
@@ -3707,20 +3649,18 @@ mod tests {
         );
     }
 
-    /// The short result is on the row whatever ctrl-t is doing: a column of calls
-    /// with nothing said about their results is a list you open one line at a time
-    /// to read, and the fold is for thoughts.
+    /// The fold is for thoughts, not for calls: whether the thought above it is open or
+    /// shut, a call is the one line that names it. What came back is the panel's.
     #[test]
-    fn a_call_shows_its_result_whether_the_thoughts_are_folded_or_not() {
+    fn a_call_is_one_line_whether_the_thoughts_are_folded_or_not() {
         let call = rows(&[
             r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"shell","args":{"command":"date"}}]}}"#,
             r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"shell","result":{"result":{"exit_code":0,"stdout":"Friday\n"}}}}"#,
         ]);
         let folded = |_: usize, _: &Row| false;
         let shut = pieces_at(&call, &folded, &no_figures(), None, true);
-        assert_eq!(shut.len(), 2);
+        assert_eq!(shut.len(), 1, "{:?}", shut.iter().map(|p| p.text()).collect::<Vec<_>>());
         assert_eq!(shut[0].text(), "shell(date)");
-        assert_eq!(shut[1].text(), "stdout:7B \u{b7} +1");
     }
 
     /// The block is a real one: the title on its edge, the code inside it with an
@@ -4054,7 +3994,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reasoning_row_keeps_its_figures() {
+    fn the_figures_are_the_panels_and_not_the_rows() {
         let thought =
             rows(&[r#"{"type":"token","id":"a","data":{"state":"thinking","token":"hm"}}"#]);
         let mine = |i: usize| {
@@ -4064,28 +4004,25 @@ mod tests {
                 estimated: true,
             })
         };
-        // The head is the thought's own name; the figures hang under it, on the
-        // one line this screen gives a step.
+        // The row is the thought's own name, live or settled. What the round cost is
+        // not on it: a step is one line, and a rate under every thought made the
+        // transcript a table of measurements.
         let live = pieces_at(&thought, &all_open(), &mine, Some(0), true);
+        assert_eq!(live.len(), 1, "{:?}", live.iter().map(|p| p.text()).collect::<Vec<_>>());
         assert_eq!(live[0].text(), "hm");
-        assert_eq!(live[1].text(), "Reasoning | ~2.0k tokens, 351 tok/s");
         assert_eq!(live[0].lead_style.fg, Some(ink::text()));
-        // The round is over. The dot stops being live and the figures stay: they
-        // are what that round cost, not what is happening now.
         let after = pieces_at(&thought, &all_open(), &mine, None, true);
-        assert_eq!(after[1].text(), "Reasoning | ~2.0k tokens, 351 tok/s");
-        assert_eq!(after[0].lead_style.fg, Some(ink::done()));
-        // A thought with nothing filed is its name and no second line at all.
+        assert_eq!(after[0].text(), "hm");
+        // And a round that filed no figures is the same one line, not a line saying zero.
         let bare = pieces_at(&thought, &all_open(), &no_figures(), Some(0), true);
         assert_eq!(bare.len(), 1);
         assert_eq!(bare[0].text(), "hm");
     }
 
-    /// A merged step's rate is the rate of all of it: tokens over the time they
-    /// took. Summing the rounds' own rates would say a step that spent two seconds
-    /// at 50 and three at 100 was doing 150 a second.
+    /// A merged step is one line saying what it ran and how many of them. The rate it
+    /// went at belongs to the rounds, and the rounds are the panel's.
     #[test]
-    fn a_merged_step_reports_its_whole_rate() {
+    fn a_merged_step_counts_what_it_ran() {
         let stream = rows(&[
             r#"{"type":"token","id":"a","data":{"state":"thinking","token":"first"}}"#,
             r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"shell","args":{"command":"ls"}}]}}"#,
@@ -4101,7 +4038,7 @@ mod tests {
             _ => None,
         };
         let ps = pieces_at(&stream, &|_: usize, _: &Row| false, &mine, None, true);
-        assert_eq!(ps[1].text(), "Reasoning | 400 tokens, 80 tok/s  \u{b7}  Ran shell \u{d7}2");
+        assert_eq!(ps[1].text(), "Ran shell \u{d7}2");
     }
 
     /// The thought under a reasoning row is set apart from the answer, and by two
@@ -4731,11 +4668,9 @@ mod tests {
             screen,
             vec![
                 "  shell(date)",
-                "    stdout:7B \u{b7} +1",
                 "",
                 "  it is Friday",
                 "  shell(ls)",
-                "    stdout:10B \u{b7} +1",
             ]
         );
 
@@ -4825,7 +4760,6 @@ mod tests {
             vec![
                 "  porting the composer",
                 "    1/2 done \u{b7} port the composer",
-                "    lines 1",
             ]
         );
         // The plan's own summary is the tone the eye lands on, and the step it is on

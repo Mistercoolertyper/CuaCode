@@ -87,15 +87,20 @@ When the pane cannot hold all four, they go in this order: the status row, then 
 header, then the composer's padding, then the metadata under the message. The
 message being typed and one row of it are never given up.
 
-The composer is one block: a `PAD_TOP` row of air, a heavy rail down the left
-ending in a foot, the message inside on the raised surface, the metadata under the
-message. The `▀` pedestal under the rail is the heaviest mark in the frame and
-means nothing: it goes, and so does the `❯` before the field, because the rail is
-already the mark.
+The composer is one block: a heavy rail down the left, the message on the raised
+surface one cell inside it, and one line under the message carrying who will answer
+it, how full the window is, and what the round is doing. No air row inside it, no
+foot under it, no `▀` pedestal and no `❯` before the field: the rail is the mark, and
+every one of those was a row or a glyph saying it again.
 
-A menu draws over the tail of the conversation, above the field. A permission or a
-question is a panel above the field with a scroll of its own. Both are as wide as
-their content.
+There is no status row. What it used to count lives on the composer's own meta line,
+and the one key it ever needed to say, `esc stop`, rides there too and only while a
+round is in flight.
+
+A menu is rows and nothing else: no border, no title on the edge, no footer of keys.
+It draws over the tail of the conversation, above the field, as wide as its widest
+row, and the row under the cursor is the one with a rail beside it. A permission or a
+question is a panel above the field with a scroll of its own.
 
 ## Glyphs, and the font
 
@@ -144,8 +149,12 @@ an indent, and a second copy of either is the bug.
    a fold did, `--keys` when a binding did. A claim about the screen that has no
    frame under it is a guess.
 3. **A test for the fold, not for the pixels.** The row model has tests. The frame
-   has a fixture. Nothing asserts a string that a person is meant to read, because
-   that test fails on the next copy edit and teaches nobody anything.
+   has the chrome harness instead:
+   `cargo test -p cuacode-quik -- --ignored --nocapture show_the_chrome` prints the
+   home screen, a conversation, the `/` menu and a typed message as they are laid
+   out. Look at it before changing a frame and at the new one after. Nothing asserts
+   a string a person is meant to read: that test fails on the next copy edit and
+   teaches nobody anything.
 4. **`cargo test --workspace` before the commit.** Not `cargo test`: it tests the
    root package and skips the frontends.
 5. **A change that needs three files and a new field is a design problem.** Stop

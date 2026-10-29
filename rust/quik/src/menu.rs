@@ -856,8 +856,10 @@ impl Menu {
             // ember's one hue means "you can act on this", and the row the enter
             // key is about is the one thing here you can act on.
             let tone = if selected { ink::call() } else { ink::quiet() };
+            // The selected row is the only one with a rail beside it, which is the same
+            // mark the composer uses for "this is yours".
             let mut spans = vec![Span::styled(
-                if selected { "\u{203a} " } else { "  " },
+                if selected { "\u{2503} " } else { "  " },
                 Style::new().fg(tone),
             )];
             spans.extend(runs);
@@ -868,12 +870,9 @@ impl Menu {
             spans.push(Span::styled(hint, Style::new().fg(item.hint_ink.unwrap_or_else(ink::quiet))));
             out.push(Line::from(spans));
         }
-        // The one line saying what the keys do. The palette is not drawn here and
-        // has none: its keys are in the plate's own chrome.
-        out.push(Line::from(Span::styled(
-            "\u{2191}\u{2193} choose  \u{b7}  enter select  \u{b7}  esc cancel",
-            Style::new().fg(ink::faint()),
-        )));
+        // No line saying what the keys do. Arrow keys and enter are the thing every list
+        // in every terminal has done since before either of us was born, and a row of
+        // three hints under nine rows of commands is chrome that has to be read past.
         out
     }
 }
@@ -1274,13 +1273,16 @@ mod tests {
         let mut menu = Menu::open(Kind::Commands, 0);
         menu.fill(named(&["row"; 30]));
         let lines = menu.lines(40);
-        assert_eq!(lines.len(), ROWS + 1);
+        assert_eq!(lines.len(), ROWS, "no footer, so the window is the rows");
         for _ in 0..20 {
             menu.move_sel(1);
         }
         assert_eq!(menu.sel, 20);
-        assert_eq!(menu.lines(40).len(), ROWS + 1);
+        assert_eq!(menu.lines(40).len(), ROWS);
         // The row under the cursor is in the window, not scrolled off it.
-        assert!(menu.lines(40).iter().any(|l| l.to_string().contains('\u{203a}')));
+        assert!(
+            menu.lines(40).iter().any(|l| l.to_string().starts_with('\u{2503}')),
+            "the row under the cursor is not marked"
+        );
     }
 }

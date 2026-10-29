@@ -2708,7 +2708,7 @@ mod tests {
         let shut = pieces_at(&call, &folded, &no_figures(), None, true);
         assert_eq!(shut.len(), 2);
         assert_eq!(shut[0].text(), "shell(date)");
-        assert_eq!(shut[1].text(), "stdout:7B \u{b7} +1");
+        assert_eq!(shut[1].text(), "stdout:7B", "a result counts nothing it left out");
     }
 
     /// The block is a real one: the title on its edge, the code inside it with an
@@ -3445,12 +3445,12 @@ mod tests {
             screen,
             vec![
                 "\u{2713} shell(date)",
-                "\u{2514} stdout:7B \u{b7} +1",
+                "\u{2514} stdout:7B",
                 "",
                 "\u{25cf} it is Friday",
                 "",
                 "\u{2713} shell(ls)",
-                "\u{2514} stdout:10B \u{b7} +1",
+                "\u{2514} stdout:10B",
             ]
         );
 
@@ -3471,9 +3471,9 @@ mod tests {
             screen,
             vec![
                 "\u{2713} shell(date)",
-                "\u{2514} stdout:7B \u{b7} +1",
+                "\u{2514} stdout:7B",
                 "\u{2713} shell(ls)",
-                "\u{2514} stdout:10B \u{b7} +1",
+                "\u{2514} stdout:10B",
             ]
         );
     }
