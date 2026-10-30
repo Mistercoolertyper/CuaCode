@@ -186,6 +186,7 @@ fn thought_style() -> Style {
 /// a character that cannot be mistaken for one.
 const DOT: &str = "\u{25cf}";
 const TICK: &str = "\u{2713}";
+const CROSS: &str = "\u{2717}";
 /// The checklist's own three marks: the step being worked, one not started, and one
 /// crossed out of the plan. Nothing else on the page draws them. The tick above is a
 /// call's own and a finished step's is the same word as this one, so it is shared
@@ -197,12 +198,14 @@ const GONE: &str = "\u{2500}";
 /// row's colour and stays in the glyph column, and unlike a tick or a cross it says
 /// nothing about whether anything worked. U+2726 over the smiling face it started as:
 /// a face is an emoji in a column of dots, and this reads as a mark.
+const BUDDY: &str = "\u{2726}";
+pub const PROMPT: &str = "\u{276f}";
 const HEAD_LEAD: &str = "\u{25cf} ";
 /// It opens up and to the right, so the stroke points back at the head it
 /// dropped from and the arm runs into the text beside it. U+250C is the same
 /// corner the other way up, and reads as the detail having fallen off the
 /// bottom of the head.
-const BODY_LEAD: &str = "    ";
+const BODY_LEAD: &str = "  \u{2514} ";
 /// An opened step's detail. Four columns, which is where a call's own text starts
 /// (`  \u{25cf} `), so a thought and the calls under it share one left edge and the
 /// single corner above them stays the summary's mark alone.
@@ -236,9 +239,6 @@ const SPINNER: [&str; 10] = [
 /// colours down a column is four things to tell apart from memory.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mark {
-    /// No mark: most rows. The room is still kept, so the text of a plain row and the
-    /// text of a marked one start in the same column.
-    None,
     Dot,
     Tick,
     Cross,
@@ -248,26 +248,15 @@ enum Mark {
 }
 
 impl Mark {
-    /// The lead a row draws before its text, columns and all.
-    ///
-    /// A mark is a state, so a row whose state never changes draws none. A dot on every
-    /// row is a bullet list, and the eye learns to skip the column in a frame, which
-    /// means the one row that needed it is skipped too. Failure, a peer and a finished
-    /// thought keep theirs; everything else is air.
-    fn lead(self) -> &'static str {
+    fn glyph(self) -> &'static str {
         match self {
-            Mark::None => "  ",
-            Mark::Dot => "\u{25cf} ",
-            Mark::Tick => "\u{2713} ",
-            Mark::Cross => "\u{2717} ",
-            Mark::Buddy => "\u{2726} ",
+            Mark::Dot => DOT,
+            Mark::Tick => TICK,
+            Mark::Cross => CROSS,
+            Mark::Buddy => BUDDY,
         }
     }
 }
-
-/// The lead a failed row draws: the one state that stays visible when a step is
-/// folded, which is the whole reason it keeps a mark.
-const FAILED_LEAD: &str = "\u{2717} ";
 
 /// What the worker last said about a round's thinking.
 ///
@@ -294,12 +283,14 @@ pub type Run = (String, Style);
 pub struct Piece {
     pub lead: String,
     pub lead_style: Style,
-    /// Whether a blank line sits above this piece, below it, or both.
+    /// Whether a blank line sits above this piece, below it, or both. Two flags
+    /// rather than one, because a row showing its detail wants air around the row
+    /// and not inside it: the gap belongs above the head and after the last line
+    /// of the detail, never between the head and the detail the corner joins it
+    /// to.
     ///
-    /// One row claims air and it is the line you typed: a turn opens with a blank
-    /// line and nothing inside it has one. Thoughts, calls, results and the answer
-    /// that ends them are one block read straight down, because air between them was
-    /// what made six rows fill a screen of twenty-four.
+    /// A row that is only a step sits close to the one above it, which is what
+    /// makes a run of calls read as one list and an answer read as its own thing.
     air_above: bool,
     air_below: bool,
     /// One entry per line the text itself had, so a thought's paragraphs stay
@@ -313,7 +304,10 @@ pub struct Piece {
 
 impl Piece {
     /// Say where this piece is given room: a blank line above it, below it, or
-    /// both.
+    /// both. The answer is what the run was for rather than a step through it, so
+    /// it gets both. A row showing its detail gets air above its head and below
+    /// its detail, which keeps a run of heads tight while the detail hangs
+    /// straight off the head it belongs to.
     fn air(mut self, above: bool, below: bool) -> Piece {
         self.air_above = above;
         self.air_below = below;
@@ -707,21 +701,17 @@ pub fn pieces(
             // The line you typed, on its own bar, and the runtime text that keeps
             // only the line saying what it is. Neither has a dot.
             Row::User { text, images } => {
-                // The line you typed is the same block the composer is: a rail down its
-                // left, the raised surface behind it, and the surface padded to the row so
-                // what you said reads as a block rather than as a bar behind a sentence. It
-                // is opencode's own block, and it makes the input and the record of what was
-                // put into it one material. One blank line above it and none under it: the
-                // turn is where this screen is read from, and air around every answer would
-                // double the height of the conversation.
-                let mut piece = plain(
-                    "\u{2503} ",
-                    Style::new().fg(ink::faint()).bg(ink::bar()),
-                    &text,
+                // The line you typed is the raised surface and the prompt, and no rail:
+                // a rail down its left made the record of what was said look like a second
+                // composer sitting in the conversation. One blank line above it and none
+                // under it: the turn is where this screen is read from, and air around
+                // every answer would double the height of the conversation.
+                out.push(Held { row: i, head: i, piece: plain(
+                    "",
+                    Style::new().bg(ink::bar()),
+                    &format!("{PROMPT} {text}"),
                     Style::new().fg(ink::text()).bg(ink::bar()),
-                );
-                piece.rail = true;
-                out.push(Held { row: i, head: i, piece: piece.air(true, false) });
+                ).air(true, false) });
                 if !images.is_empty() {
                     out.push(Held { row: i, head: i, piece: plain(
                         "",
@@ -737,7 +727,7 @@ pub fn pieces(
                 // under it like a call's result, so a long message collapses to its head
                 // and opens on a press.
                 let shown = expanded(i, row);
-                out.push(Held { row: i, head: i, piece: led(Mark::Buddy, ink::peer(), ink::peer(), head) });
+                out.push(Held { row: i, head: i, piece: led(Mark::Buddy, ink::peer(), ink::peer(), head).air(shown, false) });
                 if shown && !text.trim().is_empty() {
                     let room = width.saturating_sub(columns(BODY_LEAD)).max(1);
                     // A message that just landed is swept once, and a round that is still
@@ -778,16 +768,15 @@ pub fn pieces(
                 ) });
             }
             // The answer is the model's own text, so it is the one head that is
-            // read as markdown, in the bright tone and at the page column. It gets a
-            // blank line above it and none below: that one line is what says a run has
-            // finished, and it is cheaper than a mark on every row above it.
+            // read as markdown. Its dot is white whatever else is true: this is
+            // what the run was for, and the one row that is not a step towards it.
             Row::Content { text, .. } => out.push(Held { row: i, head: i, piece: led_prose(
-                Mark::None,
+                Mark::Dot,
                 ink::text(),
                 ink::text(),
                 text,
                 width.saturating_sub(columns(HEAD_LEAD)).max(1),
-            ).air(true, false) }),
+            ).air(true, true) }),
             Row::Error(text) => out.push(Held { row: i, head: i, piece: led(Mark::Cross, ink::failed(), ink::failed(), text) }),
             // Thought and call rows never reach here: `clusters` has already put
             // them in a step, and `step` draws the lot.
@@ -947,11 +936,7 @@ fn step(
     out.push(Held {
         row: head,
         head,
-        piece: led_runs(
-            if failed_any { FAILED_LEAD.to_string() } else { "  ".to_string() },
-            Style::new().fg(lead),
-            said,
-        ),
+        piece: led_runs(format!("{DOT} "), Style::new().fg(lead), said).air(true, false),
     });
 
     // The plan, in its own words, straight under the head it belongs to: how far along
@@ -980,30 +965,37 @@ fn step(
     // and lets the individual rounds keep their own rates in the panel. A count and
     // a rate are meta, so they are `faint`; what the calls were is the row's tail
     // and is `quiet`, one rung further from the head it hangs under.
-    // What the step did, and nothing about what it cost. A single call is already
-    // named by the head above, so it says nothing here: `shell(date)` needs no line
-    // under it repeating that it took 0.3s and wrote 29 bytes. A run of them says how
-    // many and which, because that is the one line that says whether to open it.
+    if let Some(round) = rounds(think, earlier, figures).filter(|r| r.tokens > 0 || r.tps > 0.0) {
+        said(reasoning(round), ink::faint(), &mut meta);
+    }
+    // One call says what came back, which is the mock's own call box and the row
+    // this screen had before it had steps: a head, and the line under it. It is
+    // also the only way a failure says *what* failed without opening anything.
+    // A run of calls cannot say all their results on one line, so it says what it
+    // ran instead.
+    if counted.len() == 1 && !(open && think.is_some()) {
+        if let Row::Tool { args, result: Some(r), .. } = &rows[counted[0]] {
+            if !r.is_empty() {
+                let ink = if failed(r) { ink::failed() } else { ink::quiet() };
+                said(call_result(args, r), ink, &mut meta);
+            }
+        }
+    }
+    // A failure is the one thing on this line that is worth reading collapsed: a
+    // red dot says something went wrong and this says what. One call says its own
+    // result; a run of them says how much of it failed.
     let broken: Vec<usize> = counted
         .iter()
         .copied()
         .filter(|&c| matches!(&rows[c], Row::Tool { result: Some(r), .. } if failed(r)))
         .collect();
-    if counted.len() > 1 {
-        // A step with no thought is named by the tally already, and saying it twice on
-        // two lines is the noise this line exists without.
-        if think.is_some() {
-            said(ran(&counted, rows), ink::quiet(), &mut meta);
-        }
-        if !broken.is_empty() {
-            said(format!("{} of {} failed", broken.len(), counted.len()), ink::failed(), &mut meta);
-        }
-    } else if let Some(&c) = broken.first() {
-        // A failure is the one thing worth reading collapsed: the mark says something
-        // went wrong and this says what.
-        if let Row::Tool { args, result: Some(r), .. } = &rows[c] {
-            said(call_result(args, r), ink::failed(), &mut meta);
-        }
+    if counted.len() > 1 && think.is_some() {
+        said(ran(&counted, rows), ink::quiet(), &mut meta);
+    }
+    // One call said its own failure above, or says it on its own line when the
+    // step is opened. A run of them cannot, so it says how much of it broke.
+    if !broken.is_empty() && counted.len() > 1 {
+        said(format!("{} of {} failed", broken.len(), counted.len()), ink::failed(), &mut meta);
     }
     if !meta.is_empty() {
         out.push(Held {
@@ -1125,6 +1117,35 @@ pub fn step_start(rows: &[Row], at: usize) -> usize {
         }
     }
     i
+}
+
+/// What a step's rounds cost, as one figure: the tokens summed, and a rate only
+/// when there is one round to have one.
+fn rounds(
+    think: Option<usize>,
+    earlier: &[usize],
+    figures: &dyn Fn(usize) -> Option<Round>,
+) -> Option<Round> {
+    let mut all: Vec<Round> = earlier.iter().filter_map(|&t| figures(t)).collect();
+    let last = think.and_then(|t| figures(t));
+    let last_tps = last.map(|r| r.tps).unwrap_or(0.0);
+    let last_est = last.map(|r| r.estimated).unwrap_or(false);
+    all.extend(last);
+    if all.is_empty() {
+        return None;
+    }
+    // The rate of a step with several rounds is the rate of all of it: the tokens
+    // of the rounds that timed themselves, over the time they took. Summing their
+    // rates would be a number about nothing; leaving the rate out for every merged
+    // step meant it never showed at all, because most steps merge.
+    let timed: Vec<Round> = all.iter().copied().filter(|r| r.tps > 0.0 && r.tokens > 0).collect();
+    let seconds: f64 = timed.iter().map(|r| r.tokens as f64 / r.tps).sum();
+    let tokens: i64 = timed.iter().map(|r| r.tokens).sum();
+    Some(Round {
+        tokens: all.iter().map(|r| r.tokens).sum(),
+        tps: if seconds > 0.0 { tokens as f64 / seconds } else { last_tps },
+        estimated: all.iter().any(|r| r.estimated) || last_est,
+    })
 }
 
 /// A thought with its text folded away, as an opened step draws it: the rail and a
@@ -1523,7 +1544,7 @@ pub fn foldable(row: &Row) -> bool {
 /// colours down a column is four things to tell apart from memory.
 fn led(mark: Mark, colour: Color, lead: Color, text: &str) -> Piece {
     plain(
-        mark.lead(),
+        format!("{} ", mark.glyph()),
         Style::new().fg(lead),
         text,
         Style::new().fg(colour),
@@ -1546,7 +1567,7 @@ fn led_runs(lead: String, lead_style: Style, runs: Vec<Run>) -> Piece {
 /// A head line whose text is the model's own, drawn as the markdown it is.
 fn led_prose(mark: Mark, colour: Color, lead: Color, text: &str, room: usize) -> Piece {
     prose(
-        mark.lead(),
+        format!("{} ", mark.glyph()),
         Style::new().fg(lead),
         text,
         Style::new().fg(colour),
@@ -2240,7 +2261,7 @@ pub fn call_lead(
         said.push((")".to_string(), Style::new().fg(colour)));
     }
     (
-        format!("{}", call_state(result).lead()),
+        format!("{} ", call_state(result).glyph()),
         Style::new().fg(mark_ink),
         said,
     )
@@ -2255,7 +2276,7 @@ pub fn call_ink(result: Option<&str>) -> Color {
         Mark::Cross => ink::failed(),
         // A call never reports as a peer: the buddy mark belongs to the peer row, and
         // this arm is here so the two marks cannot be confused for each other.
-        Mark::Dot | Mark::Buddy | Mark::None => ink::quiet(),
+        Mark::Dot | Mark::Buddy => ink::quiet(),
     }
 }
 
@@ -2621,6 +2642,26 @@ pub(crate) fn clip(text: &str, most: usize) -> String {
     }
     let head = &text[..split_at(text, most.saturating_sub(1))];
     format!("{head}\u{2026}")
+}
+
+/// The reasoning row's own readout, as the design draws it: the round's thinking
+/// tokens and rate, quoted from the worker and nowhere else. A round that has not
+/// reported either says just "Reasoning".
+fn reasoning(round: Round) -> String {
+    if round.tokens <= 0 && round.tps <= 0.0 {
+        return "Reasoning".to_string();
+    }
+    let mut out = String::from("Reasoning | ");
+    if round.tokens > 0 {
+        out.push_str(&format!("{} tokens", tokens(round.tokens, round.estimated)));
+        if round.tps > 0.0 {
+            out.push_str(", ");
+        }
+    }
+    if round.tps > 0.0 {
+        out.push_str(&format!("{:.0} tok/s", round.tps));
+    }
+    out.trim_end().to_string()
 }
 
 /// A call in full, as the worker keeps it: the arguments and the result, past the
@@ -3403,7 +3444,7 @@ mod tests {
             r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"file","result":{"result":{"created":true,"path":"/tmp/x","written":7977}}}}"#,
         ]);
         let after = pieces_at(&call, &all_open(), &no_figures(), None, true);
-        assert_eq!(after[0].lead, "  ", "a row whose state does not change draws no mark");
+        assert_eq!(after[0].lead, "\u{25cf} ");
         assert_eq!(after[0].text(), "write(~/…/notebook/SESSION_BREAKDOWN.md)");
         // The way there is fainter than the file, and the file is the row's own
         // colour: what a person is looking for in a list of files is the file.
@@ -3423,9 +3464,9 @@ mod tests {
                 (")".to_string(), Style::new().fg(ink::text())),
             ]
         );
-        // The path is said once, and there is no row under the head repeating that the
-        // file was created and how many bytes went into it.
-        assert_eq!(after.len(), 1, "{:?}", after.iter().map(|p| p.text()).collect::<Vec<_>>());
+        // The path is said once. The head has it; the summary under the head does
+        // not repeat it, and keeps everything else it was told.
+        assert_eq!(after[1].text(), "created \u{b7} written 7977");
     }
 
     /// The verb is what says a row is something that ran, so it is the one word on
@@ -3614,12 +3655,12 @@ mod tests {
         );
     }
 
-    /// A call's row is its head. What came back is the panel's, opened on a press: a
-    /// second line under every call saying `created · written 268` is one line of a
-    /// twelve-column box spent repeating what the head already named. The input the
-    /// head had no room for is the panel's too.
+    /// A call's row is its head and what came back, and nothing else: the input
+    /// the head had no room for -- a file's content -- is the panel's, so the row
+    /// is not a second copy of the call. A call that has not reported yet is only
+    /// its head.
     #[test]
-    fn a_call_is_its_head_and_what_came_back_is_the_panel() {
+    fn a_call_shows_what_came_back_and_not_its_input() {
         let write = rows(&[
             r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"file","args":{"action":"write","path":"a.py","content":"one\ntwo"}}]}}"#,
             r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"file","result":{"result":{"created":true,"written":268}}}}"#,
@@ -3627,11 +3668,13 @@ mod tests {
         let open = pieces_at(&write, &all_open(), &no_figures(), None, true);
         assert_eq!(
             open.len(),
-            1,
-            "one line, and no result under it: {:?}",
+            2,
+            "the head and the result: {:?}",
             open.iter().map(|p| p.text()).collect::<Vec<_>>()
         );
         assert_eq!(open[0].text(), "write(a.py)");
+        assert_eq!(open[1].lead, BODY_LEAD);
+        assert_eq!(open[1].text(), "created \u{b7} written 268");
         // The input is nowhere on the row: no code block, no `content`.
         let all: String = open.iter().map(|p| p.text()).collect::<Vec<_>>().join("\n");
         assert!(
@@ -3649,18 +3692,20 @@ mod tests {
         );
     }
 
-    /// The fold is for thoughts, not for calls: whether the thought above it is open or
-    /// shut, a call is the one line that names it. What came back is the panel's.
+    /// The short result is on the row whatever ctrl-t is doing: a column of calls
+    /// with nothing said about their results is a list you open one line at a time
+    /// to read, and the fold is for thoughts.
     #[test]
-    fn a_call_is_one_line_whether_the_thoughts_are_folded_or_not() {
+    fn a_call_shows_its_result_whether_the_thoughts_are_folded_or_not() {
         let call = rows(&[
             r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"shell","args":{"command":"date"}}]}}"#,
             r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"shell","result":{"result":{"exit_code":0,"stdout":"Friday\n"}}}}"#,
         ]);
         let folded = |_: usize, _: &Row| false;
         let shut = pieces_at(&call, &folded, &no_figures(), None, true);
-        assert_eq!(shut.len(), 1, "{:?}", shut.iter().map(|p| p.text()).collect::<Vec<_>>());
+        assert_eq!(shut.len(), 2);
         assert_eq!(shut[0].text(), "shell(date)");
+        assert_eq!(shut[1].text(), "stdout:7B \u{b7} +1");
     }
 
     /// The block is a real one: the title on its edge, the code inside it with an
@@ -3994,7 +4039,7 @@ mod tests {
     }
 
     #[test]
-    fn the_figures_are_the_panels_and_not_the_rows() {
+    fn a_reasoning_row_keeps_its_figures() {
         let thought =
             rows(&[r#"{"type":"token","id":"a","data":{"state":"thinking","token":"hm"}}"#]);
         let mine = |i: usize| {
@@ -4004,25 +4049,28 @@ mod tests {
                 estimated: true,
             })
         };
-        // The row is the thought's own name, live or settled. What the round cost is
-        // not on it: a step is one line, and a rate under every thought made the
-        // transcript a table of measurements.
+        // The head is the thought's own name; the figures hang under it, on the
+        // one line this screen gives a step.
         let live = pieces_at(&thought, &all_open(), &mine, Some(0), true);
-        assert_eq!(live.len(), 1, "{:?}", live.iter().map(|p| p.text()).collect::<Vec<_>>());
         assert_eq!(live[0].text(), "hm");
+        assert_eq!(live[1].text(), "Reasoning | ~2.0k tokens, 351 tok/s");
         assert_eq!(live[0].lead_style.fg, Some(ink::text()));
+        // The round is over. The dot stops being live and the figures stay: they
+        // are what that round cost, not what is happening now.
         let after = pieces_at(&thought, &all_open(), &mine, None, true);
-        assert_eq!(after[0].text(), "hm");
-        // And a round that filed no figures is the same one line, not a line saying zero.
+        assert_eq!(after[1].text(), "Reasoning | ~2.0k tokens, 351 tok/s");
+        assert_eq!(after[0].lead_style.fg, Some(ink::done()));
+        // A thought with nothing filed is its name and no second line at all.
         let bare = pieces_at(&thought, &all_open(), &no_figures(), Some(0), true);
         assert_eq!(bare.len(), 1);
         assert_eq!(bare[0].text(), "hm");
     }
 
-    /// A merged step is one line saying what it ran and how many of them. The rate it
-    /// went at belongs to the rounds, and the rounds are the panel's.
+    /// A merged step's rate is the rate of all of it: tokens over the time they
+    /// took. Summing the rounds' own rates would say a step that spent two seconds
+    /// at 50 and three at 100 was doing 150 a second.
     #[test]
-    fn a_merged_step_counts_what_it_ran() {
+    fn a_merged_step_reports_its_whole_rate() {
         let stream = rows(&[
             r#"{"type":"token","id":"a","data":{"state":"thinking","token":"first"}}"#,
             r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"shell","args":{"command":"ls"}}]}}"#,
@@ -4038,7 +4086,7 @@ mod tests {
             _ => None,
         };
         let ps = pieces_at(&stream, &|_: usize, _: &Row| false, &mine, None, true);
-        assert_eq!(ps[1].text(), "Ran shell \u{d7}2");
+        assert_eq!(ps[1].text(), "Reasoning | 400 tokens, 80 tok/s  \u{b7}  Ran shell \u{d7}2");
     }
 
     /// The thought under a reasoning row is set apart from the answer, and by two
@@ -4597,7 +4645,7 @@ mod tests {
             screen,
             // One call, still running: nothing to say under the head yet, and
             // the call itself is the line under it.
-            vec!["  one two", "  \u{25cf} shell(date)"]
+            vec!["\u{25cf} one two", "  \u{25cf} shell(date)"]
         );
     }
 
@@ -4667,10 +4715,13 @@ mod tests {
         assert_eq!(
             screen,
             vec![
-                "  shell(date)",
+                "\u{25cf} shell(date)",
+                "  \u{2514} stdout:7B \u{b7} +1",
                 "",
-                "  it is Friday",
-                "  shell(ls)",
+                "\u{25cf} it is Friday",
+                "",
+                "\u{25cf} shell(ls)",
+                "  \u{2514} stdout:10B \u{b7} +1",
             ]
         );
 
@@ -4687,7 +4738,7 @@ mod tests {
             40,
         );
         let screen: Vec<String> = drawn.lines.iter().map(Line::to_string).collect();
-        assert_eq!(screen, vec!["  shell \u{d7}2"]);
+        assert_eq!(screen, vec!["\u{25cf} shell \u{d7}2"]);
     }
 
     #[test]
@@ -4758,8 +4809,9 @@ mod tests {
         assert_eq!(
             screen,
             vec![
-                "  porting the composer",
-                "    1/2 done \u{b7} port the composer",
+                "\u{25cf} porting the composer",
+                "  \u{2514} 1/2 done \u{b7} port the composer",
+                "  \u{2514} lines 1",
             ]
         );
         // The plan's own summary is the tone the eye lands on, and the step it is on
@@ -4782,8 +4834,8 @@ mod tests {
         assert_eq!(
             screen,
             vec![
-                "  porting the composer",
-                "    2/5 done \u{b7} port the composer",
+                "\u{25cf} porting the composer",
+                "  \u{2514} 2/5 done \u{b7} port the composer",
                 "  \u{2713}  1  read the tool",
                 "  \u{2713}  2  check the wrap",
                 "  \u{25b8}  3  port the composer",

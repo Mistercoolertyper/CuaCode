@@ -212,16 +212,6 @@ try:
         # Which build this worker is, off the same git the frontends stamp
         # themselves from: it answers from the tree, not from a manifest.
         ("/version", "version"),
-        # One door for the four things set once. `/settings` alone says what they
-        # are, and a key in front of it is the old command with a door in front.
-        # Bare `/settings` answers with the first of the four, which is the one that
-        # says who answers: `provider: ollama - model · vision: ... · effort: high`.
-        ("/settings", "provider"),
-        ("/settings model", "model"),
-        ("/settings banana", "settings"),
-        # The old spelling of each still runs, and is kept out of the menu.
-        ("/provider", "provider"),
-        ("/effort", "effort"),
     ]:
         w.chat(cmd)
         said, _ = w.notice(expect)

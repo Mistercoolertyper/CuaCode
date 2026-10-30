@@ -64,7 +64,7 @@ use cuacode::worker::Target;
 
 use keys::Action;
 use menu::{Act, Item, Kind, Menu};
-use view::{ink, Drawn};
+use view::{ink, Drawn, PROMPT};
 
 /// How long two clicks on the same row must be apart to be a fold rather than
 /// two clicks.
@@ -100,28 +100,12 @@ fn answered() -> &'static str {
 /// to the caret instead of taking the pane.
 const FIELD_MAX: usize = 8;
 
-/// The composer's rail: the heavy vertical opencode's input carries, down the left of
-/// every row of the input. There is no top, bottom or right edge: a bar that closes the
-/// input into a box reads as a form, and the input is a place on the page.
-const RAIL: &str = "\u{2503}";
-const RAIL_W: usize = 1;
-/// The rail's own end, at the bottom-left of the input, and the half block the surface
-/// leaves under it. The foot is not a rule: it is the shadow the composer sits on.
-/// The blank row above the message, so the first thing typed does not sit against the
-/// top edge of the surface. Given up in a short pane before the message is.
-const PAD_TOP: usize = 0;
-/// The gap and the model row under the message, and the pedestal row under those.
-const META_ROWS: usize = 2;
-const FOOT_ROWS: usize = 0;
 /// The width the composer opens at on a screen with nothing said in it yet: opencode's
 /// own 75, wide enough for a sentence and narrow enough to read as a place to type.
 const HOME_WIDTH: usize = 75;
-/// The shortest pane that still carries the title and the path.
-const HEAD_MIN: u16 = 18;
-
-/// The cells a row of the message owes before its text: one, so the text sits against
-/// the rail rather than four columns into a box with nothing else in it.
-const LEAD: usize = 1;
+/// The cells a row of the message owes before its text: the prompt glyph and the
+/// space after it. The wrap, the caret and a click all count from the same two.
+const LEAD: usize = 2;
 
 /// What the launch asked for before the first frame.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1151,26 +1135,20 @@ impl App {
         self.log.rows.is_empty() && self.prompt.is_none() && self.opened.is_none()
     }
 
-    /// The one thing this screen says on its own account: that origin has a commit
-    /// this tree does not. `None` every other day.
-    ///
-    /// There is no header. What one would hold is the model, which is under the field
-    /// because that is one line from the key, and the directory, which is the last row
-    /// of the frame. The build id is `--version`, not a cell. A title bar that repeats
-    /// two facts the frame already says is three rows of a forty-row screen spent on
-    /// nothing.
-    fn news(&self) -> Option<Line<'static>> {
-        let n = self.news.as_ref().and_then(|n| n.behind())?;
-        Some(Line::from(vec![
-            Span::styled(
-                format!(" you are behind {n} {}", if n == 1 { "update" } else { "updates" }),
-                Style::new().fg(ink::warn()),
-            ),
-            Span::styled(
-                "  \u{b7}  cuacode doctor, or cuacode doctor --upgrade",
-                Style::new().fg(ink::dim()),
-            ),
-        ]))
+    /// The design's header: what this is, and where. The model moved to the row
+    /// under the message, where it is read while typing rather than looked for at
+    /// the top of the screen.
+    /// Where a message typed into this screen would run: the conversation's own
+    /// directory, read off the worker's list of its sessions, because on a box that is a
+    /// path on that machine and this process's cwd is a path on this one. A conversation
+    /// with no record yet is not in the list, and there the launch's directory is the
+    /// honest answer.
+    fn working_dir(&self) -> String {
+        self.sess
+            .as_ref()
+            .and_then(|s| s.sessions.iter().find(|m| m.id == s.snap.session_id))
+            .map(|m| m.cwd.clone())
+            .unwrap_or_else(session::working_dir)
     }
 
     /// The line under the card, as three zones on one row: what the round is doing,
@@ -1184,73 +1162,9 @@ impl App {
     /// the wire did not send.
     ///
     /// `width` is the pane, which the right zone is pushed against.
-    /// The row inside the composer's rails, under the message: what will answer it
-    /// on the left, and what the round is doing on the right.
-    ///
-    /// This is opencode's own arrangement, and it is the reason their input feels
-    /// alive: the model you are talking to is under the words you are typing, not in
-    /// a header across the room, and the thing that will happen when you press enter
-    /// is one line away from the key. `None` is a replay: no worker, so nothing to
-    /// say about who would answer.
-    ///
-    /// `width` is the inside of the rails, which the right zone is pushed against.
-    fn composer_meta(&self, width: usize) -> Option<Line<'static>> {
-        let snap = self.sess.as_ref().map(|sess| &sess.snap);
-        if snap.is_none() && self.turn.is_none() {
-            return None;
-        }
-        let mut left: Vec<Span<'static>> = Vec::new();
-        let sep = Span::styled("  \u{b7}  ", Style::new().fg(ink::faint()));
-        if let Some(snap) = snap {
-            if !snap.model.is_empty() {
-                left.push(Span::styled(snap.model.clone(), Style::new().fg(ink::text())));
-            }
-            if !snap.provider.is_empty() {
-                if !left.is_empty() {
-                    left.push(sep.clone());
-                }
-                left.push(Span::styled(snap.provider.clone(), Style::new().fg(ink::faint())));
-            }
-            // The effort ladder is a setting rather than a fact about the machine, and
-            // the tone says so: the one amber the design uses for a thing to notice.
-            if !snap.effort.is_empty() {
-                if !left.is_empty() {
-                    left.push(sep.clone());
-                }
-                left.push(Span::styled(
-                    capitalize(&snap.effort),
-                    Style::new().fg(ink::warn()).add_modifier(Modifier::BOLD),
-                ));
-            }
-            // How full the window is, where the model is: one number, on the row that
-            // already says who is answering. It used to be a gauge on a row of its own
-            // under the screen, which was six cells and a percentage of chrome.
-            if snap.context_max > 0 {
-                if !left.is_empty() {
-                    left.push(sep);
-                }
-                let percent = (snap.context_used * 100 / snap.context_max).clamp(0, 100);
-                left.push(Span::styled(format!("{percent}%"), Style::new().fg(ink::faint())));
-            }
-        }
-        let mut right: Vec<Span<'static>> = Vec::new();
-        let folding = snap.is_some_and(|s| !s.compacting.is_empty() && s.compacting != "done");
-        if folding {
-            right.push(Span::styled(compacting_words(snap.unwrap()), Style::new().fg(ink::warn())));
-        } else if let Some(t) = &self.turn {
-            // One running indicator on the screen, and it is this one: the round's own
-            // readout. The one key that stops it rides beside it, because that is the
-            // moment it is worth knowing, and nowhere else on the screen says a key.
-            right.extend(view::turn(t, self.ms()).spans);
-            if t.ended.is_none() {
-                right.push(Span::styled("  \u{b7}  esc stop", Style::new().fg(ink::faint())));
-            }
-        }
-        let gap = width.saturating_sub(zone_width(&left) + zone_width(&right));
-        let mut spans = left;
-        spans.push(Span::raw(" ".repeat(gap.max(1))));
-        spans.extend(right);
-        Some(Line::from(spans))
+    fn status_text(&self, width: usize) -> Option<Line<'static>> {
+        let sess = self.sess.as_ref()?;
+        Some(status_line(&sess.snap, width))
     }
 
     /// The message inside the composer: the rows it wraps to, with the caret in it. The
@@ -1271,7 +1185,10 @@ impl App {
             // what remains of the box while one is up.
             return vec![Line::from("")];
         }
-        let (cols, rows, caret_col, caret_row) = self.drawn(width);
+        // The prompt's two cells are the box's, not the text's: a row wraps where the
+        // text stops fitting beside them, which is what `field_height` counts too.
+        let inner = width.saturating_sub(LEAD).max(1);
+        let (cols, rows, caret_col, caret_row) = self.drawn(inner, self.keep());
         let n = rows.len();
         let shown = height.clamp(1, n.max(1));
         let first_shown = (caret_row + 1).saturating_sub(shown).min(n - shown.min(n));
@@ -1281,9 +1198,7 @@ impl App {
             // The prompt is the one control on the screen, so it is drawn in the tone
             // that means "you can act on this": the accent. A continuation row owes a
             // blank of the same width and nothing else.
-            // No prompt glyph: the rail down the left is the mark that this is a place
-            // to type, and a second one beside it was the accent spent on a caret.
-            let lead = " ".repeat(LEAD);
+            let lead = if first { format!("{PROMPT} ") } else { " ".repeat(LEAD) };
             let (line, tags): (Vec<char>, Vec<u8>) = cols[rows[li].0..rows[li].1]
                 .iter()
                 .map(|(c, t)| (*c, *t))
@@ -1341,9 +1256,19 @@ impl App {
                     Style::new().fg(ink::text()).add_modifier(Modifier::REVERSED),
                 ));
             }
+            // The one thing that moves while a round is in flight: the turn's own
+            // readout, at the right end of the message's first row. It is the only
+            // animation on the screen, and this is the row the person is looking at.
+            if first {
+                if let Some(status) = self.turn.as_ref().map(|t| view::turn(t, self.ms())) {
+                    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+                    spans.push(Span::raw(" ".repeat(width.saturating_sub(used + status.width()))));
+                    spans.extend(status.spans.iter().cloned());
+                }
+            }
             // An empty box says what it is for, the way opencode's does.
             if self.input.is_empty() && self.shots.is_empty() {
-                let said = if first { "Ask anything" } else { "" };
+                let said = if first { "Ask anything, or /help" } else { "" };
                 if !said.is_empty() {
                     // `dim`, not `quiet`: this sits on the raised surface, where the
                     // quietest rung of the page measures 2.2:1 and reads as a smudge.
@@ -1366,7 +1291,7 @@ impl App {
     ///
     /// `keep` is gone: the turn's readout lives on the composer's model row now, so no row
     /// of the message owes anything at its right end.
-    fn drawn(&self, width: usize) -> (Vec<(char, u8)>, Vec<(usize, usize)>, usize, usize) {
+    fn drawn(&self, width: usize, keep: usize) -> (Vec<(char, u8)>, Vec<(usize, usize)>, usize, usize) {
         let cs: Vec<char> = self.input.chars().collect();
         let mut tags = vec![0u8; cs.len()];
         for (n, shot) in self.shots.iter().enumerate() {
@@ -1405,7 +1330,16 @@ impl App {
         let mut space: Option<usize> = None;
         let mut k = 0usize;
         while k < cols.len() {
-            let room = field_room(width);
+            // The first row owes the readout its cells, so the message wraps beside it
+            // rather than under it; every row after that gets the whole width.
+            let room = if rows.is_empty() {
+                width.saturating_sub(keep).max(1)
+            } else {
+                // The last cell of a row is the caret's when the typing reaches the end
+                // of it, so the wrap stops one short rather than putting the bar off the
+                // edge of the box.
+                width.saturating_sub(1).max(1)
+            };
             let (c, tag) = cols[k];
             if c == '\n' {
                 rows.push((start, k));
@@ -1479,7 +1413,18 @@ impl App {
     /// spare: one row per row the message wraps to at this width, up to the
     /// ceiling.
     fn field_height(&self, width: usize) -> u16 {
-        (self.drawn(width).1.len()).clamp(1, FIELD_MAX) as u16
+        let inner = width.saturating_sub(LEAD).max(1);
+        (self.drawn(inner, self.keep()).1.len()).clamp(1, FIELD_MAX) as u16
+    }
+
+    /// The cells the round's readout needs at the right end of the message's first row:
+    /// its own width and the air before it. A message that runs under it is a message
+    /// whose last words are cut off by a clock.
+    fn keep(&self) -> usize {
+        match &self.turn {
+            Some(t) => view::turn(t, self.ms()).width() + 3,
+            None => 0,
+        }
     }
 
     /// How many characters are in the message.
@@ -3149,11 +3094,24 @@ fn shimmer_phase(snap: Option<&Snapshot>, peer_age: Option<Duration>, ms: u128) 
     Some((age / view::SHIMMER_STEP_MS) as usize)
 }
 
+/// What the status line says about a peer whose message is waiting: the other agent's
+/// own session name, as the worker put it on the knock. A knock the worker named nobody
+/// on still says a peer is waiting, rather than inventing a name for one.
+fn waiting_words(name: &str) -> String {
+    match name.trim() {
+        "" => "waiting on a peer".to_string(),
+        who => format!("waiting on {who}"),
+    }
+}
+
 /// How many cells the context gauge is. Six: a figure wide enough to be read as a
 /// gauge at a glance, narrow enough that the row still holds the state and the
 /// counts beside it.
+const GAUGE_CELLS: usize = 6;
 /// The gauge's two cells: filled and empty. Two shapes of the same width, so a
 /// gauge that fills never moves the row around it.
+const GAUGE_FULL: &str = "\u{2588}";
+const GAUGE_EMPTY: &str = "\u{2591}";
 
 /// Why a fold is on: the one pause where the worker is blocked on a model the
 /// person cannot see, so the words say the word, the size, and what it frees.
@@ -3164,6 +3122,14 @@ fn compacting_words(snap: &Snapshot) -> String {
             format!("\u{25c6} compacting: {n} records into a summary, {}k chars freed", f / 1000),
         (f, _) if f > 0 => format!("\u{25c6} compacting: {}k chars freed", f / 1000),
         _ => "\u{25c6} compacting the conversation into a summary".to_string(),
+    }
+}
+
+/// Two spaces between two facts on the status row: enough that a count and a mode
+/// are two things rather than one word.
+fn spaced(zone: &mut Vec<Span<'static>>) {
+    if !zone.is_empty() {
+        zone.push(Span::raw("  "));
     }
 }
 
@@ -3182,6 +3148,96 @@ fn switch_refusal(snap: Option<&Snapshot>) -> Option<&'static str> {
         Some(s) if s.state.busy() => Some("a round is still running, escape stops it"),
         _ => None,
     }
+}
+
+/// The row under the card, as three zones: what is happening on the left, how full
+/// the window is in the middle, and the counts and the permission mode on the right,
+/// against the pane's own edge.
+///
+/// Every figure is one the worker sent, or the one clock this frontend owns -- the
+/// round's elapsed seconds, which `view::turn` also draws and which is why it is
+/// written to the same tenth. A zone with nothing to say says nothing: an absence is
+/// not a zero, and the space it would have taken stays empty.
+///
+/// A free function over the snapshot, rather than only a method on `App`, so the row
+/// can be read in a test without a worker behind it.
+fn status_line(snap: &Snapshot, width: usize) -> Line<'static> {
+    let mut left: Vec<Span<'static>> = Vec::new();
+    let mut right: Vec<Span<'static>> = Vec::new();
+
+    // The context gauge. Both numbers are the wire's; with no window reported there is
+    // no percentage to take, so the zone says what it does know instead of a fraction
+    // of a number nobody sent.
+    if snap.context_max > 0 {
+        let percent = (snap.context_used * 100 / snap.context_max).clamp(0, 100) as usize;
+        let filled = (percent * GAUGE_CELLS / 100).min(GAUGE_CELLS);
+        // A gauge filling up is a state, not decoration: quiet, then warning, then
+        // the tone this screen fails in.
+        let tone = if percent >= 90 {
+            ink::failed()
+        } else if percent >= 70 {
+            ink::warn()
+        } else {
+            ink::faint()
+        };
+        left.push(Span::styled(GAUGE_FULL.repeat(filled), Style::new().fg(tone)));
+        // The empty rungs are the hairline this screen draws an edge in, so a gauge at
+        // a fifth reads as one lit cell and five cells of track rather than as six of
+        // the same thing.
+        left.push(Span::styled(
+            GAUGE_EMPTY.repeat(GAUGE_CELLS - filled),
+            Style::new().fg(ink::rule()),
+        ));
+        left.push(Span::styled(format!(" {percent}%"), Style::new().fg(ink::faint())));
+    } else if snap.context_used > 0 {
+        left.push(Span::styled(
+            format!("ctx {} (window unknown)", plenty(snap.context_used)),
+            Style::new().fg(ink::faint()),
+        ));
+    }
+    // Only a rate the wire sent. A round that has reported nothing about how fast it
+    // is going says nothing about it.
+    if snap.tps > 0.0 {
+        spaced(&mut left);
+        let est = if snap.tps_est { " est" } else { "" };
+        left.push(Span::styled(format!("{:.0} tok/s{est}", snap.tps), Style::new().fg(ink::quiet())));
+    }
+
+    // Another agent's message is in the mailbox and the round in flight has not carried
+    // it into the model yet. It is not the message and nothing about the conversation
+    // changes here; the row says the wait, with the name the worker put on the knock,
+    // and a knock from nobody in particular still says a peer is waiting rather than
+    // inventing a name for it.
+    if let Some(name) = &snap.peer_waiting {
+        right.push(Span::styled(waiting_words(name), Style::new().fg(ink::quiet())));
+        spaced(&mut right);
+    }
+    // A fold is the one pause where the worker is blocked on a model the person cannot
+    // see, so the row says what it is doing rather than sitting still for a minute.
+    if !snap.compacting.is_empty() && snap.compacting != "done" {
+        right.push(Span::styled(compacting_words(snap), Style::new().fg(ink::warn())));
+        spaced(&mut right);
+    }
+    if !snap.mode.is_empty() {
+        right.push(Span::styled("perms ", Style::new().fg(ink::faint())));
+        right.push(Span::styled(snap.mode.clone(), Style::new().fg(ink::text())));
+        spaced(&mut right);
+    }
+    // Two keys, and only the ones that are live: a round in flight has no enter to send,
+    // and a row of twenty bindings is a key map on the screen rather than an answer to
+    // "what do I press now". `/help` is the door to the rest.
+    let hint = if snap.state.busy() { "esc stop" } else { "enter send \u{b7} /help" };
+    right.push(Span::styled(hint, Style::new().fg(ink::quiet())));
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let lead = zone_width(&left);
+    spans.extend(left);
+    // Pushed to the column's own right edge, so the hint sits where the eye goes for
+    // one and the gauge never has to be counted to. On a pane too narrow for both the
+    // hint is what is kept: it is the thing a person is looking for.
+    spans.push(Span::raw(" ".repeat(width.saturating_sub(lead + zone_width(&right)))));
+    spans.extend(right);
+    Line::from(spans)
 }
 
 /// One frame while text is arriving: sixty a second, which is where a stream stops
@@ -3555,58 +3611,57 @@ fn ask_panel(asked: &Ask, inner: usize, room: usize) -> Vec<Line<'static>> {
 fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let column = column_of(area);
-    // Nothing said yet: opencode's own opening, where the composer is the screen.
+    // Nothing said yet: the word, what the screen knows about this session, and the
+    // box. An opening screen is not a conversation with no rows in it, it is a door.
     if app.blank() {
         draw_home(f, app, column);
         return;
     }
-    let head: Vec<Line<'static>> = app.news().into_iter().collect();
+    let status = app.status_text(column.width as usize);
+    let news = app.news.as_ref().and_then(|n| n.behind());
+    // Read once and used twice: the row's highlight and the status line's are the same
+    // sweep off the same clock, which is what keeps the two moving at one speed.
     let shimmer = app.shimmer();
 
-    // The frame is the conversation and the composer, plus the one notice this screen
-    // says on its own account. There is no header and no status row: the context the
-    // bottom line used to count lives beside the model, and a key only appears while
-    // there is something for it to stop. What a pane cannot hold goes in this order:
-    // the composer's breathing room, then the model row.
-    let pad = usize::from(column.width >= 44) * PAD_TOP;
-    // The meta line carries the same gutter the message does, so it is measured
-    // against that much less of the box.
-    let meta = app.composer_meta(field_room(composer_inside(column.width as usize)));
-    let mut head_on = area.height >= HEAD_MIN;
-    let mut meta_on = meta.is_some();
-    let mut pad_on = pad;
-    let room = |with_head: bool, with_meta: bool, pad: usize| {
-        (if with_head { head.len() } else { 0 }) + 1 + pad + 1 + if with_meta { META_ROWS } else { 0 }
-    };
-    while room(head_on, meta_on, pad_on) > usize::from(area.height) {
-        if head_on {
-            head_on = false;
-        } else if pad_on > 0 {
-            pad_on = 0;
-        } else if meta_on {
-            meta_on = false;
-        } else {
-            break;
+    // The frame is the update notice, the conversation, the box between its two rules
+    // and the status row under it. A pane that cannot hold all of it gives up the status
+    // row first, then the notice, then the box's rules: the conversation and one row of
+    // the message are never given up.
+    let lead = usize::from(news.is_some());
+    let framed = usize::from(area.height) >= lead + 4 + usize::from(status.is_some());
+    let chunks = if framed {
+        let spare = usize::from(area.height) - lead - 3 - usize::from(status.is_some());
+        let field_h = (app.field_height(column.width as usize) as usize)
+            .min(spare.max(1))
+            .max(1) as u16;
+        let mut rows = Vec::with_capacity(5 + lead);
+        if lead == 1 {
+            rows.push(Constraint::Length(1));
         }
-    }
-    let spare = usize::from(area.height)
-        .saturating_sub(room(head_on, meta_on, pad_on))
-        .saturating_add(1);
-    let message_rows = (app.field_height(field_room(composer_inside(column.width as usize))) as usize)
-        .min(spare.max(1))
-        .max(1) as u16;
-    let composer_h = (pad_on + message_rows as usize + if meta_on { META_ROWS } else { 0 } + FOOT_ROWS) as u16;
-    let chunks = Layout::vertical([
-        Constraint::Length(if head_on { head.len() as u16 } else { 0 }),
-        Constraint::Min(1),
-        Constraint::Length(composer_h),
-    ])
-    .split(column);
-    let body = chunks[1];
-    let composer = chunks[2];
-
-    if head_on {
-        f.render_widget(Paragraph::new(head), chunks[0]);
+        rows.extend([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(field_h),
+            Constraint::Length(1),
+            Constraint::Length(u16::from(status.is_some())),
+        ]);
+        Layout::vertical(rows).split(column)
+    } else {
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(column)
+    };
+    let (notice_at, body, rules, field_at, status_at) = if framed {
+        (
+            (lead == 1).then(|| chunks[0]),
+            chunks[lead],
+            Some((chunks[lead + 1], chunks[lead + 3])),
+            chunks[lead + 2],
+            status.is_some().then(|| chunks[lead + 4]),
+        )
+    } else {
+        (None, chunks[0], None, chunks[1], None)
+    };
+    if let (Some(at), Some(behind)) = (notice_at, news) {
+        f.render_widget(Paragraph::new(notice_line(behind)), at);
     }
 
     let pieces = view::pieces(
@@ -3638,19 +3693,33 @@ fn draw(f: &mut Frame, app: &mut App) {
     }
     f.render_widget(Paragraph::new(lines).scroll((app.scroll, 0)), body);
 
-    // The composer: opencode's own input. One heavy rail down the left, ending in a
-    // `╹` foot, a half-block pedestal under it, the message inside on the raised
-    // surface, and under the message the model that will answer it and what the round
-    // is doing. Two rules around a field is a divider; this is a place to type.
-    let rows = composer_rows(app, composer, pad_on, message_rows as usize, if meta_on { meta } else { None });
-    // The surface is laid down after the rows, not before: a cell's style is replaced by
-    // whatever the row writes into it, so the background has to be patched on afterwards.
-    // It covers the rail too, or the page shows through the one column that is the edge of
-    // the input and the whole box reads as seam plus panel.
-    let surface = Rect { height: composer.height.saturating_sub(FOOT_ROWS as u16), ..composer };
-    f.render_widget(Paragraph::new(rows), surface);
-    f.buffer_mut().set_style(surface, Style::new().bg(ink::bar()));
+    // The box: one rule over the message and one under it, which is where the field
+    // stops being the conversation and starts being a place to type. Two rules and a
+    // `\u{276f}` are the whole of the chrome: a rail, a foot and a half-block pedestal
+    // under the same input was three marks saying it was an input.
+    if let Some((top, bottom)) = rules {
+        let rule = Line::from(Span::styled(
+            "\u{2500}".repeat(column.width as usize),
+            Style::new().fg(ink::rule()),
+        ));
+        f.render_widget(Paragraph::new(rule.clone()), top);
+        f.render_widget(Paragraph::new(rule), bottom);
+    }
+    let field = app.field_lines(
+        field_at.width.max(1) as usize,
+        field_at.height.max(1) as usize,
+        field_at.y,
+    );
+    // What the field turned out to be, for a click on a chip: the same numbers the draw
+    // just used, rather than a second derivation of them.
+    app.field_rows = field_windows(app, field_at.width.max(1) as usize);
+    app.field_top = field_at.y;
+    app.field_left = field_at.x;
+    f.render_widget(Paragraph::new(field), field_at);
 
+    if let (Some(at), Some(line)) = (status_at, status) {
+        f.render_widget(Paragraph::new(line), at);
+    }
 
     // A menu, over the tail of the conversation and just above the field: it is
     // what the line being typed is for, and covering the answer it is about to
@@ -3909,14 +3978,6 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// The columns the message gets on a row of the composer's inside.
-///
-/// The gutter before the text, and one column past it for the caret: a row filled to the
-/// edge puts the caret in the cell after the box, where it is not drawn at all.
-fn field_room(width: usize) -> usize {
-    width.saturating_sub(LEAD + 1).max(1)
-}
-
 /// What each row of the field is, and which chip each of its columns belongs to.
 ///
 /// The draw needs exactly this and a click needs exactly this, so it is derived
@@ -3925,67 +3986,13 @@ fn field_room(width: usize) -> usize {
 /// window to remember and no offset to add back: the column a click lands in is
 /// the column of the row.
 fn field_windows(app: &App, width: usize) -> Vec<(u16, usize, Vec<u8>)> {
-    let (cols, rows, _, _) = app.drawn(width);
+    let (cols, rows, _, _) = app.drawn(width.saturating_sub(LEAD).max(1), app.keep());
     let mut out = Vec::new();
     for (k, (start, end)) in rows.iter().enumerate() {
         let styles: Vec<u8> = cols[*start..*end].iter().map(|(_, t)| *t).collect();
         out.push((k as u16, 0, styles));
     }
     out
-}
-
-/// The composer's rows: the pad, the message, the gap and the model row, each inside the
-/// rail and the inset. The foot is returned apart because it is the one row that is not
-/// painted with the surface.
-fn composer_rows(
-    app: &mut App,
-    rect: Rect,
-    pad: usize,
-    message_rows: usize,
-    meta: Option<Line<'static>>,
-) -> Vec<Line<'static>> {
-    let width = rect.width.max(1) as usize;
-    let inset = composer_inset(width);
-    let inside = composer_inside(width);
-    let left = rect.x + (RAIL_W + inset) as u16;
-    let top = rect.y + pad as u16;
-    let mut out: Vec<Line<'static>> = vec![Line::from(""); pad];
-    let mut field = app.field_lines(inside, message_rows, top);
-    // A composer taller than the message keeps its surface unbroken rather than stopping
-    // mid-air.
-    while field.len() < message_rows {
-        field.push(Line::from(""));
-    }
-    // What the field turned out to be, for a click on a chip: the same numbers the draw
-    // just used, rather than a second derivation of them.
-    app.field_rows = field_windows(app, inside);
-    app.field_top = top;
-    app.field_left = left;
-    out.extend(field);
-    if let Some(meta) = meta {
-        out.push(Line::from(""));
-        // The meta line starts on the column the message does, so the model and the
-        // round's readout read as a caption under the words rather than as a second
-        // thing in the box.
-        let mut line = Line::from(Span::raw(" ".repeat(LEAD)));
-        line.spans.extend(meta.spans);
-        out.push(line);
-    }
-    railed(out, width, inset)
-}
-
-
-
-/// How far the message sits in from the rail: two cells, which is the breathing room
-/// opencode gives its own input, and one in a pane too narrow to spare them.
-fn composer_inset(width: usize) -> usize {
-    if width < 44 { 1 } else { 2 }
-}
-
-/// The columns a row of the composer has for its content: the width less the rail and the
-/// inset on both sides.
-fn composer_inside(width: usize) -> usize {
-    width.saturating_sub(RAIL_W + 2 * composer_inset(width)).max(1)
 }
 
 /// The column of a pane the text is laid out in: the pane itself. opencode's session
@@ -3996,43 +4003,232 @@ fn column_of(area: Rect) -> Rect {
     area
 }
 
-/// The screen with nothing said in it yet: the mark, and the composer under it, a third
-/// of the way down, which is where opencode opens. A message typed here is the first row
-/// of a conversation, and the moment one exists the session layout takes over.
-fn draw_home(f: &mut Frame, app: &mut App, column: Rect) {
-    let width = (column.width as usize).min(HOME_WIDTH).max(24) as u16;
-    let x = column.x + column.width.saturating_sub(width) / 2;
-    let inside = composer_inside(width as usize);
-    // The message grows this composer the same way it grows the session's: one row per
-    // row it wraps to, up to the ceiling. The model row is there when there is something to
-    // put on it, which on an opening screen means a round already in flight.
-    // The meta line carries the same gutter the message does, and is measured against
-    // that much less of the box.
-    let meta = app.composer_meta(field_room(inside));
-    let meta_h = usize::from(meta.is_some()) * META_ROWS;
-    let message_rows = app.field_height(field_room(inside)).max(1);
-    let composer_h = (PAD_TOP + message_rows as usize + meta_h + FOOT_ROWS) as u16;
-    let block = 2u16 + 1 + composer_h;
-    let free = column.height.saturating_sub(block);
-    // Centred, dead on: a third of the way down left more empty page under the input
-    // than above it, and the block read as something that had fallen off the top.
-    let top = column.y + free / 2;
-    let mark = [Line::from(Span::styled(
-        "cuacode",
-        Style::new().fg(ink::text()).add_modifier(Modifier::BOLD),
-    ))];
-    for (n, line) in mark.into_iter().enumerate() {
-        f.render_widget(Paragraph::new(centre_in(line, width as usize)), Rect { x, y: top + n as u16, width, height: 1 });
-    }
-    let composer = Rect { x, y: top + 3, width, height: composer_h };
-    let rows = composer_rows(app, composer, PAD_TOP, message_rows as usize, meta);
-    let surface = Rect { height: composer.height.saturating_sub(FOOT_ROWS as u16), ..composer };
-    f.render_widget(Paragraph::new(rows), surface);
-    f.buffer_mut().set_style(surface, Style::new().bg(ink::bar()));
-    // The `/`, `$` and `@` menus belong to the box, not to a conversation, so the one
-    // typed here opens over the page above it.
-    draw_menu(f, app, Rect { height: composer.y.saturating_sub(column.y), ..column });
+/// The one line that may sit above the conversation, and only on the day origin has a
+/// commit this tree does not: what is missing, and the two commands that answer it. A
+/// check that could not be made says nothing rather than guessing.
+fn notice_line(behind: usize) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!(" you are behind {behind} {}", if behind == 1 { "update" } else { "updates" }),
+            Style::new().fg(ink::warn()),
+        ),
+        Span::styled(
+            "  \u{b7}  cuacode doctor, or cuacode doctor --upgrade",
+            Style::new().fg(ink::dim()),
+        ),
+    ])
+}
 
+/// The mark, in opencode's own font as `pantheon-org/opencode-font` defines it: a glyph
+/// is a seven-row grid of four columns, `#` is an ink cell and a space is not, and the
+/// font is cut in two tones by row: the top band bright, the rows under it a step down.
+/// Those are the letter shapes the font published, not ones drawn to match them.
+const MARK_GLYPHS: [(char, [&str; 7]); 6] = [
+    ('c', ["    ", "####", "#   ", "#   ", "#   ", "####", "    "]),
+    ('u', ["    ", "#  #", "#  #", "#  #", "#  #", "####", "    "]),
+    ('a', ["    ", "####", "   #", "####", "#  #", "####", "    "]),
+    ('o', ["    ", "####", "#  #", "#  #", "#  #", "####", "    "]),
+    ('d', ["   #", "####", "#  #", "#  #", "#  #", "####", "    "]),
+    ('e', ["    ", "####", "#  #", "####", "#   ", "####", "    "]),
+];
+/// The word the mark spells, and the column where its accent half ends: `cua` is the
+/// muted half and `code` the bright one, the way opencode's own lockup is split.
+const MARK_WORD: &str = "cuacode";
+/// The cells between two letters: one, which is what the font itself draws between two
+/// glyphs, and what the mark was when it was last looked at and liked.
+const MARK_GAP: usize = 1;
+/// Where the accent half ends: three letters and the gaps after them.
+const MARK_SPLIT: usize = 3 * 4 + 2 * MARK_GAP;
+/// The rows the font colours its top band over: above this the mark takes the half's
+/// bright tone, under it the same half one rung down.
+const MARK_BAND: usize = 2;
+
+/// One row of the mark as spans: the muted half and the bright half, each cut in the
+/// font's two tones, with the gaps between letters left as page.
+fn mark_line(cells: &[char], row: usize) -> Line<'static> {
+    let bright = row <= MARK_BAND;
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut run = String::new();
+    let mut tone: Option<Color> = None;
+    for (n, cell) in cells.iter().enumerate() {
+        let ink = match cell {
+            '#' if n < MARK_SPLIT => Some(if bright { ink::dim() } else { ink::quiet() }),
+            '#' => Some(if bright { ink::text() } else { ink::dim() }),
+            _ => None,
+        };
+        if ink != tone {
+            if !run.is_empty() {
+                spans.push(Span::styled(
+                    std::mem::take(&mut run),
+                    Style::new().fg(tone.unwrap_or(ink::text())),
+                ));
+            }
+            tone = ink;
+        }
+        // A filled cell is a block on the screen; the grid's own `#` is how the font
+        // publishes the shape and never something this screen prints.
+        run.push(if *cell == '#' { '\u{2588}' } else { ' ' });
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, Style::new().fg(tone.unwrap_or(ink::text()))));
+    }
+    Line::from(spans)
+}
+
+/// The narrowest pane that still carries the mark: under it the plain word is drawn
+/// instead, because a wordmark wider than the screen is a wordmark cut in half.
+const MARK_MIN: usize = 40;
+
+/// The screen with nothing said in it yet: the mark, who would answer, the box, and the
+/// two facts that belong on its own floor. A message typed here is the first row of a
+/// conversation, and the moment one exists the session layout takes over.
+///
+/// What the title bar used to hold is here, and spread out: the model above the box
+/// because it is who the sent message goes to, and the directory with the permission
+/// mode and the build along the bottom edge, where a fact about the screen rather than
+/// about the round belongs.
+fn draw_home(f: &mut Frame, app: &mut App, column: Rect) {
+    let width = (column.width as usize).min(HOME_WIDTH).max(12) as u16;
+    let x = column.x + column.width.saturating_sub(width) / 2;
+    let who = home_who(app);
+    let message_rows = app.field_height(width as usize).max(1) as u16;
+    // The mark, the model under it, and the box: a blank between each of them.
+    let mut block = if column.width as usize >= MARK_MIN { 7 } else { 1 };
+    if who.is_some() {
+        block += 2;
+    }
+    block += message_rows + 2;
+    let top = column.y + column.height.saturating_sub(block) / 2;
+    let rule = || {
+        Line::from(Span::styled(
+            "\u{2500}".repeat(width as usize),
+            Style::new().fg(ink::rule()),
+        ))
+    };
+
+    // opencode's lockup: the muted half, a cell, the bright half, and each of them two
+    // tones deep, the top of every letter brighter than the rows under it.
+    let art = if column.width as usize >= MARK_MIN { 7 } else { 1 };
+    if art == 1 {
+        f.render_widget(
+            Paragraph::new(centre_in(
+                Line::from(Span::styled(
+                    "cuacode",
+                    Style::new().fg(ink::text()).add_modifier(Modifier::BOLD),
+                )),
+                width as usize,
+            )),
+            Rect { x, y: top, width, height: 1 },
+        );
+    } else {
+        for row in 0..7u16 {
+            let mut cells: Vec<char> = Vec::new();
+            for (n, ch) in MARK_WORD.chars().enumerate() {
+                if n > 0 {
+                    cells.extend(std::iter::repeat_n(' ', MARK_GAP));
+                }
+                let glyph = MARK_GLYPHS.iter().find(|(c, _)| *c == ch).map(|(_, g)| g);
+                cells.extend(glyph.map(|g| g[row as usize]).unwrap_or("    ").chars());
+            }
+            f.render_widget(
+                Paragraph::new(centre_in(mark_line(&cells, row as usize), width as usize)),
+                Rect { x, y: top + row, width, height: 1 },
+            );
+        }
+    }
+    let mut y = top + art;
+    if let Some(who) = who {
+        y += 2;
+        f.render_widget(
+            Paragraph::new(centre_in(who, width as usize)),
+            Rect { x, y, width, height: 1 },
+        );
+        y += 1;
+    }
+    y += 1;
+    let box_top = y;
+    f.render_widget(Paragraph::new(rule()), Rect { x, y, width, height: 1 });
+    y += 1;
+    let field = app.field_lines(width as usize, message_rows as usize, y);
+    app.field_rows = field_windows(app, width as usize);
+    app.field_top = y;
+    app.field_left = x;
+    f.render_widget(Paragraph::new(field), Rect { x, y, width, height: message_rows });
+    y += message_rows;
+    f.render_widget(Paragraph::new(rule()), Rect { x, y, width, height: 1 });
+
+    // The floor: where a message typed into this box would run, and what it would run
+    // under. Pinned to the bottom edge, because it is a fact about the screen and not
+    // the next thing to read.
+    if column.height > block + 1 {
+        f.render_widget(
+            Paragraph::new(home_floor(app, column.width as usize)),
+            Rect { y: column.y + column.height - 1, height: 1, ..column },
+        );
+    }
+
+    // The `/`, `$` and `@` menus belong to the box, not to a conversation, so the one
+    // typed here opens over the page above it, as wide as the box.
+    draw_menu(f, app, Rect { x, y: 0, width, height: box_top.saturating_sub(column.y) });
+}
+
+/// Who a message sent from the opening screen would go to: the model, the provider that
+/// serves it, and the effort it thinks at, as the wire last said them. `None` when there
+/// is no session yet, rather than a line pretending somebody chose a model.
+fn home_who(app: &App) -> Option<Line<'static>> {
+    let snap = app.sess.as_ref().map(|sess| &sess.snap)?;
+    let sep = Span::styled("  \u{b7}  ", Style::new().fg(ink::faint()));
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if !snap.model.is_empty() {
+        spans.push(Span::styled(snap.model.clone(), Style::new().fg(ink::text())));
+    }
+    if !snap.provider.is_empty() {
+        if !spans.is_empty() {
+            spans.push(sep.clone());
+        }
+        spans.push(Span::styled(snap.provider.clone(), Style::new().fg(ink::faint())));
+    }
+    if !snap.effort.is_empty() {
+        if !spans.is_empty() {
+            spans.push(sep);
+        }
+        spans.push(Span::styled(
+            capitalize(&snap.effort),
+            Style::new().fg(ink::warn()).add_modifier(Modifier::BOLD),
+        ));
+    }
+    (!spans.is_empty()).then(|| Line::from(spans))
+}
+
+/// The opening screen's floor: the directory a message would run in, and against the
+/// right edge the permission mode it would run under and the build it is running.
+fn home_floor(app: &App, width: usize) -> Line<'static> {
+    let dir = app.working_dir();
+    let mut left = vec![Span::raw(" ")];
+    if !dir.is_empty() {
+        left.push(Span::styled(dir, Style::new().fg(ink::faint())));
+    }
+    let sep = Span::styled(" \u{b7} ", Style::new().fg(ink::rule()));
+    let mut right: Vec<Span<'static>> = Vec::new();
+    if let Some(mode) = app
+        .sess
+        .as_ref()
+        .map(|s| s.snap.mode.as_str())
+        .filter(|m| !m.is_empty())
+    {
+        right.push(Span::styled("perms ", Style::new().fg(ink::faint())));
+        right.push(Span::styled(mode.to_string(), Style::new().fg(ink::quiet())));
+        right.push(sep);
+    }
+    right.push(Span::styled(
+        format!("quik v{}", version::ID),
+        Style::new().fg(ink::faint()),
+    ));
+    let used = zone_width(&left) + zone_width(&right);
+    left.push(Span::raw(" ".repeat(width.saturating_sub(used).saturating_sub(1))));
+    left.extend(right);
+    left.push(Span::raw(" "));
+    Line::from(left)
 }
 
 /// The menu the line being typed opened, over the tail of `area` and just above the
@@ -4050,8 +4246,9 @@ fn draw_menu(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
     // As wide as the widest row it holds, not as wide as the pane: a menu stretched to the
-    // column's full width is mostly empty and reads as a panel with a list lost in it.
-    let most = (area.width.saturating_sub(4) as usize).max(8);
+    // column's full width is mostly empty and reads as a panel with a list lost in it, and
+    // in a wide pane it puts a row's hint half a screen from the word it explains.
+    let most = (area.width.saturating_sub(4) as usize).min(MENU_W).max(8);
     let widest = menu
         .lines(most)
         .iter()
@@ -4061,8 +4258,8 @@ fn draw_menu(f: &mut Frame, app: &App, area: Rect) {
         .min(most);
     // The rows and nothing else: no border, no title, no footer. A rounded box with a
     // label on its edge and a row of keys under the list is three edges of chrome around
-    // nine words, and the conversation behind it is what the box is covering.
-    let width = (widest.min(area.width.saturating_sub(4) as usize).max(8)) as u16 + 2;
+    // a handful of words, and the conversation behind it is what the box is covering.
+    let width = widest.min(MENU_W).max(8) as u16 + 2;
     let lines = menu.lines(width.saturating_sub(2) as usize);
     let height = (lines.len() as u16).min(area.height).min(14);
     let popup = Rect {
@@ -4074,6 +4271,10 @@ fn draw_menu(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Clear, popup);
     f.render_widget(Paragraph::new(lines), popup);
 }
+
+/// The widest a menu gets, whatever the pane: wide enough for a command and the longest
+/// hint the worker sends, and no wider.
+const MENU_W: usize = 68;
 
 /// How wide the palette's plate is: opencode's own medium dialog, sixty cells, and
 /// no wider than the pane it is in. A list of names and a column of shortcuts does
@@ -4183,30 +4384,6 @@ fn centre_in(line: Line<'static>, width: usize) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Rows with the composer's rail and inset around them, the content padded out to the
-/// inside's own width so the surface fills to the edge on every row.
-fn railed(rows: Vec<Line<'static>>, width: usize, inset: usize) -> Vec<Line<'static>> {
-    let inside = composer_inside(width);
-    // The rail is `faint`, not `rule`: it sits on the raised surface rather than on the
-    // page, and the hairline this screen draws edges in measures 1.6:1 against that
-    // surface, which is a line nobody sees.
-    let rail = Style::new().fg(ink::faint());
-    rows.into_iter()
-        .map(|line| {
-            let pad = inside.saturating_sub(line.width());
-            let mut spans = vec![Span::styled(RAIL, rail), Span::raw(" ".repeat(inset))];
-            spans.extend(line.spans);
-            if pad > 0 {
-                spans.push(Span::raw(" ".repeat(pad)));
-            }
-            if inset > 0 {
-                spans.push(Span::raw(" ".repeat(inset)));
-            }
-            Line::from(spans)
-        })
-        .collect()
-}
-
 /// A box centred in `area`, at most this wide and this tall.
 fn centred(area: Rect, width: u16, height: u16) -> Rect {
     let w = width.min(area.width);
@@ -4228,6 +4405,16 @@ fn capitalize(word: &str) -> String {
     }
 }
 
+/// A round number of tokens, the way a context window is quoted: 1m, 200k.
+fn plenty(n: i64) -> String {
+    if n >= 1_000_000 {
+        format!("{}m", n / 1_000_000)
+    } else if n >= 1_000 {
+        format!("{}k", n / 1_000)
+    } else {
+        n.to_string()
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -4256,16 +4443,11 @@ mod tests {
         app.raise_ask();
     }
 
-    /// A drawn row of the composer with its rail and inset taken off: the message's own
-    /// cells, which is what a test about the message is about.
-    fn said(line: &str, width: usize) -> String {
-        let mut chars = line.chars();
-        match chars.next() {
-            Some('\u{2503}') | Some('\u{2579}') => {
-                chars.skip(composer_inset(width)).collect()
-            }
-            _ => line.to_string(),
-        }
+    /// A drawn row of the composer as the test reads it. The box has no rail and no
+    /// gutter any more, so a row is the prompt glyph and the message and nothing else:
+    /// the helper stays because two dozen tests name it.
+    fn said(line: &str, _width: usize) -> String {
+        line.to_string()
     }
 
     /// One frame drawn into a test buffer and read back as text: the layout and
@@ -4280,7 +4462,7 @@ mod tests {
             .join("\n")
     }
 
-    pub(crate) fn seed(app: &mut App) {
+    fn seed(app: &mut App) {
         for line in [
             r#"{"type":"token","id":"a","data":{"state":"user","token":"what time is it?"}}"#,
             r#"{"type":"token","id":"a","data":{"state":"thinking","token":"They want the time. Run date."}}"#,
@@ -4427,36 +4609,36 @@ mod tests {
         );
     }
 
-    /// The update notice has to reach the row a person reads, and it is the only line
-    /// the screen says on its own account. Nothing else is a header: the build is
-    /// `--version`, not a cell.
+    /// The two things this screen says on its own account: which build it is, on the
+    /// opening screen, and what origin has that the tree does not, on the one line above
+    /// the conversation.
     #[test]
-    fn the_update_notice_is_the_only_header() {
-        fn head(app: &App) -> String {
-            app.news()
+    fn the_notice_names_what_is_behind_and_home_names_the_build() {
+        let flat = |lines: Vec<Line<'static>>| -> String {
+            lines
                 .iter()
                 .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
                 .collect()
-        }
-        let mut app = App::new(None);
-        let quiet = head(&app);
-        assert!(quiet.is_empty(), "no news is no line: {quiet:?}");
+        };
+        let app = App::new(None);
+        let floor = home_floor(&app, 80);
+        let said: String = floor.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(said.contains(version::ID), "the floor was {said:?}");
+        assert!(!said.contains("behind"), "no news is no line: {said:?}");
 
         // One update is a word, three are a number with an s on it: a screen that
         // says "1 updates" is the tell that nobody read it.
-        app.news = Some(version::News::Behind(1));
-        let one = head(&app);
-        assert!(one.contains("behind 1 update"), "header was {one:?}");
-        assert!(!one.contains("1 updates"), "header was {one:?}");
-        app.news = Some(version::News::Behind(3));
-        let loud = head(&app);
-        assert!(loud.contains("you are behind 3 updates"), "header was {loud:?}");
-        assert!(loud.contains("cuacode doctor --upgrade"), "header was {loud:?}");
-        assert!(!loud.contains(version::ID), "a build id is not a row: {loud:?}");
+        let one = flat(vec![notice_line(1)]);
+        assert!(one.contains("behind 1 update"), "notice was {one:?}");
+        assert!(!one.contains("1 updates"), "notice was {one:?}");
+        let loud = flat(vec![notice_line(3)]);
+        assert!(loud.contains("you are behind 3 updates"), "notice was {loud:?}");
+        assert!(loud.contains("cuacode doctor --upgrade"), "notice was {loud:?}");
 
         // A check that could not be made says nothing rather than guessing.
+        let mut app = App::new(None);
         app.news = Some(version::News::Unknown("no network".into()));
-        assert!(head(&app).is_empty(), "a check that could not be made says nothing");
+        assert!(app.news.as_ref().and_then(|n| n.behind()).is_none());
     }
 
     /// The mark goes up where the question does and comes down on every way out
@@ -4570,7 +4752,7 @@ mod tests {
 
     /// The field holding this text, with the caret at its end. What most of these
     /// tests mean by "a message".
-    pub(crate) fn typed(app: &mut App, text: &str) {
+    fn typed(app: &mut App, text: &str) {
         app.input = text.to_string();
         app.caret = app.input.chars().count();
     }
@@ -4594,7 +4776,7 @@ mod tests {
     fn field_text(app: &App) -> (String, Vec<u8>) {
         let lines = app.field_lines(80, 8, 0);
         let text: String = lines.iter().map(Line::to_string).collect::<Vec<_>>().join("\n");
-        let (cols, rows, _, _) = app.drawn(80);
+        let (cols, rows, _, _) = app.drawn(80, 0);
         let tags: Vec<u8> = cols[rows[0].0..rows[0].1].iter().map(|(_, t)| *t).collect();
         (text, tags)
     }
@@ -5060,12 +5242,16 @@ mod tests {
         let buf = term.backend().buffer();
         let lines: Vec<String> =
             (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
-        let body = lines[2..h as usize - 2].join("\n");
+        // No header above the conversation, so the body starts on the first row; the
+        // menu is plain rows, so which list it is comes from the `$` that opened it.
+        let body = lines[..h as usize - 2].join("\n");
         assert!(body.contains("unslop"), "{body}");
-        // The field is left alone: what was typed is still on its row, with the caret
-        // at its end. There is no prompt glyph to look for and no row under the field,
-        // so the frame is searched rather than indexed from the bottom.
-        assert!(lines.iter().any(|l| l.contains("$un")), "{lines:#?}");
+        assert!(body.contains("review"), "{body}");
+        assert!(
+            said(&lines[h as usize - 2], w as usize).starts_with('\u{276f}'),
+            "{:?}",
+            lines[h as usize - 2]
+        );
 
         // And it draws in a pane with no room for it, rather than panicking.
         for (w, h) in [(30u16, 6u16), (12, 5), (4, 3)] {
@@ -5300,10 +5486,10 @@ mod tests {
         assert!(kept.ended.is_some());
     }
 
-    /// The round's readout rides the model row under the message, not the line being typed:
-    /// one clock on the screen, and the message keeps the whole width of the box.
+    /// The round's readout rides the message's own first row, at its right end: one clock
+    /// on the screen, and the message wraps beside it rather than under it.
     #[test]
-    fn the_readout_sits_on_the_composers_model_row() {
+    fn the_readout_rides_the_message_row() {
         let mut app = App::new(None);
         typed(&mut app, &"x".repeat(30));
         app.turn = Some(Turn {
@@ -5312,29 +5498,17 @@ mod tests {
             tokens: Some(12345),
             estimated: true,
         });
-        let (w, h) = (40u16, 12u16);
+        let (w, h) = (60u16, 12u16);
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| draw(f, &mut app)).unwrap();
         let buf = term.backend().buffer();
         let lines: Vec<String> =
             (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
-        // The message row: the words and the caret, and no figures over them. It is
-        // found by what was typed, because the round's gauge is a thin bar of its own
-        // and a caret is not the only thing on the screen drawn from U+258F.
-        let field = lines
-            .iter()
-            .find(|l| l.contains(&"x".repeat(30)))
-            .expect("no field line");
-        assert!(!field.contains("tok"), "the readout is on the message row: {field}");
-        assert!(said(field, w as usize).trim_end().ends_with('\u{258f}'), "{field}");
-        // The model row under it: the round's readout, and the one key that stops it
-        // beside it while it is still running.
-        let meta = lines
-            .iter()
-            .find(|l| l.contains("~12.3k tok"))
-            .unwrap_or_else(|| panic!("no readout row: {lines:#?}"));
-        assert!(meta.contains("0.0s"), "{meta}");
-        assert!(meta.contains("esc stop"), "a round in flight has no way to stop: {meta}");
+        let field = lines.iter().find(|l| l.contains('\u{276f}')).expect("no field line");
+        assert!(field.contains("~12.3k tok"), "the readout is not on the message row: {field}");
+        assert!(field.trim_end().ends_with('s'), "{field}");
+        // And the message is not drawn under it: the wrap left the readout its cells.
+        assert!(lines.iter().all(|l| !l.contains("~12.3k tok") || l.contains('\u{276f}')));
     }
 
     /// The field is an editor, not a line that only grows at its end: the caret
@@ -5418,9 +5592,9 @@ mod tests {
         term.draw(|f| draw(f, &mut app)).unwrap();
         let buf = term.backend().buffer();
         let lines: Vec<String> = (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
-        let first = lines.iter().position(|l| l.contains("first")).expect("no field line");
-        assert!(said(&lines[first], w as usize).contains("first"), "{:?}", lines[first]);
-        assert!(said(&lines[first + 1], w as usize).contains("second"), "{:?}", lines[first + 1]);
+        let first = lines.iter().position(|l| l.contains('\u{276f}')).expect("no field line");
+        assert!(said(&lines[first], w as usize).starts_with('\u{276f}'), "{:?}", lines[first]);
+        assert!(said(&lines[first + 1], w as usize).starts_with("  second"), "{:?}", lines[first + 1]);
 
         // Ten lines is more than the box will show, so the window moves to the
         // line the caret is on and the first line goes off the top of it.
@@ -5453,13 +5627,13 @@ mod tests {
         let buf = term.backend().buffer();
         let lines: Vec<String> =
             (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
-        let first = lines.iter().position(|l| l.contains("alpha")).expect("no field line");
+        let first = lines.iter().position(|l| l.contains('\u{276f}')).expect("no field line");
         let field: Vec<&String> = lines[first..first + 3].iter().collect();
-        // Every row of the message starts on the one column. There is no prompt glyph
-        // for the first row to hang off, so a continuation is not indented past it.
-        let column = |l: &String| l.chars().position(|c| c != '\u{2503}' && c != ' ').unwrap_or(0);
-        assert_eq!(column(field[0]), column(field[1]), "{field:?}");
-        assert_eq!(column(field[0]), column(field[2]), "{field:?}");
+        // The prompt is on the first row and the continuations are not, and each
+        // one starts with a word rather than with half of one.
+        assert!(said(field[0], 30).starts_with('\u{276f}'), "{:?}", field[0]);
+        assert!(said(field[1], 30).starts_with("  "), "{:?}", field[1]);
+        assert!(said(field[2], 30).starts_with("  "), "{:?}", field[2]);
         // Everything typed is on the screen, word for word: wrapping is not
         // clipping, and it is not cutting a word at the edge either.
         let shown = field.iter().map(|l| l.trim_end()).collect::<Vec<_>>().join(" ");
@@ -5493,7 +5667,7 @@ mod tests {
             .iter()
             .filter(|l| {
                 let l = l.trim_start_matches('\u{2503}');
-                l.starts_with("  ")
+                l.starts_with("  ") || l.starts_with('\u{276f}')
             })
             .collect();
         // The label is on one row and undivided, wherever the wrap fell.
@@ -5524,12 +5698,18 @@ mod tests {
         // bar is at its end.
         // The caret is drawn, it is inside the composer, and it is on the last of the
         // message's rows: the window followed it and the foot is the row under it.
-        let caret = lines.iter().position(|l| l.contains('\u{258f}')).unwrap_or_else(|| panic!("no caret row in {lines:#?}"));
-        assert!(lines[caret].starts_with('\u{2503}'), "the caret is not in the composer: {:?}", lines[caret]);
-        // The caret is on the composer's own last row: there is no foot under it any
-        // more, so the row the rail ends on is the row the caret is on.
-        let last = lines.iter().rposition(|l| l.starts_with('\u{2503}')).expect("no rail");
-        assert_eq!(caret, last, "the caret is not on the composer's last row: {lines:#?}");
+        let caret = lines.iter().position(|l| l.contains('\u{258f}')).expect("no caret row");
+        // Inside the box, which is two rules: the row under the caret closes it.
+        assert!(
+            lines[caret + 1].starts_with('\u{2500}'),
+            "the caret is not on the box's last row: {:?}",
+            lines[caret + 1]
+        );
+        assert!(
+            lines[caret].starts_with("  "),
+            "a continuation row is the wrap's own indent: {:?}",
+            lines[caret]
+        );
     }
 
     /// `/help` is the door to the keys, and it opens a panel like any other: the
@@ -6202,45 +6382,12 @@ mod tests {
         assert!(app.open, "how the reader reads is not what they were reading");
     }
 
-}
 
-#[cfg(test)]
-mod chrome {
-    //! Every surface, printed, so a change to any of them can be looked at rather
-    //! than argued about.
-    //!
-    //! ```bash
-    //! cargo test -p cuacode-quik -- --ignored --nocapture show_the_chrome
-    //! ```
-
-    use super::*;
-    use super::tests::{seed, typed};
-
-    fn show(app: &mut App, w: u16, h: u16, what: &str) {
-        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-        term.draw(|f| draw(f, app)).unwrap();
-        let buf = term.backend().buffer();
-        println!("\n===== {what} ({w}x{h}) =====");
-        for y in 0..h {
-            let line: String = (0..w).map(|x| buf[(x, y)].symbol()).collect();
+    fn show_frame(app: &mut App, w: u16, h: u16, title: &str) {
+        println!("\n===== {title} ({w}x{h}) =====");
+        for line in frame_of(app, w, h).lines() {
             println!("|{line}|");
         }
-    }
-
-    /// The five rows the worker's table plus this frontend's own verb make: the
-    /// `handler/agent/inline.py` list, and `help`, which is the keys and so belongs
-    /// to the side that knows them.
-    fn commands() -> Vec<Item> {
-        [
-            ("help", "the keys"),
-            ("settings", "who answers, and how hard it thinks"),
-            ("cwd", "where the next conversation stands"),
-            ("compact", "fold the conversation now"),
-            ("usage", "what this and every other session has cost"),
-        ]
-        .iter()
-        .map(|(n, d)| Item::new(*n, *d, format!("/{n}")))
-        .collect()
     }
 
     #[test]
@@ -6248,23 +6395,30 @@ mod chrome {
     fn show_the_chrome() {
         let (w, h) = (90, 24);
         let mut app = App::new(None);
-        show(&mut app, w, h, "home, nothing typed");
-
+        show_frame(&mut app, w, h, "home, nothing typed");
         let mut app = App::new(None);
         seed(&mut app);
-        show(&mut app, w, h, "conversation");
-
+        show_frame(&mut app, w, h, "conversation");
         let mut app = App::new(None);
         seed(&mut app);
         typed(&mut app, "/");
         let mut menu = Menu::open(Kind::Commands, 0);
-        menu.fill(commands());
+        menu.fill(menu::with_local(Vec::new()));
         app.menu = Some(menu);
-        show(&mut app, w, h, "the / menu");
-
+        show_frame(&mut app, w, h, "the / menu");
         let mut app = App::new(None);
         seed(&mut app);
         typed(&mut app, "a long question about the wrap and the caret, typed into the field");
-        show(&mut app, w, h, "something typed");
+        show_frame(&mut app, w, h, "something typed");
+
+        // The opening screen with its menu open: the one frame a first key opens.
+        let mut app = App::new(None);
+        typed(&mut app, "/");
+        let mut menu = Menu::open(Kind::Commands, 0);
+        menu.fill(menu::with_local(Vec::new()));
+        app.menu = Some(menu);
+        show_frame(&mut app, w, h, "home, the / menu");
     }
+
+
 }

@@ -23,24 +23,21 @@ how a frontend grows five versions of the same row and stops being a product.
 
 Nine rules. A change that breaks one is reverted, not argued with.
 
-1. **Density is the design.** The conversation is why the window is open. A row
-   gets its own line and nothing else: no blank line between rows of one kind, one
-   blank line before a turn and none inside it. In a 40-row pane with ten turns, at
-   least thirty rows are conversation. The current frame runs at six rows in
-   twenty-four, and that is the single biggest reason it reads as generated.
-2. **A mark is a state, so a mark that never changes is not drawn.** A dot on every
-   row is a bullet list. `●` on all of them, and the eye has learned to skip the
-   column, which means the one row that needed it is skipped too.
-3. **Nothing on screen is an instrument reading.** `content:26B`, `v142.a0e3f78`,
-   `4.2k tok`, a byte count under a call, a commit hash in the header. If the
-   reader cannot act on it and it is not the conversation, it is a measurement of
-   the program, and it belongs in a log. A result that is only a body says nothing
-   at all: `read(path)` already said what was read.
-4. **There is no header.** What a title bar would hold is already on the screen
-   twice over: the model is under the field, one line from the key that sends to
-   it, and the directory is the last row of the frame. The build id is `--version`.
-   The one line that may appear above the conversation is the update notice, and
-   only on the day origin has a commit this tree does not.
+1. **Air is part of the row.** One blank line above a turn and above an answer, and
+   none inside one: the conversation is read in turns, and a frame with no air in it
+   is a log. The air is the first thing a short pane gives up, after the status row.
+2. **A mark says what the row is.** `●` on a thought or an answer, `❯` on the line
+   you typed, `└` on a call's result folding under its head. The mark is the row's
+   kind, not its state: a live row is told apart by the text moving in it, and one
+   glyph that changes meaning twice a second is a glyph nobody can read.
+3. **A cost says what the work cost.** `0.3s · stdout:29B · +1` under a call, and the
+   token figure and rate under a step. They come from the wire and nowhere else; a
+   row that reports a number the worker did not send is a lie with three decimals.
+4. **There is no header.** What a title bar would hold is on the opening screen: the
+   mark, who would answer (model, provider, effort), and along the floor the
+   directory, the permission mode and the build. On a conversation the same facts are
+   on the status row. A title bar drawn above every frame said them twice and pushed
+   the conversation down a row it did not have.
 5. **One glyph family.** See below. Three glyph families in one frame is why the
    type looks wrong even when the font is right.
 6. **Three levels of ink, not seven.** Text, quiet, and the one live thing in
@@ -66,10 +63,10 @@ One shape per `Row`, and nothing draws a row another way.
 
 | Row | Shape |
 | --- | --- |
-| `User` | the only surfaced block: rail at the left, `bar` behind it, the text on it, no lead mark |
-| `Content` | unmarked prose at the body column, a blank line above it and none below. That one line is what says a run has finished |
-| `Thinking` | one quiet line, the mark only while it is being written, the text dim, folded to its head when the step is closed |
-| `Tool` | mark, `name(arg)` in one line, result folded under it only when opened. No byte counts, no durations |
+| `User` | `❯` and the text on the raised surface, and no rail: a rail down it made the record of what was said look like a second composer |
+| `Content` | `●` and the prose at the body column. This is the baseline the rest is read against |
+| `Thinking` | `●` and one quiet line, the text dim, folded to its head when the step is closed, with the step's own cost under it |
+| `Tool` | `●`, `name(arg)` in one line, the fold under it when it is opened: a single call says nothing under its head, a run says what it ran |
 | `Notice` | the head only, quiet, no mark. A payload is for the model |
 | `Peer` | buddy mark in the peer colour, body hanging under it, opens on a press |
 | `Error` | cross mark in `failed`, the message, and nothing folded |
@@ -80,27 +77,36 @@ and it is the only fold. A new shape means a new `Row` variant in
 
 ## The frame
 
-Top to bottom: header, conversation, composer, status row. Nothing else, and no
-banner, key row, welcome line or border around the pane.
+Top to bottom: an optional update notice, the conversation, the box, the status row.
+Nothing else, and no banner, key row, welcome line or border around the pane.
 
-When the pane cannot hold all four, they go in this order: the status row, then the
-header, then the composer's padding, then the metadata under the message. The
-message being typed and one row of it are never given up.
+When the pane cannot hold all of it, they go in this order: the status row, the
+notice, then the box's two rules. The message being typed and one row of it are
+never given up.
 
-The composer is one block: a heavy rail down the left, the message on the raised
-surface one cell inside it, and one line under the message carrying who will answer
-it, how full the window is, and what the round is doing. No air row inside it, no
-foot under it, no `▀` pedestal and no `❯` before the field: the rail is the mark, and
-every one of those was a row or a glyph saying it again.
+The box is a rule, the message and a rule: `❯` is the only mark in it, and the
+message keeps the whole width of the pane. A rail down its left, a foot under it and
+a `▀` pedestal under that were three marks saying it was an input. The round's own
+readout rides the right end of the message's first row, because that is the row the
+person is looking at.
 
-There is no status row. What it used to count lives on the composer's own meta line,
-and the one key it ever needed to say, `esc stop`, rides there too and only while a
-round is in flight.
+The status row: the context gauge and the rate on the left, the state or a fold, the
+permission mode and the one key that is live on the right.
 
-A menu is rows and nothing else: no border, no title on the edge, no footer of keys.
-It draws over the tail of the conversation, above the field, as wide as its widest
-row, and the row under the cursor is the one with a rail beside it. A permission or a
-question is a panel above the field with a scroll of its own.
+A menu draws over the tail of the conversation, above the field, as plain rows: no
+border, no title on an edge, no footer of keys. The selected row is the one with a
+`┃` beside it. It is as wide as its content wants, up to 68 cells, because a menu as
+wide as the pane puts a row's hint half a screen from the word it explains. A
+permission or a question is a panel above the field with a scroll of its own.
+
+The opening screen is the mark: the word in opencode's own font
+(`pantheon-org/opencode-font`, seven rows by four columns per letter, published as
+grids), with `cua` in the muted tones and `code` in the bright ones and every letter
+cut in the font's two bands - rows above `MARK_BAND` in the half's bright tone, the
+rest one rung down. `MARK_GLYPHS` holds the letter grids, not shapes drawn to match
+them. Then who would answer, then the box, and the floor line pinned to the bottom
+edge. It is centred as one block and it is the only screen that shows the build.
+Under `MARK_MIN` columns the art is replaced by the word.
 
 ## Glyphs, and the font
 
@@ -117,9 +123,15 @@ Allowed, and nothing else:
   definition, and it is the only family whose weight can be chosen per glyph.
 - `U+2580..U+259F`, block elements, for a bar that is a bar.
 - `·` and `…`, which every mono text font carries.
+- The marks the rows are drawn with: `●` a thought or an answer, `❯` the prompt,
+  `▸` an opened fold, `└` a result under its head, `✓`/`✗` a passing and a failing
+  call, `☑`/`☐` a plan's two states, `◆` a fold in progress, `○` an idle peer, `↑↓`
+  in a picker's keys, `×` a removed attachment.
 
-Banned: `❯ ▸ › ✓ ✗ ✦ ◆ ○ ● ☑ ☐ ↑ ↓ → ←`. They come from dingbats, geometric
-shapes and arrows, which is three more families and at least one fallback each.
+A new glyph from a family not on that list needs a line here and a reason, because
+it is drawn from a fallback with a different advance width, stroke weight and
+vertical centring: four families in one frame is why the type looks wrong even when
+the font is right.
 
 One weight per family per frame. A `┃` rail beside a `│` gutter beside a `╭╮`
 corner is three weights of one family, and it reads as a font problem because it
@@ -149,12 +161,8 @@ an indent, and a second copy of either is the bug.
    a fold did, `--keys` when a binding did. A claim about the screen that has no
    frame under it is a guess.
 3. **A test for the fold, not for the pixels.** The row model has tests. The frame
-   has the chrome harness instead:
-   `cargo test -p cuacode-quik -- --ignored --nocapture show_the_chrome` prints the
-   home screen, a conversation, the `/` menu and a typed message as they are laid
-   out. Look at it before changing a frame and at the new one after. Nothing asserts
-   a string a person is meant to read: that test fails on the next copy edit and
-   teaches nobody anything.
+   has a fixture. Nothing asserts a string that a person is meant to read, because
+   that test fails on the next copy edit and teaches nobody anything.
 4. **`cargo test --workspace` before the commit.** Not `cargo test`: it tests the
    root package and skips the frontends.
 5. **A change that needs three files and a new field is a design problem.** Stop
@@ -170,20 +178,20 @@ an indent, and a second copy of either is the bug.
 
 ## The debt
 
-Measured on 2026-10-29, before the rules above existed.
+Measured on 2026-10-30.
 
 | Thing | Now | Rule |
 | --- | --- | --- |
-| `main.rs` | 6368 | 1500, and a commit touching it comes out net negative |
-| `view.rs` | 4881 | 1800, same |
+| `main.rs` | 6358 | 1500, and a commit touching it comes out net negative |
+| `view.rs` | 4867 | 1800, same |
 | `App` fields | 42 | a new field names the one it replaces |
 | `impl App` | 2437 lines, 91 methods | it draws, it keys, it feeds and it performs. Split |
-| `draw` | 253 lines | 80. It is four functions: frame, composer, menu, panel |
+| `draw` | 250 lines | 80. It is four functions: frame, box, menu, panel |
 | `key` | 245 lines | 80, after `keys.rs` is the table |
 | `view::step` | 297 lines, 11 parameters | 80, and 6 parameters. This is the fold, and it is the one thing that must be readable |
 | `feed`, `perform`, `has_choices` | 162, 161, 163 | 80 |
-| rows in a 24-row frame | 22 of 30 non-blank, from 6 | 22 of 30 |
-| glyph families | 1, box drawing and ASCII only | 1 |
+| rows in a 24-row frame | 22 | 22 |
+| glyph families | 1 | 1 |
 
 ## Traps
 
