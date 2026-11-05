@@ -64,6 +64,12 @@ knows which profile owns which file.
   the fence's language says a comment is, and what the line before it left open. Both
   TUI frontends map its tones to their own palette; a second vocabulary in a frontend
   is how two panes end up disagreeing about what a comment looks like.
+- `src/console.rs` - the console's input mode, kept the way a frontend needs it, and
+  the filter that keeps a terminal sequence out of the message being typed. The mode
+  belongs to the console, not to a process: anything else on that console can set it,
+  and with `ENABLE_VIRTUAL_TERMINAL_INPUT` on, the pointer's moves arrive as
+  characters and the keyboard's keys stop matching. `Claim` reasserts it every pass;
+  `Typing` is the second door, for the sequence that got in anyway.
 - `src/version.rs` - the build stamp `build.rs` gives it, and the one question
   about origin that answers "is this code out of date". Fetches, so it is asked
   on a thread and never from a frame.

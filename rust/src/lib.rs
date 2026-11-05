@@ -4,11 +4,13 @@
 //! consumer of that. `wire` is the format, `worker` is the process, `session`
 //! is the conversation's state, `transcript` is the conversation as rows,
 //! `attach` is a picture on its way into a message, `code` is a fenced line read as
-//! the tones a terminal draws code in, `hosts` is the other machines a worker can
+//! the tones a terminal draws code in, `console` is the console's input mode kept
+//! the way a frontend needs it, `hosts` is the other machines a worker can
 //! run on, and `version` is which build this is and whether origin has moved past it.
 
 pub mod attach;
 pub mod code;
+pub mod console;
 pub mod doctor;
 pub mod hosts;
 pub mod session;
