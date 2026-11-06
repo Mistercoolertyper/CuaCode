@@ -1,5 +1,5 @@
 import os, re, socket, ssl, time
-from tools.loader import load_tools, dispatch, refresh_dynamic
+from tools.loader import load_tools, dispatch, refresh_dynamic, wire_result
 from tools._parser.ToProvider import to_provider
 from handler.agent import compact, effort, images, interrupt, providers
 from handler.agent.background import JOBS
@@ -784,7 +784,11 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
                     job = JOBS.adopt(call.name, args, value)
                     yield {"type": "background", "job": job.brief()}
                     result = _bg_result(job)
-            yield {"type": "tool_output", "name": call.name, "result": result}
+            yield {"type": "tool_output", "name": call.name, "result": result,
+                   # `result` is what the model reads; `wire` is what a row says about
+                   # it, which the tool itself declares. The loop has the registry in
+                   # hand, so this is the one place that can ask.
+                   "wire": wire_result(reg, call.name, result)}
             # Something sent to a peer is drawn like something received from one: the
             # buddy row, and a head saying who to whom. Without this a sent message
             # leaves no mark in the conversation it came from, and the only evidence it

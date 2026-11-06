@@ -2,7 +2,7 @@ import sys, os, time
 sys.path.insert(0, os.path.dirname(__file__))
 
 from handler.protocol import IPC
-from handler.agent.main import generate, _compact_now
+from handler.agent.main import generate, registry, _compact_now
 from handler.agent import compact, inline, providers
 from handler.agent.background import JOBS
 from handler.session import store
@@ -14,6 +14,7 @@ from integrations.instructions import loader as instructions
 from integrations.skills import loader as skills
 from integrations.permissions import decider
 from tools._safety import shell as shell_safety
+from tools.loader import wire_result
 
 SETTINGS = config.settings()
 
@@ -319,7 +320,8 @@ def replay(session, env):
                 ipc.reply(env, "token", {"state": "tool_calls", "token": p.native_calls(r["calls"])})
         elif t == "tool":
             ipc.reply(env, "token", {"state": "tool_output", "token": r.get("name", ""),
-                                     "result": r.get("result", {}), "index": tools_seen})
+                                     "result": wire_result(registry(), r.get("name", ""), r.get("result", {})),
+                                     "index": tools_seen})
             tools_seen += 1
 
 
@@ -1219,31 +1221,13 @@ while True:
                         # call is filed under, and what tool.detail is asked for.
                         idx = tool_ordinal(sess)
                         sess.add_tool(name, result)
-                        if name in ("screenshot", "photos"):
-                            # Keep the IPC payload tiny - images live in messages, not the wire
-                            count = result.get("count", 1)
-                            ipc.reply(env, "token", {"state": "tool_output", "token": name, "result": {"n": count}, "index": idx, "status": "tooling"})
-                        elif name in ("WebFetch", "agent", "workflow", "skill", "describe_image") and isinstance(result.get("result"), dict):
-                            # The body stays out of the drawn row: tens of
-                            # thousands of characters, and messages already hold it.
-                            r = result["result"]
-                            body = r.get("output")
-                            brief = {k: v for k, v in r.items() if k not in ("output", "log", "text", "instructions", "description")}
-                            if isinstance(r.get("instructions"), str): brief["chars"] = len(r["instructions"])
-                            if isinstance(body, str): brief["chars"] = len(body)
-                            elif isinstance(body, dict): brief["fields"] = sorted(body)[:8]
-                            if isinstance(r.get("log"), list): brief["steps"] = len(r["log"])
-                            ipc.reply(env, "token", {"state": "tool_output", "token": name,
-                                                     "result": {"result": brief}, "index": idx, "status": "tooling"})
-                        elif name == "shell" and isinstance(result.get("result"), dict):
-                            # Same reason as images: command output belongs in the
-                            # messages, not in a row a frontend has to swallow.
-                            r = result["result"]
-                            brief = {k: v for k, v in r.items() if k not in ("stdout", "stderr")}
-                            brief["bytes"] = len(r.get("stdout", "")) + len(r.get("stderr", ""))
-                            ipc.reply(env, "token", {"state": "tool_output", "token": name, "result": {"result": brief}, "index": idx, "status": "tooling"})
-                        else:
-                            ipc.reply(env, "token", {"state": "tool_output", "token": name, "result": result, "index": idx, "status": "tooling"})
+                        # The row gets the tool's own brief; the body it leaves out
+                        # is in the record and in `messages`, where the model reads
+                        # it. Three name lists used to decide this here, one per
+                        # group of tools, and a new one fell through all three.
+                        ipc.reply(env, "token", {"state": "tool_output", "token": name,
+                                                 "result": chunk.get("wire", result),
+                                                 "index": idx, "status": "tooling"})
                     else:
                         ipc.reply(env, "token", {"state": typ, "token": chunk.get("text"), "status": "running"})
             except Exception as e:

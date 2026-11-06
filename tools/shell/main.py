@@ -4,6 +4,20 @@ from pathlib import Path
 from tools import _window
 from tools._safety import shell as safety
 
+def brief(result: dict) -> dict:
+    """The row says how much came back, not what it said.
+
+    The output is in the conversation already, where the model reads it, and a
+    build log on the wire is a build log in a frame. `bytes` is the fact a person
+    wants from it: a command that printed nothing and one that printed forty
+    lines are different rows.
+    """
+    r = result.get("result")
+    if not isinstance(r, dict): return result
+    row = {k: v for k, v in r.items() if k not in ("stdout", "stderr")}
+    row["bytes"] = len(r.get("stdout") or "") + len(r.get("stderr") or "")
+    return {"result": row}
+
 OUT_CAP = 20_000        # chars per stream
 DEFAULT_TIMEOUT = 30
 # The loop watches this call from another thread, so this is only how long a

@@ -5,6 +5,10 @@ and schema(), so the model is offered the agents actually installed.
 """
 from integrations.subagents import loader as agents
 from handler.agent import subagent
+from tools.loader import brief_body
+
+# The output is the answer and it is in the conversation; the row says how big.
+brief = brief_body("output")
 
 def _installed() -> dict:
     # Called once per turn to notice a subagent file written a moment ago. Two

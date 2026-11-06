@@ -9,6 +9,10 @@ from _session import save_screenshot
 
 OS = platform.system()
 
+def brief(result: dict) -> dict:
+    """One screenshot is one row; the encoded image lives in the message."""
+    return {"result": {"n": 1}}
+
 def _capture_module():
     if OS == "Darwin": import _capture_macos as m
     elif OS == "Windows": import _capture_windows as m

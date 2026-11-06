@@ -3,6 +3,11 @@
 The list is read off disk every turn, so a skill written now loads next turn.
 """
 from integrations.skills import loader as skills
+from tools.loader import brief_body
+
+# The instructions are the answer and they are in the conversation; the row says
+# how much text they were.
+brief = brief_body("instructions")
 
 def _installed() -> dict:
     # scope="model": a skill marked `disable-model-invocation` is the user's to

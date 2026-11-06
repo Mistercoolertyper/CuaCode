@@ -40,6 +40,44 @@ class Tool:
     # tool-wide, but most tools are only sometimes dangerous (a file read, a
     # harmless command). safe() says which; without it every call is asked.
     safe: Callable = None
+    # What a frontend's row says about one result, when the result itself is too
+    # big to be the row. Declared by the tool, because only it knows which of its
+    # keys is a payload -- `stdout` for a shell, `image_base64` for a screenshot,
+    # `output` for a fetch. A tool with none sends its result whole, which is what
+    # the small ones want.
+    #
+    # Three hardcoded name lists in main.py used to decide this from outside the
+    # tools, so a new image-returning tool shipped its base64 to every frontend
+    # until somebody remembered the list.
+    brief: Callable = None
+
+def brief_body(*keys: str):
+    """A `brief` for a tool whose result carries a document under one key.
+
+    The body is already in `messages`, where the model reads it, so the row says
+    how big it was instead and keeps every small fact around it -- a truncated
+    fetch, a failed digest, a step count. A count is what a person wants from a
+    body anyway: "the page came back" and "the page came back with 90k
+    characters" are different rows.
+
+    keys default to the five the wire has carried bodies under so far; a tool with
+    a differently-named body passes its own.
+    """
+    drop = keys or ("output", "log", "text", "instructions", "description")
+
+    def brief(result: dict) -> dict:
+        r = result.get("result")
+        if not isinstance(r, dict): return result
+        row = {k: v for k, v in r.items() if k not in drop}
+        body = r.get("output")
+        # Measured, whichever of the keys carried it: one number says the same
+        # thing about a page, a skill body and a transcript.
+        if isinstance(r.get("instructions"), str): row["chars"] = len(r["instructions"])
+        if isinstance(body, str): row["chars"] = len(body)
+        elif isinstance(body, dict): row["fields"] = sorted(body)[:8]
+        if isinstance(r.get("log"), list): row["steps"] = len(r["log"])
+        return {"result": row}
+    return brief
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
     if not text.startswith("---"): return {}, text.strip()
@@ -78,6 +116,7 @@ def load_tools(tools_dir="tools") -> dict[str, Tool]:
             handler=mod.run,
             preview=getattr(mod, "preview", None),
             safe=getattr(mod, "safe", None),
+            brief=getattr(mod, "brief", None),
             module=mod if (hasattr(mod, "describe") or hasattr(mod, "schema")) else None,
             body=body,
         )
@@ -98,6 +137,20 @@ def refresh_dynamic(registry: dict[str, Tool]) -> dict[str, Tool]:
             if hasattr(t.module, "schema"): t.input_schema = t.module.schema()
         except Exception: pass
     return registry
+
+def wire_result(registry: dict, name: str, result: dict) -> dict:
+    """The copy of one result that crosses to a frontend.
+
+    One place, so a live turn and a reopened conversation send the same thing: a
+    replay used to ship the stored result whole while the live turn sent the
+    brief, so reopening a session redrew a build log that the turn itself had
+    reduced to a byte count. A brief that raises falls back to the whole result:
+    a row is not worth losing to a formatter bug.
+    """
+    fn = getattr(registry.get(name), "brief", None)
+    if not fn: return result
+    try: return fn(result)
+    except Exception: return result
 
 def dispatch(registry: dict[str, Tool], name: str, args: dict, ctx=None) -> dict:
     tool = registry.get(name)

@@ -7,6 +7,10 @@ import ipaddress, os, re, socket
 from urllib.parse import urlparse
 
 from handler.agent.subagent import AgentSpec, run as run_agent
+from tools.loader import brief_body
+
+# The page itself is in the conversation; the row says how much of it came back.
+brief = brief_body("output")
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")

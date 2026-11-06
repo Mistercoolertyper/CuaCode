@@ -269,3 +269,27 @@ readers, so it lives where all three can import it by name.
   the two module-level containers.
 - the "discard and pop" pair, written out twice, is `gate.forget`; the five-line
   rename fixup in `_fs_ops.py:61-67` is `gate.moved`.
+
+### A tool says what its own row is
+
+`Tool.brief` is a new field: a callable taking the dispatch result and returning
+what a frontend should be told about it. `tools/loader.py` has `brief_body(*keys)`
+for the five tools whose result carries a document, and `wire_result(registry,
+name, result)` is the one place that asks.
+
+- `main.py:1220-1244`, three hardcoded name lists, becomes one call: `("screenshot",
+  "photos")` -> `{"n": ...}`, six body-carrying tools -> strip the body, `"shell"`
+  -> strip the output. Each is now declared by the tool: `screenshot/main.py`,
+  `photos/main.py`, `shell/main.py`, `WebFetch/main.py`, `agent/main.py`,
+  `workflow/main.py`, `skill/main.py`. A tool that declares nothing sends its
+  result whole, which is what the small ones want.
+- `tools/describe_image` was in the body list with no body to strip -- the list
+  was a guess about a set of names, not a statement about any one tool. It has no
+  brief now, because its result is already one answer and a provider name.
+- the live turn and the replay now agree. `main.py:320-322` sent the stored result
+  whole while a live turn sent the brief, so reopening a conversation redrew a
+  build log the turn itself had reduced to a byte count.
+
+Bug fixed on the way: the image branch read `result.get("count")` on the
+*envelope* rather than the photos result, so a three-photo call drew `n 1`.
+`photos.brief` reads the count where photos puts it.

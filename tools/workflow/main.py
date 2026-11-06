@@ -4,6 +4,11 @@ The installed list is read off disk at load time by describe() and schema(), as
 in the agent tool.
 """
 from handler.agent import workflow as wf, subagent
+from tools.loader import brief_body
+
+# The output and the log are the run; the row says how big the first was and how
+# many lines the second had.
+brief = brief_body("output", "log")
 
 def _listing() -> list:
     try: return wf.listing()
