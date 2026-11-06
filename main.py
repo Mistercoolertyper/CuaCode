@@ -1255,4 +1255,8 @@ while True:
                 # Anything typed during the turn that the loop never reached goes
                 # back on the inbox and is answered as an ordinary next message.
                 ipc.end_run()
-    time.sleep(0.001)
+    # Fifty wakeups a second, not a thousand. Nothing a person does waits on this
+    # loop: a turn runs inside `chat()` and a key arrives on the reader thread. At
+    # 1ms this loop, which stats a peer mailbox and a session's own files on every
+    # pass, cost 13% of a core with the machine sitting still.
+    time.sleep(0.02)
