@@ -165,7 +165,10 @@ def run(args: dict, ctx) -> dict:
 
     # Only the apps that were not running before this call; one whose window
     # arrives later than its process is caught on the screenshot path instead.
-    opened = _window.park_new(getattr(ctx, "self_identity", None))
+    # The command's own duration goes with it: a person who typed or clicked while
+    # it ran is the one who opened whatever appeared, so it is named as neither.
+    opened = _window.park_new(getattr(ctx, "self_identity", None),
+                              ran_for=time.monotonic() - started)
 
     result = {"cwd": _cwd, "exit_code": proc.returncode, "stdout": out, "stderr": err,
               "duration": round(time.monotonic() - started, 2)}

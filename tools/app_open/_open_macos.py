@@ -521,6 +521,20 @@ def gui_apps() -> dict[str, str]:
     return {n.strip(): n.strip() for n in out.split(",") if n.strip()}
 
 
+def user_idle() -> float | None:
+    """Seconds since the last keyboard or mouse event, or None if Quartz cannot say.
+
+    What separates an app the agent opened from an app the person did: nobody is at the
+    keyboard during the former."""
+    ax = _ax()
+    if not ax: return None
+    try:
+        return float(ax.Q.CGEventSourceSecondsSinceLastEventType(
+            ax.Q.kCGEventSourceStateCombinedSessionState, ax.Q.kCGAnyInputEventType))
+    except Exception:
+        return None
+
+
 def wait_for_window(proc_name: str, timeout: float = 8) -> bool:
     """Public name for the settle wait, for callers that did not launch the app
     themselves and so never went through open_app."""
