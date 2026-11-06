@@ -10,6 +10,7 @@ import atexit
 import base64
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -35,6 +36,16 @@ START_TIMEOUT = 20          # interpreter launch + handshake
 PROBE_TIMEOUT = 3           # server/discover, which a legacy server may never answer
 CALL_TIMEOUT = 60           # a tool that drives an app can be slow; a hung one must not be forever
 STDERR_KEEP = 40            # lines, kept only to explain a server that died
+
+# A server gets no console of the frontend's. The console's input mode is the
+# *console's*, not a process's, so a server that sets ENABLE_VIRTUAL_TERMINAL_INPUT
+# on it -- which a TUI-ish server may well do, and which nothing here can prevent
+# once it holds the handle -- changes what the frontend's next key read returns.
+# A child with no console has none to change. Verified: CREATE_NO_WINDOW makes the
+# SetConsoleMode fail there instead of succeeding; the frontend's own mode is left
+# alone. The stdio pipes are the transport and are unaffected.
+QUIET = ({"creationflags": 0x08000000} if platform.system() == "Windows" else
+         {"start_new_session": True})
 
 
 class MCPError(RuntimeError):
@@ -211,7 +222,7 @@ class Connection:
             self.proc = subprocess.Popen(
                 argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, bufsize=1, env=env,
-                cwd=os.path.expanduser(cwd) if cwd else None)
+                cwd=os.path.expanduser(cwd) if cwd else None, **QUIET)
         except FileNotFoundError:
             raise MCPError(f"{self.name}: cannot run {argv[0]!r}")
         except OSError as exc:

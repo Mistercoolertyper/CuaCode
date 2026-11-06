@@ -423,6 +423,11 @@ struct App {
     /// else -- the message holds only the characters a chip covers -- so removing
     /// the chip is what removes the picture.
     shots: Vec<Shot>,
+    /// What the field is prepared to type. A character from the console is not
+    /// proof that a key made it: see `cuacode::console::Typing`. Held on the
+    /// screen rather than in the loop because it is the field's own state -- a
+    /// sequence split across two events has to still be one sequence.
+    typing: cuacode::console::Typing,
     /// The field's own mouse position, for a chip that is lit because the pointer
     /// is on it. Only the field tracks this: a row of the transcript has nothing
     /// to light.
@@ -620,6 +625,7 @@ impl App {
             undo: Vec::new(),
             cutting: false,
             shots: Vec::new(),
+            typing: cuacode::console::Typing::default(),
             hover: None,
             field_rows: Vec::new(),
             field_top: 0,
@@ -1467,6 +1473,19 @@ impl App {
         self.caret += 1;
     }
 
+    /// One character as the field takes it, with any terminal sequence removed.
+    ///
+    /// The key handler inserts through here rather than through `insert` directly,
+    /// because a character arriving as a `KeyCode::Char` is not proof that a key
+    /// made it: with the console's input mode drifted, a pointer moving over the
+    /// window arrives as the characters of a mouse report. `cuacode::console::Typing`
+    /// is the one place that decides what those are; this is the field's door.
+    fn type_char(&mut self, c: char) {
+        if let Some(c) = self.typing.keep(c) {
+            self.insert(c);
+        }
+    }
+
     fn backspace(&mut self) {
         if self.caret == 0 {
             return;
@@ -1771,7 +1790,7 @@ impl App {
             return;
         }
         for c in text.chars() {
-            self.insert(c);
+            self.type_char(c);
         }
     }
 
@@ -2230,10 +2249,10 @@ impl App {
             KeyCode::Char(c @ ('/' | '$' | '@'))
                 if !ctrl && !gr && self.sess.is_some() && self.at_word_start() =>
             {
-                self.insert(c);
+                self.type_char(c);
                 self.open_menu(Kind::of(c).unwrap());
             }
-            KeyCode::Char(c) if !ctrl => self.insert(c),
+            KeyCode::Char(c) if !ctrl => self.type_char(c),
             _ => {}
         }
         true
@@ -2760,6 +2779,13 @@ fn run(mut app: App) -> io::Result<()> {
     )?;
     let mut term = Terminal::new(CrosstermBackend::new(stdout))?;
 
+    // The console's input mode, taken now and held for as long as this screen is
+    // drawn. Anything else on this console can change it -- and with VT input on,
+    // the pointer's moves arrive as characters and land in the message being typed.
+    // See `cuacode::console` for what was measured; the workers also spawn with no
+    // console of this one's, and this is the half that does not depend on that.
+    let mut console = cuacode::console::Claim::take();
+
     // When the worker last put a word on the screen: the clock a live answer is
     // drawn against. Kept here rather than in the screen's state, because it is the
     // loop's own pace and nothing either frontend draws.
@@ -2770,6 +2796,11 @@ fn run(mut app: App) -> io::Result<()> {
     let mut touched = false;
 
     let result = loop {
+        // Asked every pass: one console call, and the only place a drift is caught,
+        // since nothing tells this process that another one moved the mode. A mode
+        // found changed is put back and the queue it already polluted emptied, before
+        // any of it is read as a key.
+        console.reassert();
         let arrived = app.pump();
         if arrived {
             said = Some(Instant::now());
