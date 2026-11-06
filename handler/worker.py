@@ -561,7 +561,8 @@ class Worker:
             # whole answer. Run state goes in `status`, not `state` (what a payload
             # is). A read-only command typed on its own (`/version`) lands here, and
             # sending the empty remnant to the model was a turn nobody asked for.
-            yield "status", {"status": "idle", **self.settings_fields()}
+            yield "status", {"status": "idle", "result": outcome("idle"),
+                             **self.settings_fields()}
             return
         # An allowlist naming a tool that is not installed is a typo, not a request
         # for a smaller toolbox: an agent with no tools would spend a turn finding
@@ -643,6 +644,11 @@ class Worker:
             providers.append_user_text(self.messages[-1], extra)
             yield "token", {"state": "notice", "token": extra, "status": "running"}
         self.pending_note = ""
+        # The rewind floor for this turn. commit() resets it to 0, so a failure
+        # before the first round was reached would have rewound past the user's own
+        # message: gone from the session, still in `messages`, and the next turn would
+        # treat the conversation as unopened.
+        self.sess.round_start()
         yield "status", {"type": "chat_received"}
         # Peer mail rides in as a chat envelope. The tag says who wrote it and what the
         # model was given, since the turn's own text carries the lead-in (which nobody
@@ -679,31 +685,35 @@ class Worker:
             calls and inside its waits."""
             return ipc.cancelled() or out_of_time()
 
-        gen = generate(API_KEY=config.api_key(self.settings["provider"]),
-                       messages=self.messages, ctx=self.ctx,
-                       settings={**self.settings, "effort": self.sess.effort},
-                       # One segment each: the shipped prefix stays stable, so the
-                       # cache survives; machine facts last.
-                       system=[s for s in (self.sess.system, instructions.user_block(),
-                                           skills.always_block(),
-                                           environment.block(self.ctx, self.settings, self.sess)) if s],
-                       cancelled=stop_now,
-                       # A callable, not a list: generate() asks at the one point a
-                       # user message is legal.
-                       steer=ipc.take_steer,
-                       # Which mailbox the round seam drains. Not `ctx["session_dir"]`,
-                       # which a subagent shares: a subagent is not the agent peers
-                       # are talking to.
-                       peer_sid=self.sess.id,
-                       # The event itself: generate() clears it as it consumes it,
-                       # one press one call.
-                       detach=ipc.background,
-                       # The allowlist a program asked for, or everything installed.
-                       allow=allow,
-                       # Who the calls that need asking go to, per mode.
-                       ask=self.gate(),
-                       auto=self.auto_decide if self.mode == "auto" else None)
+        # `None` until the loop object exists: everything from here to the first
+        # chunk is inside the try, because beginning a run and then raising out of
+        # argument evaluation would leave the run open for the rest of the process.
+        gen = None
         try:
+            gen = generate(API_KEY=config.api_key(self.settings["provider"]),
+                           messages=self.messages, ctx=self.ctx,
+                           settings={**self.settings, "effort": self.sess.effort},
+                           # One segment each: the shipped prefix stays stable, so the
+                           # cache survives; machine facts last.
+                           system=[s for s in (self.sess.system, instructions.user_block(),
+                                               skills.always_block(),
+                                               environment.block(self.ctx, self.settings, self.sess)) if s],
+                           cancelled=stop_now,
+                           # A callable, not a list: generate() asks at the one point a
+                           # user message is legal.
+                           steer=ipc.take_steer,
+                           # Which mailbox the round seam drains. Not `ctx["session_dir"]`,
+                           # which a subagent shares: a subagent is not the agent peers
+                           # are talking to.
+                           peer_sid=self.sess.id,
+                           # The event itself: generate() clears it as it consumes it,
+                           # one press one call.
+                           detach=ipc.background,
+                           # The allowlist a program asked for, or everything installed.
+                           allow=allow,
+                           # Who the calls that need asking go to, per mode.
+                           ask=self.gate(),
+                           auto=self.auto_decide if self.mode == "auto" else None)
             for chunk in gen:
                 typ = chunk.get("type")
                 if typ == "round":
@@ -801,9 +811,13 @@ class Worker:
                     # would double it. `peer_in` tells the two apart -- the other name on
                     # a sent row is the recipient's, so it cannot.
                     if chunk.get("peer_in"):
-                        self.sess.add_peer(peer_from, chunk.get("peer_name", ""),
-                                           (peer_tag or {}).get("cwd", ""),
-                                           (peer_tag or {}).get("text", ""))
+                        # From the chunk: a message that landed mid-turn has no
+                        # `peer_tag` at all (a person started the turn), so reading
+                        # the body from the tag recorded the peer's words as empty --
+                        # and on a peer-started turn it recorded the *starting*
+                        # message a second time under the wrong sender.
+                        self.sess.add_peer(chunk.get("from_peer", ""), chunk.get("peer_name", ""),
+                                           chunk.get("from_cwd", ""), chunk.get("body", ""))
                     shown = chunk.get("text", "")
                     if shown:
                         yield "token", {"state": "peer", "token": shown, "status": "running"}
@@ -857,7 +871,11 @@ class Worker:
             # Closed rather than dropped: a round budget stops in the middle of the
             # generator, and what ran on the way out (a stream's own cleanup, a
             # provider socket) has to run here and not at collection.
-            gen.close()
+            # Its own guard: a generator whose cleanup raises must not be what decides
+            # whether `end_run` happens, or a client waits on a turn that is over.
+            if gen is not None:
+                try: gen.close()
+                except Exception: pass
             # generate() puts its own outbox here; left behind, the next subagent asked
             # to report progress would append into a list nobody reads again.
             self.ctx.pop("emit", None)

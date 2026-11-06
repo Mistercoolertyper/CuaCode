@@ -826,6 +826,11 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
                 # the peer colour, so a peer's message is not read as a note about this
                 # machine. Head first, body after a newline, which is the shape the
                 # transcript folds into a row that opens.
+                # `body` and `from_cwd` ride along because the record the worker keeps
+                # is made from this chunk: `text` above is the row (a head and a body
+                # joined), and joining them again on the way to disk would store the
+                # head as part of what the peer said.
                 yield {"type": "peer", "text": f"{peers.head(rec)}\n{rec.get('body', '')}",
                        "show": peers.head(rec), "peer_in": True,
+                       "body": rec.get("body", ""), "from_cwd": rec.get("from_cwd", ""),
                        "from_peer": rec.get("from"), "peer_name": rec.get("from_name")}

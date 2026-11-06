@@ -425,3 +425,33 @@ answers `idle` and does not generate" was lost: `/version` typed on its own sent
 an empty message to the model. `tests/test_worker_commands.py` caught it -- the
 nine command checks went from 4 seconds to 248, because each one was starting a
 real generation. Restored in `handler/worker.py:turn`.
+
+### Four a reviewer found in the turn
+
+An independent read of `handler/worker.py` (one file, one brief) found four
+defects. Three were inherited from the old `main.py` and one was mine:
+
+- **a peer's words were recorded empty.** The `peer` branch built the record from
+  the *turn's* `peer_tag`, not from the chunk. A message that lands mid-turn has no
+  tag at all (a person started the turn), so it was written as `from=None,
+  text=""`; on a peer-started turn it recorded the message that started the turn
+  again, under the wrong sender. `generate()` now puts `body` and `from_cwd` on the
+  chunk, and the record is made from those.
+- **`begin_run()` sat outside the `try`.** `generate(...)`'s arguments are
+  evaluated eagerly (`config.api_key`, `instructions.user_block`, `environment.block`),
+  so an exception there left the run open for the life of the process: every later
+  `chat` would be steered into a list nobody drains, and no terminator was sent.
+  The whole turn is inside the try now, with `gen = None` until it exists.
+- **the rewind floor was the last commit, not the user's message.** `commit()`
+  resets the session's mark to 0, so a failure before the first round chunk
+  rewound past the user's own record -- gone from `meta.json`, still in the
+  provider history, and the next turn would call the conversation unopened and
+  re-inject the docs block. `turn()` takes a `round_start()` immediately after the
+  user record is written.
+- **`gen.close()` could skip the rest of the cleanup.** A generator whose own
+  cleanup raises would have skipped `end_run()` and the `emit` pop, and with them
+  the `max_rounds` terminator. It is inside its own guard now.
+
+Plus the smaller one the reviewer noted: the idle answer carries a `result`
+(`stop: "idle"`), so a client driving `turn()` directly has something to read,
+the same as the unknown-tool refusal.
