@@ -4,6 +4,15 @@ from pathlib import Path
 from tools import _window
 from tools._safety import shell as safety
 
+def irreversible(args: dict) -> str:
+    """Why bypass mode must not wave this command through, or "".
+
+    The same answer `safe` gives, for the opposite question: bypass asks nothing
+    at all, so this is then the only thing between the user and the machine. A
+    floor, not a screen -- see tools/_safety/shell.py.
+    """
+    return safety.destructive(str(args.get("command") or ""))
+
 def brief(result: dict) -> dict:
     """The row says how much came back, not what it said.
 

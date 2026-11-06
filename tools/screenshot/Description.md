@@ -1,9 +1,5 @@
 ---
 name: screenshot
-input:
-  grid_size: int = 100
-  region: "list[int] = None"
-  zoom: float = 2
 output:
   image_base64: base64,
   width: int,

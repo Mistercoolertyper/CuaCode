@@ -377,3 +377,51 @@ Left deliberately: `_spelled`'s `if key == "permission"`. It is not a mistake
 wearing an `if` -- `permission`'s object has a third field (`provider`, for the
 model that decides in auto mode) where `vision` and `steps` have two. Tabling the
 three shapes instead was longer and less readable than one branch that says so.
+
+### The toolbox owns the toolbox
+
+`registry()` and `visible()` moved from `handler/agent/main.py` to
+`tools/loader.py`.
+
+- `handler/context.py:177` imported both from the loop to price the tool schemas
+  for `/context`: a readout (stable) depending on the round loop (volatile) for
+  an answer about the tool system (stable). The direction of that import was the
+  only reason it existed.
+- `handler/agent/main.py` loses `_tools_dir`, `_registry`, `_needs_vision` and
+  `_visible` -- the loop no longer owns a global that is also the question "what
+  is installed".
+- `tests/test_compact.py` reached into the loop's `_visible` to build a provider
+  fixture. It asks `tools.loader` now: the fold is what that file is about.
+
+### The gate asks the tool
+
+`Tool.irreversible(args) -> str` is new, and shell declares it
+(`tools/shell/main.py`, pointing at the same `_safety.shell.destructive` it used).
+
+- `handler/worker.py:bypass_gate` said `if name == "shell"`, so a second tool that
+  could wipe something would have been waved through by the gate written to catch
+  exactly that. The gate now takes the tool object, which is also what `auto`
+  already took: two gates answering the same question about the same call had two
+  different signatures.
+
+### Smaller ones, in one pass
+
+- `tools/describe_image/main.py` had its own copy of the image unwrapper;
+  `providers/base._images` is now public `images_of` and shared.
+- `integrations/permissions/decider.py` imported config at module scope while
+  `skills/loader.py` imports it late with a comment explaining the cycle. Both late.
+- `handler/worker.py` clears `ctx["emit"]` when a turn ends: `generate()` writes
+  its own outbox there and never removed it, so a subagent reporting progress
+  after a completed turn appended into a list nobody reads again.
+- the four `input:` blocks in `tools/*/Description.md` that restated
+  `InputSchema.json` -- which is what the loader actually hands the model -- are
+  gone. Two statements of one contract: a field added to the JSON and not the
+  markdown was invisible, and one removed from the markdown was still offered.
+
+### The regression this pass caused and caught
+
+While splitting the turn, the rule "a `/command` that leaves no text to send
+answers `idle` and does not generate" was lost: `/version` typed on its own sent
+an empty message to the model. `tests/test_worker_commands.py` caught it -- the
+nine command checks went from 4 seconds to 248, because each one was starting a
+real generation. Restored in `handler/worker.py:turn`.

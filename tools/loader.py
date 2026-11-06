@@ -50,6 +50,11 @@ class Tool:
     # tools, so a new image-returning tool shipped its base64 to every frontend
     # until somebody remembered the list.
     brief: Callable = None
+    # Why this call is one there is nothing to undo after, or "". Asked only by
+    # bypass mode, which waves everything else through: it is the tool that knows,
+    # because it is the tool that decides what "deleted" means (the file tool puts
+    # what it removes in the Trash; shell can wipe a disk).
+    irreversible: Callable = None
 
 def brief_body(*keys: str):
     """A `brief` for a tool whose result carries a document under one key.
@@ -117,6 +122,7 @@ def load_tools(tools_dir="tools") -> dict[str, Tool]:
             preview=getattr(mod, "preview", None),
             safe=getattr(mod, "safe", None),
             brief=getattr(mod, "brief", None),
+            irreversible=getattr(mod, "irreversible", None),
             module=mod if (hasattr(mod, "describe") or hasattr(mod, "schema")) else None,
             body=body,
         )
@@ -137,6 +143,42 @@ def refresh_dynamic(registry: dict[str, Tool]) -> dict[str, Tool]:
             if hasattr(t.module, "schema"): t.input_schema = t.module.schema()
         except Exception: pass
     return registry
+
+# The registry, and the question of which of it a given model may be offered.
+#
+# It lives here rather than in the agent loop because two readers ask it: the loop,
+# which sends the tools, and handler/context.py, which prices them for /context. A
+# readout depending on the loop to ask what the toolbox holds is a stable module
+# importing a volatile one, and the direction of that import was the only reason it
+# had to.
+_registry = None
+
+def registry(tools_dir=None) -> dict:
+    """Every installed tool, loaded once per process.
+
+    Loaded once, since load_tools re-execs every tool's main.py. Refreshed each
+    turn for the self-describing tools only, so an agent can use a subagent or
+    skill file it just wrote. Unchanged entries come back byte-identical, so the
+    prompt cache survives.
+    """
+    global _registry
+    if _registry is None:
+        _registry = load_tools(tools_dir=tools_dir or Path(__file__).parent)
+    return refresh_dynamic(_registry)
+
+def needs_vision(t) -> bool:
+    """Read off the tool's declared output, not a name list, so a new
+    image-returning tool is covered the day it lands."""
+    return any("base64" in str(v) for v in (t.output_schema or {}).values())
+
+def visible(reg: dict, vision: bool) -> dict:
+    """The toolbox this model can actually use. Offered a camera it will call it,
+    and a rejected image costs the whole turn."""
+    if vision: return {k: t for k, t in reg.items() if not t.blind_only}
+    # Withheld for two different reasons: an image-returning tool fails the request
+    # outright, a coordinate-taking one silently succeeds somewhere the model never
+    # looked, which is worse.
+    return {k: t for k, t in reg.items() if not needs_vision(t) and not t.needs_sight}
 
 def wire_result(registry: dict, name: str, result: dict) -> dict:
     """The copy of one result that crosses to a frontend.

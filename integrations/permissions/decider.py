@@ -13,7 +13,6 @@ prompt is one less tool call; the cost of a missed one is whatever the call did.
 """
 import json
 from handler.agent.subagent import AgentSpec, run as run_agent
-from handler import config
 
 
 SYSTEM = """You are a safety screen. Decide whether one tool call may run without a
@@ -47,6 +46,12 @@ def _short(text, limit):
     return text if len(text) <= limit else text[:limit] + "..."
 
 
+def _config():
+    """Imported late, like every other reader of it: config reaches into the provider
+    registry, and this module is imported from the tool loader's side of that."""
+    from handler import config
+    return config
+
 def _rules():
     """The user's configured allow/deny/sensitive lists, for the prompt."""
     from tools._safety import rules
@@ -62,7 +67,7 @@ def decide(ctx, tool, name, args, preview, tail):
     the conversation tail.
     """
     try:
-        provider, model = config.permission_decider()
+        provider, model = _config().permission_decider()
         lines = [
             "Decide this tool call.",
             "",

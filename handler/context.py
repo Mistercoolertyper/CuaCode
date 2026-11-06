@@ -174,10 +174,10 @@ LABELS = {
 def _tool_parts(provider_name: str, vision: bool) -> tuple[dict, list, int]:
     """Every offered tool's schema, priced one at a time, so the sidecars can be pulled back
     out of the total and a toolbox that has grown to a fifth of the window is visible per row."""
-    from handler.agent.main import registry, _visible
+    from tools.loader import registry, visible
     from tools._parser.ToProvider import to_provider
 
-    reg = {k: t for k, t in _visible(registry(), vision).items() if t.active}
+    reg = {k: t for k, t in visible(registry(), vision).items() if t.active}
     per, rows = {}, []
     for name, t in sorted(reg.items()):
         n = tokens(to_provider({name: t}, provider_name))

@@ -17,7 +17,8 @@ import os, time
 
 from handler import config, context, environment, gate, peers, usage, version
 from handler.agent import compact, inline, stepname
-from handler.agent.main import generate, registry, _compact_now
+from handler.agent.main import generate, _compact_now
+from tools.loader import registry
 from handler.agent import providers
 from handler.session import store
 from handler.session.main import Session
@@ -25,7 +26,6 @@ from integrations.instructions import loader as instructions
 from integrations.memory import loader as memory, naming, recall
 from integrations.skills import loader as skills
 from integrations.permissions import decider
-from tools._safety import shell as shell_safety
 
 
 class Ctx(dict):
@@ -219,10 +219,16 @@ class Worker:
         if data.get("allow") is False: return {"error": "declined"}
         return {"choice": options[0]} if options else {"answer": "yes"}
 
-    def ask_permission(self, name: str, args: dict, preview: dict = None, note: str = None) -> bool:
+    def ask_permission(self, tool, name: str, args: dict, preview: dict = None,
+                       note: str = None) -> bool:
         """Put one call to the user. timeout=None keeps the question open as long as
         they need; a cancel ends the run it belonged to. preview is what the call
-        would do; note is why the auto gate flagged it."""
+        would do; note is why the auto gate flagged it.
+
+        Takes the tool as well as its name, the same as `auto_decide`: the two are
+        asked the same question about the same call, and a gate that could not see
+        the tool had to be told which tools were dangerous from outside.
+        """
         payload = {"name": name, "kind": "permission", "args": args}
         if preview: payload["preview"] = preview
         if note: payload["note"] = note
@@ -233,14 +239,19 @@ class Worker:
         """The auto gate: a configured small model decides. Returns (allow, reason)."""
         return decider.decide(ctx, tool, name, args, preview, tail)
 
-    def bypass_gate(self, name: str, args: dict, preview: dict = None, note: str = None) -> bool:
+    def bypass_gate(self, tool, name: str, args: dict, preview: dict = None,
+                    note: str = None) -> bool:
         """Bypass mode's gate: ordinary calls answer themselves, the irreversible
-        ones still go to the user. Only shell can do the irreversible thing in one
-        word; everything else that writes is bounded by what it writes to, and the
-        file tool already puts what it deletes in the Trash."""
-        why = shell_safety.destructive(str(args.get("command") or "")) if name == "shell" else ""
+        ones still go to the user.
+
+        Which calls those are is the tool's own answer (`Tool.irreversible`), not a
+        list of tool names kept here: this said `if name == "shell"`, so a second
+        tool that could wipe something would have been waved through by a gate
+        written to catch exactly that.
+        """
+        why = tool.irreversible(args) if tool is not None and tool.irreversible else ""
         if not why: return True
-        return self.ask_permission(name, args, preview, note or f"bypass keeps these: {why}")
+        return self.ask_permission(tool, name, args, preview, note or f"bypass keeps these: {why}")
 
     def gate(self):
         """Who a call that needs asking goes to, for the mode in force.
@@ -545,9 +556,11 @@ class Worker:
             # No run state claimed: nothing is generating, so a frontend timing this
             # would be timing a loop that does not exist.
             yield "token", {"state": "notice", "token": notice}
-        if text is None:
-            # Nothing is generating and nothing is about to, which only this side
-            # knows. Run state goes in `status`, not `state` (what a payload is).
+        if text is None or not text.strip():
+            # Nothing left to send, and nothing is generating or about to: that is the
+            # whole answer. Run state goes in `status`, not `state` (what a payload
+            # is). A read-only command typed on its own (`/version`) lands here, and
+            # sending the empty remnant to the model was a turn nobody asked for.
             yield "status", {"status": "idle", **self.settings_fields()}
             return
         # An allowlist naming a tool that is not installed is a typo, not a request
@@ -845,6 +858,9 @@ class Worker:
             # generator, and what ran on the way out (a stream's own cleanup, a
             # provider socket) has to run here and not at collection.
             gen.close()
+            # generate() puts its own outbox here; left behind, the next subagent asked
+            # to report progress would append into a list nobody reads again.
+            self.ctx.pop("emit", None)
             # Anything typed during the turn that the loop never reached goes back on
             # the inbox and is answered as an ordinary next message.
             ipc.end_run()

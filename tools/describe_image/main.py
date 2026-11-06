@@ -9,6 +9,7 @@ Images are fetched by dispatching the existing tools against the full registry r
 than the filtered one the model sees: screenshot is hidden from this model and still
 has to run for it.
 """
+from handler.agent.providers.base import images_of
 from handler.agent.subagent import AgentSpec, run as run_agent
 
 SYSTEM = """You are looking at an image on behalf of a model that cannot see it.
@@ -33,15 +34,8 @@ SCHEMA = {"properties": {
                 "description": "False if the image does not actually answer what was asked."}},
     "required": ["description", "answers"]}
 
-def _images(result: dict) -> list:
-    """Both shapes the image tools produce, same as the providers do."""
-    data = (result or {}).get("result")
-    if not isinstance(data, dict): return []
-    one, many = data.get("image_base64"), data.get("images") or []
-    return many if many else ([one] if one else [])
-
 def run(args: dict, ctx) -> dict:
-    from handler.agent.main import registry
+    from tools.loader import registry
     from tools.loader import dispatch
     from handler import config
 
@@ -58,7 +52,7 @@ def run(args: dict, ctx) -> dict:
     else:
         got = dispatch(reg, "photos", {"sources": [source], "max_size": 1400}, ctx=ctx)
     if got.get("error"): return {"error": f"could not load the image: {got['error']}"}
-    images = _images(got)
+    images = images_of((got or {}).get("result") or {})
     if not images: return {"error": f"no image came back for {source!r}"}
 
     # Down the list rather than at the first name: the vision flag is per provider while

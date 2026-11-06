@@ -19,7 +19,7 @@ from typing import Callable, Tuple
 from handler import config, context, peers, usage
 from handler.agent import inline, providers
 from handler.agent.background import JOBS
-from handler.agent.main import registry
+from tools.loader import registry
 from handler.session import store
 from handler.worker import terminal_ctx
 from integrations.memory import naming

@@ -1,34 +1,9 @@
 import os, re, socket, ssl, time
-from tools.loader import load_tools, dispatch, refresh_dynamic, wire_result
+from tools.loader import dispatch, registry, visible, wire_result
 from tools._parser.ToProvider import to_provider
 from handler.agent import compact, effort, images, interrupt, providers
 from handler.agent.background import JOBS
 from handler import peers
-
-_tools_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'tools')
-_registry = None
-
-def registry():
-    """Loaded once, since load_tools re-execs every tool's main.py. Refreshed
-    each turn for the self-describing tools only, so an agent can use a subagent
-    or skill file it just wrote. Unchanged entries come back byte-identical, so
-    the prompt cache survives."""
-    global _registry
-    if _registry is None: _registry = load_tools(tools_dir=_tools_dir)
-    return refresh_dynamic(_registry)
-
-def _needs_vision(t) -> bool:
-    """Read off the tool's declared output, not a name list, so a new
-    image-returning tool is covered the day it lands."""
-    return any("base64" in str(v) for v in (t.output_schema or {}).values())
-
-def _visible(reg: dict, vision: bool) -> dict:
-    """The toolbox this model can actually use. Offered a camera it will call
-    it, and a rejected image costs the whole turn."""
-    if vision: return {k: t for k, t in reg.items() if not t.blind_only}
-    # Withheld for two different reasons: an image-returning tool fails the request outright,
-    # a coordinate-taking one silently succeeds somewhere the model never looked, which is worse.
-    return {k: t for k, t in reg.items() if not _needs_vision(t) and not t.needs_sight}
 
 def _open(p, provider: str, model: str, messages: list, tools: list, system: str, params: dict):
     """The stream, plus its first Delta, with one retry for a rejected knob. stream() is a generator
@@ -457,7 +432,7 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
     # Default sighted when a provider does not declare it: an unexpected 400 is
     # obvious, whereas withheld cameras silently look like a stupid agent.
     vision = settings.get("vision", getattr(p, "vision", True))
-    reg = _visible(registry(), vision)
+    reg = visible(registry(), vision)
     if allow is not None: reg = {k: t for k, t in reg.items() if k in allow}
     if extra: reg = {**reg, **extra}
     tools = to_provider(tools=reg, provider=p.name)
@@ -755,11 +730,11 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
                 allow, reason = auto(tool, call.name, args, _preview(tool, args, ctx),
                                      _tail(messages), ctx)
                 if not allow:
-                    if ask is not None and not ask(call.name, args, _preview(tool, args, ctx), reason):
+                    if ask is not None and not ask(tool, call.name, args, _preview(tool, args, ctx), reason):
                         denied = "denied by the user"
                     elif ask is None:
                         denied = "denied by the permission model: %s" % reason
-            elif needed and ask is not None and not ask(call.name, args, _preview(tool, args, ctx)):
+            elif needed and ask is not None and not ask(tool, call.name, args, _preview(tool, args, ctx)):
                 denied = "denied by the user"
             if denied:
                 result = {"error": denied}

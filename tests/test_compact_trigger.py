@@ -41,10 +41,13 @@ check("neither local key is ever bound for the wire",
       "compact" not in config.params_for("opencode", MODEL, cfg)
       and "context_window" not in config.params_for("opencode", MODEL, cfg))
 
-# A window with no count still folds at the ratio that window deserves.
+# A window with no count still folds at the ratio that window deserves. The expected
+# figure is written out rather than computed from `compact.ratio()`: an assertion
+# built out of the code under test passes when the rule itself is wrong, and this
+# one is a number a person can check against /context (300k * 0.6822).
 window_only = {"providers": {"opencode": {"model_params": {MODEL: {"context_window": 300000}}}}}
 check("no count falls back to the window's ratio",
-      compact.trigger(SETTINGS, window_only) == int(300000 * compact.ratio(300000)),
+      compact.trigger(SETTINGS, window_only) == 204677,
       compact.trigger(SETTINGS, window_only))
 
 # Zero means never, and a per-model zero must not be read as "unset".
