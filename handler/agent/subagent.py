@@ -123,7 +123,11 @@ def _emit(ctx, name: str, chunk: dict):
     fn = ctx.get("emit") if isinstance(ctx, dict) else None
     if not callable(fn): return
     try: fn(name, chunk)
-    except Exception: pass
+    except Exception as e:
+        # The subagent runs to its answer either way; a parent whose rows stopped
+        # moving is the thing that needs the reason.
+        faults.note(f"a {name} progress event from {getattr(fn, '__qualname__', 'the caller')}", e,
+                    "the run continues and its result still comes back")
 
 def _drive(spec, messages, settings, key, system, ctx, allow, extra, box, provider, budget):
     """One pass of the round loop. Returns (content, rounds, stopped)."""

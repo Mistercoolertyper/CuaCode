@@ -56,4 +56,10 @@ def run(args):
         f"<read source=\"{urls[i] if i < len(urls) else '?'}\" confident=\"{r.get('confident')}\">\n"
         f"{r.get('findings', '')}\n</read>" for i, r in enumerate(got))
     out = agent(RECONCILE, f"Question: {question}\n\n{bundle}")
-    return out or {"error": "reconcile failed", "reads": got}
+    if not out:
+        # Named and counted: an empty reconcile is the one branch here that can
+        # return nothing, and "reconcile failed" on its own says neither how much
+        # was being reconciled nor what to do about it.
+        return {"error": f"the reconciler returned nothing for {len(got)} reads; "
+                         "the question went unanswered", "reads": got}
+    return out

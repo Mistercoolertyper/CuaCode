@@ -259,7 +259,11 @@ def _compact_now(messages: list, used: int, limit: int, ctx=None) -> str:
     if callable(emit):
         try: emit({"type": "compacting", "stage": "start", "folded": steps["folded"],
                    "freed": steps["freed"]})
-        except Exception: pass
+        except Exception as e:
+            # The screen will sit on whatever it had while a model call runs, with
+            # nothing saying what the wait is for. Said, so a fold that looks like a
+            # hang has a reason on the log.
+            faults.note("a fold's start event", e, "the screen shows no fold in progress")
     try:
         got = c.summarize(records[steps["start"]:steps["end"]], steps["words"], ctx=ctx)
     finally:
@@ -267,7 +271,9 @@ def _compact_now(messages: list, used: int, limit: int, ctx=None) -> str:
         # allowed to be left saying "compacting" because a provider went away.
         if callable(emit):
             try: emit({"type": "compacting", "stage": "done"})
-            except Exception: pass
+            except Exception as e:
+                # A frontend left saying "compacting" draws a spinner forever.
+                faults.note("a fold's done event", e, "the frontend may still show it as running")
     if "error" in got:
         # Reported, not raised: the conversation still works, it is just still long,
         # and the next round will try again with a slightly different figure.

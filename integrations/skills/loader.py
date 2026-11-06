@@ -47,7 +47,11 @@ def always_names() -> set:
         from handler import config
         names = config.load().get("always_skills") or []
         return {str(n).strip() for n in names if str(n).strip()}
-    except Exception:
+    except Exception as e:
+        # The forced list is a person's decision, and losing it silently means their
+        # always-on skills are not in the prompt for a turn that looks ordinary.
+        faults.note("the always_skills list in config.json", e,
+                    "no skill is forced on until it can be read")
         return set()
 
 

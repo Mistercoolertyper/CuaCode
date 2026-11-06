@@ -885,8 +885,13 @@ class Worker:
             self.sess.rewind()
             self.sess.commit()
             stopped = "error"
-            yield "token", {"state": "error", "token": str(e), "status": "error",
-                            "result": outcome("error")}
+            # Named: this is the row a person reads when a turn dies, and str(e)
+            # alone is a sentence with no subject. The round was rewound, so the
+            # note also says the conversation is intact.
+            yield "token", {"state": "error",
+                            "token": faults.note("the turn", e,
+                                                 "the round was rewound and the conversation is whole"),
+                            "status": "error", "result": outcome("error")}
         finally:
             # Closed rather than dropped: a round budget stops in the middle of the
             # generator, and what ran on the way out (a stream's own cleanup, a

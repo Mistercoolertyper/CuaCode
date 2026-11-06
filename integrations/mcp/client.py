@@ -22,6 +22,7 @@ from collections import deque
 from contextvars import ContextVar
 from pathlib import Path
 
+from handler import faults
 from handler.session import store
 
 PROTOCOL = "2025-06-18"             # legacy era: the version `initialize` asks for
@@ -409,11 +410,20 @@ class Connection:
         try:
             self._discover(version, set())
         except _Legacy as fallback:
+            reason = fallback.args[0] if fallback.args else "no answer"
             if want == "modern":
                 raise MCPError(f"{self.name}: configured for the stateless protocol, but "
                                f"server/discover did not answer as a {version} server would "
-                               f"({fallback.args[0] if fallback.args else 'no answer'})")
-            self._legacy_handshake()
+                               f"({reason})")
+            try:
+                self._legacy_handshake()
+            except Exception as old:
+                # Both openings were tried, so both reasons go in the sentence. The
+                # legacy error on its own reads as the only thing that was attempted,
+                # and when a server is misconfigured it is usually the probe -- the
+                # one that never got an answer -- that says why.
+                raise MCPError(f"{self.name}: neither protocol answered - stateless "
+                               f"{version}: {reason}; legacy {PROTOCOL}: {old}") from old
 
     def _discover(self, version: str, tried: set):
         """The modern opening: ask what the server speaks, and speak it. Anything
@@ -518,12 +528,13 @@ class Connection:
             if proc.stdin:
                 proc.stdin.close()
             proc.wait(timeout=3)
-        except Exception:                                       # noqa: BLE001
+        except Exception as e:                                  # noqa: BLE001
             proc.kill()
             try:
                 proc.wait(timeout=3)            # a killed child still needs reaping
-            except Exception:                   # noqa: BLE001
-                pass
+            except Exception as stuck:          # noqa: BLE001
+                faults.note(f"reaping MCP server {self.name} (pid {proc.pid})", stuck,
+                            f"it would not exit on its own either: {e}")
 
     # -- wire --------------------------------------------------------------
 
@@ -555,8 +566,12 @@ class Connection:
                     event = self._events.get(mid)
                 if event:
                     event.set()
-        except Exception:                                       # noqa: BLE001
-            pass
+        except Exception as e:                                  # noqa: BLE001
+            # This thread is the only reader. A call made after it dies waits on an
+            # answer nothing is reading, and says "the server did not answer" -- so
+            # the reason it stopped reading belongs here, once.
+            faults.note(f"reading MCP server {self.name}", e,
+                        "every later call to it is unanswered")
         finally:
             # Whatever is still waiting will never be answered now.
             with self._lock:
@@ -569,8 +584,9 @@ class Connection:
         try:
             for line in proc.stderr:
                 self._stderr.append(line.rstrip())
-        except Exception:                                       # noqa: BLE001
-            pass
+        except Exception as e:                                  # noqa: BLE001
+            faults.note(f"collecting MCP server {self.name}'s stderr", e,
+                        "why it exits will be missing from the error")
 
     def _send(self, message: dict):
         proc = self.proc
@@ -897,8 +913,9 @@ def pool(name: str, config: dict) -> Connection:
         _swept = True
         try:
             sweep()                     # once per worker: anything a dead one left
-        except Exception:                                       # noqa: BLE001
-            pass
+        except Exception as e:                                  # noqa: BLE001
+            faults.note("sweeping orphaned MCP servers", e,
+                        "one left by a dead worker stays running")
     with _pool_lock:
         conn = _pool.get(name)
         if conn and (not conn.alive() or conn.config != config):
@@ -932,8 +949,9 @@ def close_all():
     for conn in conns:
         try:
             conn.close()
-        except Exception:                                       # noqa: BLE001
-            pass
+        except Exception as e:                                  # noqa: BLE001
+            faults.note(f"closing MCP server {conn.name}", e,
+                        "its process may outlive the worker")
 
 
 # Session scope. A ContextVar, not a connection field: parallel subagents each get a browser session of their own,

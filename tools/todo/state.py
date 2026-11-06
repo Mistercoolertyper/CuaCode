@@ -44,7 +44,11 @@ def _depth() -> int:
     try:
         from handler.agent import subagent
         return subagent.depth()
-    except Exception:
+    except Exception as e:
+        # 0 means "the main loop", and a plan filed under the main loop from
+        # inside an agent writes where the parent's list lives.
+        faults.note("the agent-depth check", e,
+                    "this list is read and written as the main loop's")
         return 0
 
 

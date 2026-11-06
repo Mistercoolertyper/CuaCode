@@ -2,6 +2,7 @@ import os, platform, signal, subprocess, threading, time
 from pathlib import Path
 
 from tools import _window
+from handler import faults
 from tools._safety import shell as safety
 
 def irreversible(args: dict) -> str:
@@ -122,7 +123,12 @@ def _collect(proc, timeout: float, cancel) -> tuple[str, str, str]:
 
     def drain():
         try: box["io"] = proc.communicate()
-        except Exception: box["io"] = ("", "")
+        except Exception as e:
+            # The command ran; what was lost is its output. Two empty strings would
+            # read as a command that printed nothing, so the reason goes where the
+            # output would have been.
+            box["io"] = ("", f"the command's output could not be read: {e}")
+            faults.note("reading the shell's output", e, "the result says so in stderr")
         finally: box["done"] = True
 
     t = threading.Thread(target=drain, daemon=True)
