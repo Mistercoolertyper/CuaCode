@@ -184,24 +184,3 @@ class IPC:
         while not self.inbox.empty(): cmds.append(self.inbox.get())
         return cmds
 
-    def poll_one(self, timeout: Optional[float] = None) -> Optional[Envelope]:
-        try: return self.inbox.get(timeout=timeout)
-        except queue.Empty: return None
-
-# Example protocol: commands in from the other side, responses out.
-if __name__ == "__main__":
-    ipc = IPC()
-    ipc.send("status", {"state": "startup"})
-    while True:
-        for env in ipc.poll():
-            if env.type != "cmd":
-                continue
-            action = env.data.get("action")
-            if action == "stop":
-                sys.exit(0)
-            if action == "say_hi":
-                ipc.reply(env, "status", {"state": "running", "text": "hi!"})
-            if action == "inject":
-                ipc.reply(env, "status", {"state": "injected", "text": env.data.get("text")})
-        ipc.send("action", {"action": "do_abc", "data": [1, 2, 3, 4]})
-        time.sleep(1)

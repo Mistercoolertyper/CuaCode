@@ -9,6 +9,12 @@ from handler.session import store
 DEFAULTS = {"active": "ollama", "vision": "", "providers": {}, "always_skills": [],
             "effort": ""}
 
+# The four permission modes, in the order a picker shows them. One list: the config
+# reader validates against it, and so does the wire's permission.mode -- which had
+# its own copy of the four names, so a fifth mode would have been accepted by one
+# and rewritten to "ask" by the other.
+MODES = ("ask", "auto", "bypass", "off")
+
 def path() -> Path: return store.home() / "config.json"
 
 def blank() -> dict:
@@ -165,7 +171,7 @@ def permission_mode(cfg: dict = None) -> str:
         mode = (p.get("mode") or "ask").strip().lower()
     else:
         mode = (p or "ask").strip().lower()
-    return mode if mode in ("ask", "auto", "bypass", "off") else "ask"
+    return mode if mode in MODES else "ask"
 
 def permission_decider(cfg: dict = None) -> tuple:
     """(provider, model) named to decide tool calls in auto mode. ("", "") inherits the active

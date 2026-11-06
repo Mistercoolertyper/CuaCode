@@ -293,3 +293,45 @@ name, result)` is the one place that asks.
 Bug fixed on the way: the image branch read `result.get("count")` on the
 *envelope* rather than the photos result, so a three-photo call drew `n 1`.
 `photos.brief` reads the count where photos puts it.
+
+### main.py is a door, not an agent
+
+Three files instead of one, split along the line the brief is about:
+
+- `main.py` (1248 lines -> 37): choose between the argv forms, `--wire`, `serve`.
+- `handler/worker.py` (new): `Worker` owns the conversation -- the session, its
+  messages, the provider settings, the permission mode, the gates, the inline
+  commands, the fold, and `turn()`. No envelope, no id, no loop.
+- `handler/commands.py` (new): `TABLE`, one `Command` per action with its handler,
+  a sentence, the fields it reads and whether it answers mid-run. Plus `serve`,
+  which is the loop, and the eight menu readers `direct` commands need.
+
+The one contract worth naming: **a turn is a generator of `(envelope type,
+payload)`**. `w.turn(text)` produces the events; `commands.chat` pairs each with
+the envelope that asked. That is what makes the second door possible at all -- a
+caller with no frontend gets the same turn, and does not have to own an `ipc` to
+run one.
+
+- the fifty-branch `if/elif` is one dict, so a new command is one entry and
+  nothing else in the file changes.
+- `ipc.direct` is registered *from* the table (`if c.direct`), so the list that
+  answers mid-run and the list that answers the loop cannot disagree -- they were
+  two lists, and `dir.list` was in one and not the other.
+- an action that is not in the table now answers `status: error, unknown action`
+  instead of being dropped in silence. A consumer's typo used to cost an
+  afternoon of staring at a pipe that never spoke.
+- an exception inside a handler is answered as `status: error` instead of killing
+  the worker. Half the branches had their own `try`, and the other half were a
+  crash waiting for a bad argument.
+- six module globals (`SETTINGS`, `sess`, `messages`, `ctx`, `LAST_TURN`,
+  `PERM_MODE`, `pending_note`) are fields on one object, so "which conversation is
+  this?" has one answer.
+- `context_fields` now asks about the session's model, not `SETTINGS`'s: after
+  `session.load` those are two different conversations, so `/context` reported the
+  account's window for a conversation that was not the account's.
+- `pending_note` is cleared by `new_session` and `load_session`. It was carried
+  into the next message typed, including one in a different conversation.
+- `config.MODES` is the one list of the four permission modes; the wire had its
+  own copy of the same four names.
+- `handler/protocol.py`: `poll_one` (no caller) and the example loop under
+  `__main__` (a protocol nothing implements) are gone.
