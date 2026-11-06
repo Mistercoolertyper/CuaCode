@@ -26,6 +26,12 @@ exclude = ["zeron"]
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 
+# `console` keeps the console's input mode its own, which is a Win32 call: the
+# module lives in this crate, so the crate is where the binding has to be. A
+# frontend linking this half does not need its own copy.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console"] }
+
 # Every frontend here is a binary over the same dependency tree, so a dev build
 # pays the gpui stack's debuginfo once per frontend. That is what turns
 # `target/debug` into tens of gigabytes, and nothing in this tree runs a debugger

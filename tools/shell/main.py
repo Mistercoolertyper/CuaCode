@@ -37,6 +37,33 @@ MARK = "<<cuacode-cwd>>"
 
 WINDOWS = platform.system() == "Windows"
 
+# A child that gets no console of the frontend's, and why that is not tidiness.
+#
+# The console's input mode belongs to the *console*, not to a process. Every
+# program attached to it can SetConsoleMode on it, and that mode decides what the
+# next reader receives: with ENABLE_VIRTUAL_TERMINAL_INPUT set the console stops
+# handing back mouse records and starts encoding input as escape sequences -- so a
+# pointer crossing the window arrives as a run of characters
+# (`ESC [ < b ; x ; y M`) that a TUI reading keys types straight into its message
+# box, and the keyboard's own keys stop matching any binding. That is one process,
+# not the terminal: measured on this machine, `0x0098` (WINDOW|MOUSE|EXTENDED, the
+# mode the frontend sets) became `0x0298` when a grandchild of this tool set VT
+# input, and stayed that way after it exited.
+#
+# DEVNULL on the three streams does not prevent it: that only redirects stdio, and
+# the console stays attached, so CONIN$ still opens and still answers.
+# CREATE_NO_WINDOW is the part that takes the console away -- a child launched
+# with it has none to open, and a probe that sets VT input in the parent's console
+# fails there instead of succeeding. Verified for CREATE_NO_WINDOW,
+# DETACHED_PROCESS and CREATE_NEW_CONSOLE; this is the one that leaves an ordinary
+# command's own streams exactly as they were.
+#
+# ponytail: a command that genuinely wants a console of its own (an interactive
+# TUI the agent was asked to drive) has to allocate one, and that is app_open's
+# job rather than a shell command's -- its DETACHED_PROCESS already says so.
+CREATE_NO_WINDOW = 0x08000000
+QUIET = {"creationflags": CREATE_NO_WINDOW} if WINDOWS else {}
+
 # Survives between calls: `cd` in one command still holds for the next, which
 # is what the model assumes a shell does. Resolved on first use, because the
 # frontend only reports its terminal after the worker is up.
@@ -99,7 +126,7 @@ def _kill(proc):
             # the stdout pipe open after its PowerShell parent is gone.
             subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=5)
+                           stderr=subprocess.DEVNULL, timeout=5, **QUIET)
             if proc.poll() is None: proc.kill()
         else: os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError, subprocess.TimeoutExpired):
@@ -184,7 +211,7 @@ def run(args: dict, ctx) -> dict:
     proc = subprocess.Popen(_argv(command), cwd=_cwd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, errors="replace",
-                            **({} if WINDOWS else {"start_new_session": True}))
+                            **({} if WINDOWS else {"start_new_session": True}), **QUIET)
     out, err, why = _collect(proc, timeout, ctx.get("cancel") if hasattr(ctx, "get") else None)
 
     out, ended_in = _split_cwd(out)

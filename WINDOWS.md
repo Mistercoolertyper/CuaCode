@@ -185,3 +185,43 @@ A token ends at a space, so the menu about that token ends there too: a space at
 the command menu closes it and is typed as text. Enter at the command menu with
 nothing selected sends the message, since an unknown `/word` is prose. A menu
 opened by a command has no line of its own and keeps its usual Enter.
+
+### Moving the mouse types into the composer
+
+Moving the pointer over the window could start typing `[<0;35;12M` into the
+message box, and from then on no key binding worked. Nothing was being rendered
+wrong, and the script that happened to be running was only the last thing to
+touch the console.
+
+A console's input mode belongs to the **console**, not to a process. Every program
+attached to it reads and can set the same mode, and the mode decides what the next
+reader receives. With `ENABLE_VIRTUAL_TERMINAL_INPUT` set, the console stops
+handing back mouse records and encodes input as escape sequences instead, so a
+move arrives as the characters `ESC [ < b ; x ; y M`. A frontend reading keys
+types those into the composer, and the keyboard's own keys stop matching any
+binding, because the encodings changed under them. The mode stayed changed after
+the process that set it exited, which is why it looked permanent.
+
+Measured on Windows 11: a frontend runs the console in `0x0098`
+(`WINDOW_INPUT|MOUSE_INPUT|EXTENDED_FLAGS`), and a grandchild of `shell` set it to
+`0x0298` -- the same mode plus VT input -- from a process with no business
+touching the terminal. Redirecting `stdin` does not prevent it: that redirects
+stdio, and `CONIN$` still opens on the same console.
+
+Two changes, and both are needed. Anything the worker starts now gets **no console
+of the frontend's** (`CREATE_NO_WINDOW`, on top of the `DEVNULL` it already had),
+so a child has none to open and cannot move the mode; that covers `shell` and MCP
+servers. And each frontend takes the console's mode for itself and puts it back if
+something moved it (`cuacode::console::Claim`, checked every pass), which also
+drops what the drift already encoded into the input queue.
+
+A character handed to the composer is still not proof that a key made it, so
+`cuacode::console::Typing` drops a run introduced by `ESC` before it reaches the
+field. It is deliberately not a VT parser: a `[`, a `;` or a digit typed by hand
+is untouched, which has tests, because a filter that eats honest punctuation
+would be worse than the bug.
+
+The claim is measured rather than asserted: `rust/tests/console_claim.rs` drifts a
+real console's mode and reads it back after each step. It refuses to run unless
+`CONSOLE_CLAIM_OK=1` is set, because a plain `cargo test` in a terminal is attached
+to the console the frontend is drawing in.
