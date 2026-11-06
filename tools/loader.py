@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from tools._parser.Validate import check
+from handler import faults
 
 @dataclass
 class Tool:
@@ -142,7 +143,12 @@ def refresh_dynamic(registry: dict[str, Tool]) -> dict[str, Tool]:
         try:
             if hasattr(t.module, "describe"): t.description = t.module.describe(t.body)
             if hasattr(t.module, "schema"): t.input_schema = t.module.schema()
-        except Exception: pass
+        except Exception as e:
+            # Keeping the previous value is right -- a menu that cannot be rebuilt
+            # is better than no menu -- but a tool whose list is stale for the life
+            # of the process is not the same as one whose list did not change.
+            faults.note(f"re-asking {t.name} what it offers", e,
+                        "it keeps the description and schema it had")
     return registry
 
 # The registry, and the question of which of it a given model may be offered.
@@ -193,7 +199,11 @@ def wire_result(registry: dict, name: str, result: dict) -> dict:
     fn = getattr(registry.get(name), "brief", None)
     if not fn: return result
     try: return fn(result)
-    except Exception: return result
+    except Exception as e:
+        # The whole result, which is what the next-best row is; said, because the
+        # row that arrives is a megabyte of base64 and the reason is a formatter.
+        faults.note(f"the brief for {name}", e, "the whole result is sent instead")
+        return result
 
 def dispatch(registry: dict[str, Tool], name: str, args: dict, ctx=None) -> dict:
     tool = registry.get(name)
@@ -204,4 +214,7 @@ def dispatch(registry: dict[str, Tool], name: str, args: dict, ctx=None) -> dict
     args, errs = check(args or {}, tool.input_schema)
     if errs: return {"error": "; ".join(errs)}
     try: return {"result": tool.handler(args, ctx)}
-    except Exception as e: return {"error": str(e)}
+    except Exception as e:
+        # Named, because the model reads this and knows which call it made; the
+        # exception alone could have come from any tool in the round.
+        return {"error": f"{name}: {e}"}

@@ -8,16 +8,21 @@ thing providers can cache.
 import os
 
 from handler.session import store
+from handler import faults
 from integrations.memory import loader, naming
 
 def _index() -> str:
     """In-scope memories, one line each. Never raises: a broken memory
-    directory must not take the whole toolbox down with it."""
+    directory must not take the whole toolbox down with it -- it is said instead.
+    "Nothing remembered yet" is a claim about the person's memory; a directory
+    that could not be read is not that claim.
+    """
     try:
         lines = loader.index_lines()
         total = len(loader.all_memories())
-    except Exception:
-        return ""
+    except Exception as e:
+        return "\n\n" + faults.note("the memory index could not be read", e,
+                                    "fix or remove the file it names")
     if not lines:
         return "\n\nNothing remembered yet." + (
             f" ({total} out of scope - `search` finds them.)" if total else "")
