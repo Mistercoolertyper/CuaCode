@@ -1,11 +1,16 @@
 """peers: the mailbox, the roster and the two-phase send, end to end, on a scratch root.
 
-Run with: python3 lifecheck-peers.py
+Run with: python3 scripts/lifecheck-peers.py
 """
+import os, sys
+# The repo root, one level up: these scripts import the worker's own package.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import json, os, shutil, sys, tempfile, time
 
 os.environ["CUACODE_HOME"] = tempfile.mkdtemp(prefix="peers-check-")
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) or ".")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 from handler import peers
 from handler.session import store
@@ -59,7 +64,7 @@ check("the name carries the project", r[0]["name"].startswith("peers-demo"))
 check("a live worker reads as alive", r[0]["alive"], True)
 
 print("the two-phase send")
-tools = load_tools(tools_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools"))
+tools = load_tools(tools_dir=os.path.join(ROOT, "tools"))
 ctx = {"session_dir": str(mine.dir)}
 g, t = tools["roster"], ctx
 

@@ -9,13 +9,17 @@ guarantee the boot archive bug taught us to pin). Exits nonzero on
 any failure, so a fresh agent can run it as the first thing after touching
 the worker or the sidebar.
 
-    python3 lifecheck-projects.py
+    python3 scripts/lifecheck-projects.py
 """
+import os, sys
+# The repo root, one level up: these scripts import the worker's own package.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 import json, os, subprocess, sys, tempfile, time
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent
+REPO = Path(__file__).resolve().parent.parent
 FAILS = []
 
 

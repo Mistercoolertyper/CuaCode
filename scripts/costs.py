@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What CuaCode has spent, in dollars, read from the sessions' own records.
 
-    python3 costs.py [--days N] [--json] [--html PATH] [--check] [--all]
+    python3 scripts/costs.py [--days N] [--json] [--html PATH] [--check] [--all]
 
 Not a bill. The ollama plan is prepaid (old Pro, flat monthly, capped by
 requests), so nothing here is charged - it is what the same tokens would cost
@@ -30,14 +30,18 @@ no dollars, and `--all` prices them anyway as the ceiling that number is.
 Sessions from before 2026-08-11 carry no usage at all; they are counted and
 named, never priced at zero.
 """
+import os, sys
+# The repo root, one level up: these scripts import the worker's own package.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # ---------------------------------------------------------------------------
 # how to run it
 #
-#   python3 costs.py                        the terminal report
-#   python3 costs.py --html usage.html      the report as a page, and open it:
+#   python3 scripts/costs.py                        the terminal report
+#   python3 scripts/costs.py --html usage.html      the report as a page, and open it:
 #                                           open -a firefox file://$PWD/usage.html
-#   python3 costs.py --json                 the whole thing, machine-readable
-#   python3 costs.py --check                its own arithmetic, 18 checks
+#   python3 scripts/costs.py --json                 the whole thing, machine-readable
+#   python3 scripts/costs.py --check                its own arithmetic, 18 checks
 #
 #   --days N     only the last N days, counted by the UTC date each round was
 #                billed on. A round is stamped in UTC, so N counts UTC days and

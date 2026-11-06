@@ -328,8 +328,8 @@ shell scripts pick it up from the manifest with no other change.
     pin order, per-dir names and icons) and `main.py` answers `project.list`,
     `project.add`, `project.rename`, `project.remove`, `project.pin`,
     `project.move` with a `projects` envelope. A project is a directory the user
-    promoted, not one derived from a `cwd`; `lifecheck-projects.py` at the repo
-    root is its real-wire test, 22 asserts. The rail derives its three levels
+    promoted, not one derived from a `cwd`; `scripts/lifecheck-projects.py` is
+    its real-wire test, 22 asserts. The rail derives its three levels
     from that payload plus each session's `cwd` and adds nothing to the file.
   - **A permission request blocks the worker until the frontend answers it.**
     `main.py`'s `ask_permission` is an `ipc.call` with `timeout=None`, so a
