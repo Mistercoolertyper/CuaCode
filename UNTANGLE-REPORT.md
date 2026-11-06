@@ -167,7 +167,9 @@ the shared half there: **48 passed, 2 failed**, and both failures are the copy's
 own missing context -- `version::the_checkout_is_found` ("no checkout above the
 crate") and `worker::the_worker_is_found_by_env_or_by_walking_up` ("the Python
 side is the sibling of this crate"). Every `wire`, `transcript`, `session` and
-`code` test passed. No message shape moved, so `rust/fixtures/replay.jsonl` was
+`code` test passed. In the same copy, `cargo build -p cuacode-fastrs -p
+cuacode-quik` finished clean, which is the brief's "the frontends still build"
+check: they compile against this worker unchanged. No message shape moved, so `rust/fixtures/replay.jsonl` was
 not re-recorded: the only change to an event is `result` added to a terminator,
 which `Payload` already parses as `Option<Value>` and no frontend reads outside
 `tool_output`.
