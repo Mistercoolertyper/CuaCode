@@ -17,6 +17,9 @@ MODES = ("ask", "auto", "bypass", "off")
 
 def path() -> Path: return store.home() / "config.json"
 
+# The last file read, and the stamp it was read at. See load().
+_cache: dict = {}
+
 def blank() -> dict:
     """Everything a config can hold, at the value each reader already assumes.
 
@@ -91,14 +94,32 @@ def load() -> dict:
     only in memory, so the file is there to hand-edit from first boot. One that
     exists gains any option it has not heard of and the long spelling of the three
     settings that take two, and is written back when that changed anything: the file
-    a person opens is the whole template."""
-    cfg = store.read_json(path())
-    if not cfg: return save(blank())
-    full, added = _fill({**DEFAULTS, **cfg}, blank())
-    full, respelled = _spelled(full)
-    return save(full) if added or respelled else full
+    a person opens is the whole template.
+
+    Cached on `(mtime, size)`, because this is asked tens of times a turn -- once
+    per entry lookup, per window, per skill pass -- and every one of them was a
+    read and a parse of the same file. A hand-edit is still picked up on the next
+    stat, which is the guarantee the callers already relied on ("config is re-read
+    every turn: the user edits it by hand"); `save` empties the cache so our own
+    writes never wait on a filesystem timestamp's resolution.
+    """
+    p = path()
+    try: stamp = (str(p), p.stat().st_mtime_ns, p.stat().st_size)
+    except OSError: stamp = None
+    if stamp is not None and _cache.get("stamp") == stamp: return _cache["cfg"]
+    cfg = store.read_json(p)
+    if not cfg:
+        full = save(blank())
+    else:
+        full, added = _fill({**DEFAULTS, **cfg}, blank())
+        full, respelled = _spelled(full)
+        full = save(full) if added or respelled else full
+    try: _cache.update(stamp=(str(p), p.stat().st_mtime_ns, p.stat().st_size), cfg=full)
+    except OSError: pass
+    return full
 
 def save(cfg: dict) -> dict:
+    _cache.clear()
     store.write_json(path(), cfg)
     # The file holds API keys in plaintext, so 0600 is reapplied on every write
     # rather than trusted to stick.

@@ -335,3 +335,45 @@ run one.
   own copy of the same four names.
 - `handler/protocol.py`: `poll_one` (no caller) and the example loop under
   `__main__` (a protocol nothing implements) are gone.
+
+### The second door: a policy on the turn, and a result as data
+
+`chat` takes an optional `policy`, and every terminator carries a `result`.
+
+```json
+{"action":"chat","text":"…","policy":{"tools":["file"],"max_rounds":8,"max_seconds":120}}
+```
+
+- `tools` -> `generate(allow=...)`, which existed and had no door. A name that is
+  not installed is refused before the turn starts: an agent with a typo'd toolbox
+  would otherwise spend a turn reporting the model's failure.
+- `max_rounds` -> counted at the `round` chunk, which is yielded *before* the
+  request, so stopping there spends nothing. The turn ends as `done` with
+  `stop: "max_rounds"` and a resumable history.
+- `max_seconds` -> a deadline inside the `cancelled` callable the loop already
+  polls everywhere (between chunks, between calls, inside the retry waits). A
+  deadline is a cancel, so it needed no new machinery; the terminator says which
+  of the two it was.
+- `result` -> `{text, stop, messages, session}` on done / cancelled / error, and
+  on the pre-turn refusals. `stop` is `done`, `cancelled`, `max_rounds`,
+  `deadline`, or `error`.
+
+The three fields a program needs that a person does not are exactly the three
+that had no door: an allowlist, a ceiling, and an answer that is not text.
+
+`WIRE.md` is the contract, and `main.py --wire` prints the commands from the
+command table so the two cannot drift apart. README's Layout and a new
+"Driving it from a program" section point at both.
+
+### config.json is read once per change, not once per question
+
+`handler/config.py:load` caches on `(path, mtime, size)`; `save` clears it. This
+was tens of reads and parses of the same file per turn -- `settings()`,
+`always_names()`, and every `entry()` lookup inside `context_window`,
+`can_see` and `params_for`. A hand-edit is still picked up on the next stat, so
+the "config is re-read every turn" guarantee is unchanged.
+
+Left deliberately: `_spelled`'s `if key == "permission"`. It is not a mistake
+wearing an `if` -- `permission`'s object has a third field (`provider`, for the
+model that decides in auto mode) where `vision` and `steps` have two. Tabling the
+three shapes instead was longer and less readable than one branch that says so.

@@ -13,11 +13,11 @@ module-level names (`SETTINGS`, `sess`, `messages`, `ctx`, `LAST_TURN`,
 conversation a function was talking about therefore depended on which branch had
 run last, and nothing said so.
 """
-import os
+import os, time
 
 from handler import config, context, environment, gate, peers, usage, version
 from handler.agent import compact, inline, stepname
-from handler.agent.main import generate, _compact_now
+from handler.agent.main import generate, registry, _compact_now
 from handler.agent import providers
 from handler.session import store
 from handler.session.main import Session
@@ -478,17 +478,56 @@ class Worker:
 
     # ---- the turn ----
 
-    def turn(self, text: str, peer_tag: dict = None, attached: list = None):
+    def _result_of(self, stop: str, since: int = 0) -> dict:
+        """The turn as data: what the model last said, why it ended, how big it got.
+
+        Every frontend ignores this, and a program on the other end of the pipe
+        needs it: concatenating content tokens and inferring a stop reason from
+        which ones arrived is not a result. `stop` is one of `done`, `cancelled`,
+        `max_rounds`, `deadline`, `error` -- the reason this turn is over, said by
+        the only side that knows.
+        """
+        text = ""
+        for r in reversed(self.sess.records()[since:]):
+            if r.get("t") == "assistant":
+                text = r.get("content") or ""
+                break
+        return {"text": text, "stop": stop, "messages": len(self.messages),
+                "session": self.sess.id}
+
+    def turn(self, text: str, peer_tag: dict = None, attached: list = None,
+             policy: dict = None):
         """Run one turn, yielding `(envelope type, payload)` for what it produced.
 
         Events rather than envelopes: this has no id to answer on, and a caller with
         no frontend has nothing to answer. `commands.chat` pairs each one with the
         envelope that asked for it.
 
-        Yields, in the order they happen: the notices a `/command` produced, a
-        `status`, then whatever `generate()` reports -- content, tool calls and
-        outputs, usage, notices, and last of all done, cancelled or failed.
+        `policy` is the second door's half of a turn, and every part of it is
+        optional: `tools` is the allowlist (absent means everything installed),
+        `max_rounds` a ceiling on model calls, `max_seconds` a ceiling on the wall
+        clock. The two ceilings end the run the way a cancel does -- closed off and
+        resumable -- and the last event says which one it was, because a program
+        cannot read that off a stream of text.
         """
+        policy = policy or {}
+        allow = policy.get("tools")
+        try: max_rounds = int(policy.get("max_rounds") or 0)
+        except (TypeError, ValueError): max_rounds = 0
+        try: max_seconds = float(policy.get("max_seconds") or 0)
+        except (TypeError, ValueError): max_seconds = 0
+        deadline = time.monotonic() + max_seconds if max_seconds > 0 else 0.0
+        stopped = "done"
+        # Where this turn starts in the record list: the result is what this turn
+        # said, and after a failed request that is nothing -- not the last thing
+        # the conversation said an hour ago.
+        since = len(self.sess.records())
+
+        def outcome(stop: str) -> dict:
+            """This turn's result. Named apart from `result`, which the tool branch
+            binds to a tool's own result: one assignment in a function makes the name
+            local for all of it."""
+            return self._result_of(stop, since)
         # Config is re-read every turn: the user edits it by hand, and a model changed
         # behind our back must not survive until restart.
         before = (self.settings.get("vision", True), self.settings.get("model", ""))
@@ -511,6 +550,17 @@ class Worker:
             # knows. Run state goes in `status`, not `state` (what a payload is).
             yield "status", {"status": "idle", **self.settings_fields()}
             return
+        # An allowlist naming a tool that is not installed is a typo, not a request
+        # for a smaller toolbox: an agent with no tools would spend a turn finding
+        # out, and report it as the model's failure rather than the caller's.
+        if allow is not None:
+            known = set(registry())
+            missing = [t for t in allow if t not in known]
+            if missing:
+                yield "token", {"state": "error", "status": "error",
+                                "token": f"unknown tool(s): {', '.join(missing)}",
+                                "result": outcome("error")}
+                return
         # A model that cannot see is told, not sent an image it will 400 on, and the
         # attachment is dropped from the record, or it returns in the history forever.
         attached = [a for a in (attached or []) if isinstance(a, dict) and a.get("b64")]
@@ -602,33 +652,52 @@ class Worker:
         # Held until the assistant record it belongs to is written and cleared per
         # round, so a round the provider never reported on carries nothing.
         round_cost = {}
+        rounds = 0
+
+        def out_of_time() -> bool:
+            return bool(deadline) and time.monotonic() > deadline
+
+        def stop_now() -> bool:
+            """Called all over generate(), so a deadline is a cancel that costs
+            nothing to add: the loop already checks this between chunks, between
+            calls and inside its waits."""
+            return ipc.cancelled() or out_of_time()
+
+        gen = generate(API_KEY=config.api_key(self.settings["provider"]),
+                       messages=self.messages, ctx=self.ctx,
+                       settings={**self.settings, "effort": self.sess.effort},
+                       # One segment each: the shipped prefix stays stable, so the
+                       # cache survives; machine facts last.
+                       system=[s for s in (self.sess.system, instructions.user_block(),
+                                           skills.always_block(),
+                                           environment.block(self.ctx, self.settings, self.sess)) if s],
+                       cancelled=stop_now,
+                       # A callable, not a list: generate() asks at the one point a
+                       # user message is legal.
+                       steer=ipc.take_steer,
+                       # Which mailbox the round seam drains. Not `ctx["session_dir"]`,
+                       # which a subagent shares: a subagent is not the agent peers
+                       # are talking to.
+                       peer_sid=self.sess.id,
+                       # The event itself: generate() clears it as it consumes it,
+                       # one press one call.
+                       detach=ipc.background,
+                       # The allowlist a program asked for, or everything installed.
+                       allow=allow,
+                       # Who the calls that need asking go to, per mode.
+                       ask=self.gate(),
+                       auto=self.auto_decide if self.mode == "auto" else None)
         try:
-            # The provider half of the settings is account-wide and the effort is this
-            # conversation's, so they are joined per turn.
-            for chunk in generate(API_KEY=config.api_key(self.settings["provider"]),
-                                  messages=self.messages, ctx=self.ctx,
-                                  settings={**self.settings, "effort": self.sess.effort},
-                                  # One segment each: the shipped prefix stays stable, so
-                                  # the cache survives; machine facts last.
-                                  system=[s for s in (self.sess.system, instructions.user_block(),
-                                                      skills.always_block(),
-                                                      environment.block(self.ctx, self.settings, self.sess)) if s],
-                                  cancelled=ipc.cancelled,
-                                  # A callable, not a list: generate() asks at the one
-                                  # point a user message is legal.
-                                  steer=ipc.take_steer,
-                                  # Which mailbox the round seam drains. Not
-                                  # `ctx["session_dir"]`, which a subagent shares: a
-                                  # subagent is not the agent peers are talking to.
-                                  peer_sid=self.sess.id,
-                                  # The event itself: generate() clears it as it
-                                  # consumes it, one press one call.
-                                  detach=ipc.background,
-                                  # Who the calls that need asking go to, per mode.
-                                  ask=self.gate(),
-                                  auto=self.auto_decide if self.mode == "auto" else None):
+            for chunk in gen:
                 typ = chunk.get("type")
                 if typ == "round":
+                    # Yielded before the request is made, so stopping here spends
+                    # nothing. A budget is in rounds because that is what costs money,
+                    # and a round that never opened is not one.
+                    rounds += 1
+                    if max_rounds and rounds > max_rounds:
+                        stopped = "max_rounds"
+                        break
                     # generate() takes its own rollback mark right before yielding
                     # this, so the two stay in step.
                     round_mark = len(self.messages)
@@ -651,17 +720,21 @@ class Worker:
                     self.messages = chunk.get("messages", self.messages)
                     self.sess.commit()
                     self.pending_note = chunk.get("note", "")
+                    stopped = "deadline" if out_of_time() and not ipc.cancelled() else "cancelled"
                     yield "token", {"state": "cancelled", "token": "cancelled",
-                                    "status": "cancelled", "msg_count": len(self.messages)}
+                                    "status": "cancelled", "msg_count": len(self.messages),
+                                    "result": outcome(stopped)}
                 elif typ == "failed":
                     # A dropped connection, handled like a cancel: the round was closed
                     # off, so what streamed is kept.
                     self.messages = chunk.get("messages", self.messages)
                     self.sess.commit()
                     self.pending_note = chunk.get("note", "")
+                    stopped = "error"
                     yield "token", {"state": "error", "token": chunk.get("error", ""),
                                     "status": "error", "kept": True,
-                                    "msg_count": len(self.messages)}
+                                    "msg_count": len(self.messages),
+                                    "result": outcome("error")}
                 elif typ == "compacting":
                     # A fold is a model call: the screen would otherwise sit on
                     # "thinking" for however long the summarizer takes, with nothing
@@ -696,6 +769,7 @@ class Worker:
                     naming.maybe_start(self.sess)
                     yield "token", {"state": "done", "token": "done", "status": "done",
                                     "msg_count": len(self.messages),
+                                    "result": outcome("done"),
                                     **self.context_fields(chunk.get("usage")), **self.remember_turn(chunk)}
                 elif typ == "tool_calls":
                     yield "token", {"state": "tool_calls", "token": chunk.get("text"), "status": "tooling"}
@@ -760,8 +834,23 @@ class Worker:
             del self.messages[round_mark:]
             self.sess.rewind()
             self.sess.commit()
-            yield "token", {"state": "error", "token": str(e), "status": "error"}
+            stopped = "error"
+            yield "token", {"state": "error", "token": str(e), "status": "error",
+                            "result": outcome("error")}
         finally:
+            # Closed rather than dropped: a round budget stops in the middle of the
+            # generator, and what ran on the way out (a stream's own cleanup, a
+            # provider socket) has to run here and not at collection.
+            gen.close()
             # Anything typed during the turn that the loop never reached goes back on
             # the inbox and is answered as an ordinary next message.
             ipc.end_run()
+        if stopped == "max_rounds":
+            # Said as a done, with the reason: the rounds that ran are whole and the
+            # conversation is resumable, so this is a ceiling reached, not a failure.
+            # Emitted after the cleanup rather than inside it: a generator may not
+            # yield while it is being closed.
+            yield "token", {"state": "done", "token": "done", "status": "done",
+                            "msg_count": len(self.messages),
+                            "result": outcome("max_rounds"),
+                            **self.settings_fields()}

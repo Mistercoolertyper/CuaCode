@@ -158,7 +158,8 @@ def _chat(w, env):
     # the model's turn is filed under.
     for kind, payload in w.turn(data.get("text", ""),
                                 peer_tag=data.get("peer") or None,
-                                attached=data.get("images") or []):
+                                attached=data.get("images") or [],
+                                policy=data.get("policy") or None):
         w.ipc.reply(env, kind, payload)
 
 
@@ -500,7 +501,8 @@ class Command:
 
 
 TABLE = {
-    "chat": Command(_chat, "send a message and run one turn", fields=("text", "images", "peer")),
+    "chat": Command(_chat, "send a message and run one turn",
+                    fields=("text", "images", "peer", "policy")),
     "stop": Command(_stop, "kill background work, commit, and exit"),
     "cancel": Command(_cancel, "stop the run in flight (the flag is set on the reader thread)"),
     "background": Command(_background, "move the call in flight to a background job"),
