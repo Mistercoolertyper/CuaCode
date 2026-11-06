@@ -9,3 +9,4 @@ rust/target/
 .env
 rust/app/cuacode.app/
 docs/
+/rust/zeron
