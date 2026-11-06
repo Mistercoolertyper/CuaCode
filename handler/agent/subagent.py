@@ -123,7 +123,11 @@ def _emit(ctx, name: str, chunk: dict):
     fn = ctx.get("emit") if isinstance(ctx, dict) else None
     if not callable(fn): return
     try: fn(name, chunk)
-    except Exception: pass
+    except Exception as e:
+        # The subagent runs to its answer either way; a parent whose rows stopped
+        # moving is the thing that needs the reason.
+        faults.note(f"a {name} progress event from {getattr(fn, '__qualname__', 'the caller')}", e,
+                    "the run continues and its result still comes back")
 
 def _drive(spec, messages, settings, key, system, ctx, allow, extra, box, provider, budget):
     """One pass of the round loop. Returns (content, rounds, stopped)."""
@@ -189,7 +193,8 @@ def run(spec: AgentSpec, prompt: str, ctx=None, images: list = None) -> dict:
         return {"error": "subagent nesting limit reached", "stopped": "error", "rounds": 0}
 
     settings, key, provider = _settings(spec, ctx)
-    allow = [t for t in (spec.tools or []) if not (d >= MAX_DEPTH and t in SPAWNERS)]
+    allow = (None if spec.tools is None
+             else [t for t in spec.tools if not (d >= MAX_DEPTH and t in SPAWNERS)])
     box = {}
     extra = {SUBMIT: _submit_tool(spec.schema, box)} if spec.schema else None
     system = (spec.system or "") + (APPENDIX if spec.schema else "")
@@ -214,7 +219,9 @@ def run(spec: AgentSpec, prompt: str, ctx=None, images: list = None) -> dict:
                                        allow, extra, box, provider, 1)
             content, rounds = more or content, rounds + r2
     except Exception as e:
-        return {"error": str(e), "stopped": "error", "rounds": 0}
+        # Named: two agents can fail with the same provider error, and the caller
+        # has to be able to tell which one it paid for.
+        return {"error": f"agent {spec.name}: {e}", "stopped": "error", "rounds": 0}
     finally:
         mcp_client.reset_session_scope(scope_token)
         _depth.reset(token)

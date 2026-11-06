@@ -109,11 +109,31 @@ def baseline() -> dict:
     return apps
 
 
-def park_new(self_name: str | None = None, focus: bool = True) -> list:
+def user_was_active(ran_for: float) -> bool:
+    """Whether the person touched the machine since the call began.
+
+    A new app is only the agent's doing if nobody else was at the keyboard. Idle time
+    shorter than the call itself means input arrived after the call started, so an app
+    that appeared belongs to whoever is using the machine, and moving it would take the
+    window out from under them. A platform that cannot answer returns None, which is no
+    guard rather than a wrong one.
+    """
+    ask = getattr(backend(), "user_idle", None)
+    if not ask: return False
+    try: idle = ask()
+    except Exception: return False                              # noqa: BLE001
+    return idle is not None and idle < ran_for
+
+
+def park_new(self_name: str | None = None, focus: bool = True,
+             ran_for: float | None = None) -> list:
     """Park every app that has appeared since the last look. Returns their names.
 
     focus defaults to True because the caller is reporting a launch, and an app the
-    agent just opened is the app it is about to drive.
+    agent just opened is the app it is about to drive. ran_for is how long the call
+    that may have opened them took: with somebody at the keyboard inside that window,
+    a new app is theirs and is left where it is. It still lands in _seen, so the next
+    look does not claim it either.
     """
     global _seeded
     apps = _apps()
@@ -128,6 +148,9 @@ def park_new(self_name: str | None = None, focus: bool = True) -> list:
             return []
         fresh = [n for n in apps if n not in _seen and not _same_app(n, self_name)]
         _seen.update(apps)
+
+    if fresh and ran_for is not None and user_was_active(ran_for):
+        return []
 
     parked = []
     for name in fresh:
@@ -239,3 +262,17 @@ def remember(handle, name: str | None = None) -> None:
     """
     with _LOCK:
         _parked[name or (handle if isinstance(handle, str) else str(handle))] = handle
+
+
+if __name__ == "__main__":
+    # From the repo root: `python3 tools/_window.py`. Proves the guard reads a real idle
+    # time on this machine and flips where it should.
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    idle = getattr(backend(), "user_idle", None)
+    idle = idle() if idle else None
+    print(f"idle={idle} apps={sorted(_apps())}")
+    assert not user_was_active(0), "a call that took no time cannot have been interrupted"
+    if idle is not None:
+        assert user_was_active(idle + 1), "input inside the window belongs to the person"
+    print("guard ok")

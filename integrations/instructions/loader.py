@@ -13,7 +13,7 @@ and the agent spends a `file` read on whichever of them turns out to matter. A
 wrong pointer costs a line; a wrong injected body costs the context and then gets
 acted on.
 """
-import os, re, sys
+import os, re
 
 from handler.session import store
 
@@ -96,12 +96,15 @@ def user_block() -> str:
 def _read_files() -> set:
     """Absolute paths the file tool has read this session.
 
-    The same edit gate `file` maintains and the session restores on reload
-    (handler/session/main.py), so a doc the agent has already opened, this turn or
-    before the reload, is never pointed at again.
+    The same edit gate `file` maintains and a session restores on reload
+    (handler/gate.py), so a doc the agent has already opened, this turn or before
+    the reload, is never pointed at again.
     """
-    m = sys.modules.get("_common")
-    return {os.path.abspath(p) for p in getattr(m, "read_files", ())} if m else set()
+    from handler import gate
+    # Resolved, the spelling the file tool records: `abspath` leaves a symlinked
+    # component alone, so on macOS (/tmp -> /private/tmp) a doc already read was
+    # pointed at again on the next turn.
+    return {os.path.realpath(p) for p in gate.read_files}
 
 
 def _size(n: int) -> str:
@@ -125,7 +128,7 @@ def docs_in(path: str) -> list:
         try: size = e.stat().st_size
         except OSError: continue
         if not size: continue
-        out.append({"name": e.name, "path": os.path.abspath(e.path), "size": size})
+        out.append({"name": e.name, "path": os.path.realpath(e.path), "size": size})
     return out
 
 

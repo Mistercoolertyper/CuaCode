@@ -20,6 +20,7 @@ the liveness all come off the session the sender is standing in.
 """
 import os, time, uuid
 
+from handler import faults
 from handler.session import store
 
 TTL = 300          # a peer untouched for this long is not offered on the roster
@@ -320,8 +321,10 @@ def drain(sid: str) -> list[dict]:
     try:
         from handler.agent import subagent
         if subagent.depth() > 0: return []
-    except Exception:
-        pass
+    except Exception as e:
+        # The guard that keeps a subagent out of its parent's mailbox could not
+        # run, so it did not guard: said rather than assumed to have worked.
+        faults.note("the subagent depth check", e, "peer mail is read as if this were the main loop")
     collect(sid)
     return claimed(sid)
 

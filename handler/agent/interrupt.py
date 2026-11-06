@@ -6,6 +6,8 @@ stopped, which is why these threads are daemons: a socket read must never block 
 """
 import queue, socket, sys, threading
 
+from handler import faults
+
 POLL = 0.02          # how often the flags are read while a call is in flight
 
 
@@ -30,11 +32,15 @@ class Call:
     whenever it lands, long after the loop that started it moved on.
     """
 
-    def __init__(self, fn, token: "Token" = None):
+    def __init__(self, fn, token: "Token" = None, label: str = "the call"):
         # `token is None`, never `token or ...`: a fresh token here would be unknown to
         # the ctx the handler reads, so the loop would cancel what nobody is watching.
         self.token = Token() if token is None else token
         self._fn = fn
+        # What was being run, for the one sentence this thread can say when it dies:
+        # a thread cannot raise into its caller, so the name is the only context the
+        # error will ever have.
+        self.label = label
         # done is written last, after result, so a reader that sees done sees
         # a result too. Nothing else touches these, which is why no lock.
         self.box: dict = {}
@@ -45,8 +51,10 @@ class Call:
             self.box["result"] = self._fn()
         except BaseException as e:
             # Shaped like every other failed call, since that is what it is from the
-            # model's side, and a traceback here would lose the job to nobody.
-            self.box["result"] = {"error": str(e)}
+            # model's side, and a traceback here would lose the job to nobody. Named,
+            # because the thread is the last place the name could still be attached.
+            self.box["result"] = {"error": faults.note(
+                self.label, e, "the call did not complete")}
         finally:
             self.box["done"] = True
 
@@ -107,8 +115,10 @@ def abort(source) -> None:
             # is enough and lets an in-flight write finish.
             if sys.platform == "win32":
                 sock.close()
-    except Exception:
-        pass
+    except Exception as e:
+        # The producer is still parked in a read this was meant to end. Said, because
+        # nothing else can: the turn is already over by the time it matters.
+        faults.note("shutting a stream's socket", e, "the producer thread may sit until its own timeout")
 
 
 def stream(source, stop=None, first=None, poll: float = POLL, peek=None, every: int = 16):
@@ -163,7 +173,12 @@ def stream(source, stop=None, first=None, poll: float = POLL, peek=None, every: 
                 idle += 1
                 if peek is not None and idle % every == 0:
                     try: news = peek()
-                    except Exception: news = None
+                    except Exception as e:
+                        # A mailbox the round cannot read is peer mail that will not be
+                        # noticed mid-run; the seam at the end of the round still reads it.
+                        faults.note("reading the peer mailbox mid-round", e,
+                                    "it is read again when the round ends")
+                        news = None
                     if news: yield Notice(news)
                 continue
             if kind == "item":
@@ -195,14 +210,17 @@ class Notice:
     def __init__(self, what): self.what = what
 
 
-def run(fn, stop=None, detach=None, token: Token = None, poll: float = POLL) -> tuple[str, object]:
+def run(fn, stop=None, detach=None, token: Token = None, poll: float = POLL,
+        label: str = "the call") -> tuple[str, object]:
     """Run fn on a thread, watching both flags. Returns ("done", result), or ("cancelled" or
     "detached", call) with the still-running Call. stop cancels the token so a cooperative tool
     can stop; detach does not, the work continues. detach is cleared on entry, a press from before.
+
+    label names what is running, for the one error sentence a thread can produce.
     """
     stop = stop or (lambda: False)
     if detach is not None: detach.clear()
-    call = Call(fn, token).start()
+    call = Call(fn, token, label).start()
     while True:
         # join returns the moment the thread ends, so the poll interval is a
         # ceiling on how long a flag goes unnoticed, not on how long a call takes.

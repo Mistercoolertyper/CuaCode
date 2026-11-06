@@ -5,6 +5,8 @@ Nothing here asks the provider, so /context costs no tokens.
 """
 import json
 
+from handler import faults
+
 # English prose lands near 4 characters per token, JSON and code a little under.
 # The rate barely matters once the parts are scaled to a measured total.
 CHARS_PER_TOKEN = 3.8
@@ -134,7 +136,12 @@ def _count(fn) -> int:
     """A count from an integration, or zero: a missing number is a missing row, not an error
     worth failing the readout over."""
     try: return int(fn())
-    except Exception: return 0
+    except Exception as e:
+        # The row is missing from the readout, which is honest; why it is missing
+        # is the thing a person cannot see anywhere else.
+        faults.note(f"a {getattr(fn, '__name__', 'count')} for /context", e,
+                    "its row is missing from the readout")
+        return 0
 
 
 def _counts(cwd: str, app: str) -> dict:
@@ -174,10 +181,10 @@ LABELS = {
 def _tool_parts(provider_name: str, vision: bool) -> tuple[dict, list, int]:
     """Every offered tool's schema, priced one at a time, so the sidecars can be pulled back
     out of the total and a toolbox that has grown to a fifth of the window is visible per row."""
-    from handler.agent.main import registry, _visible
+    from tools.loader import registry, visible
     from tools._parser.ToProvider import to_provider
 
-    reg = {k: t for k, t in _visible(registry(), vision).items() if t.active}
+    reg = {k: t for k, t in visible(registry(), vision).items() if t.active}
     per, rows = {}, []
     for name, t in sorted(reg.items()):
         n = tokens(to_provider({name: t}, provider_name))

@@ -153,9 +153,10 @@ def append_user_text(msg: dict, extra: str) -> None:
             return
     content.insert(0, {"type": "text", "text": extra})
 
-def _images(data) -> list:
+def images_of(data) -> list:
     """Both shapes the tools produce: screenshot returns image_base64, photos returns an
-    images list.
+    images list. Public because tools/describe_image asks the same question of the same
+    dispatch results, and had its own copy of the answer.
     """
     if not isinstance(data, dict): return []
     img, images = data.get("image_base64"), data.get("images") or []

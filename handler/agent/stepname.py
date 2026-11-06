@@ -20,7 +20,7 @@ import re
 import threading
 from collections import deque
 
-from handler import config
+from handler import config, faults
 
 # A head line, not a sentence. Long enough for a filename, short enough that a
 # step is still one line.
@@ -188,8 +188,10 @@ def _work(send, asked: str, thought: str, ran: str, provider: str, model: str):
             with _lock:
                 _recent.append(name)
             send("token", {"state": "step_name", "token": name, "of": thought[:HINT]})
-    except Exception:
-        pass
+    except Exception as e:
+        # A step the namer cannot label keeps the blank row it had; named here so a
+        # namer that is broken for every step is not mistaken for a quiet one.
+        faults.note("naming a step", e, "the row keeps no name")
     finally:
         with _lock:
             _busy = False

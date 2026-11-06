@@ -1,7 +1,5 @@
 ---
 name: app_open
-input:
-  app: str
 output:
   ok: bool
   app: str

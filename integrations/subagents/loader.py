@@ -12,16 +12,13 @@ a bundled agent can be overridden without editing the repo.
 from pathlib import Path
 
 from tools.loader import parse_frontmatter
+from handler import catalog, faults
 from handler.agent.subagent import AgentSpec
-from handler.session import store
 
-_BUNDLED = Path(__file__).parent
 _cache = None
 
 def user_dir() -> Path:
-    d = store.home() / "subagents"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    return catalog.user_dir("subagents")
 
 def _spec(path: Path) -> AgentSpec:
     meta, body = parse_frontmatter(path.read_text())
@@ -34,10 +31,12 @@ def _spec(path: Path) -> AgentSpec:
         name=meta.get("name") or path.stem,
         description=meta.get("description", ""),
         system=body,
-        # None means unrestricted, and an absent key means the author did not
-        # think about it; an agent nobody scoped gets no tools rather than all of
-        # them.
-        tools=tools if tools is not None or "tools" not in meta else None,
+        # Three spellings, and the middle one is the one that matters: None is
+        # every tool, [] is none, a list is those. A file that left the key out
+        # reads as None, which is what AgentSpec's own comment promises; the
+        # expression that used to be here was a no-op whose comment claimed the
+        # opposite of what it did.
+        tools=tools,
         schema=meta.get("output"),
         provider=meta.get("provider"),
         model=meta.get("model"),
@@ -53,16 +52,18 @@ def load_agents(refresh: bool = False) -> dict:
     global _cache
     if _cache is not None and not refresh: return _cache
     out = {}
-    for d in (_BUNDLED, user_dir()):          # user second: it overwrites
-        for f in sorted(d.glob("*.md")):
-            try: spec = _spec(f)
-            except Exception: continue        # one malformed file must not hide the rest
-            out[spec.name] = spec
+    for f in catalog.layered_files("subagents", "*.md"):   # user last: it overwrites
+        try: spec = _spec(f)
+        except Exception as e:            # one malformed file must not hide the rest
+            # Named, so a subagent the user wrote and cannot use is not simply
+            # an agent that was never offered.
+            faults.note(f"the subagent {f.name}", e, "it is left out of the list")
+            continue
+        out[spec.name] = spec
     _cache = out
     return out
 
 def get(name: str) -> AgentSpec:
     agents = load_agents()
-    if name not in agents:
-        raise ValueError(f"unknown agent: {name!r} (have {sorted(agents) or 'none installed'})")
+    if name not in agents: raise catalog.unknown("agent", name, agents)
     return agents[name]

@@ -1,8 +1,5 @@
 ---
 name: photos
-input:
-  sources: list[str]
-  max_size: int | null
 output:
   images: list[base64]
   count: int

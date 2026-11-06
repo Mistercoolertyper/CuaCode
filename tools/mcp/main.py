@@ -9,22 +9,27 @@ process starts on first use and is kept for the rest of the session.
 """
 from integrations.mcp import client, loader
 from tools import _window
+from handler import faults
 import re
 
 MAX_TOOLS_SHOWN = 60
 
 
-def _servers() -> dict:
+def _servers() -> tuple[dict, str]:
     # Re-read every turn so a server registered a moment ago is usable in the
-    # next one.
+    # next one. The reason comes back with the list: a config that cannot be
+    # parsed is not a machine with no servers, and the model reads that second
+    # answer as fact.
     try:
-        return loader.load_servers()
-    except Exception:                                           # noqa: BLE001
-        return {}
+        return loader.load_servers(), ""
+    except Exception as e:                                      # noqa: BLE001
+        return {}, faults.note(f"the MCP server config in {loader.user_config()} could not be read", e,
+                               "fix or remove the file it names")
 
 
 def describe(body: str) -> str:
-    found = _servers()
+    found, problem = _servers()
+    if problem: return f"{body}\n\n{problem}"
     if not found:
         return (body + "\n\nNo MCP servers are registered, so this tool has nothing to reach. "
                 f"They are registered in {loader.user_config()}.")
@@ -38,7 +43,7 @@ def describe(body: str) -> str:
 
 
 def schema() -> dict:
-    names = sorted(_servers())
+    names = sorted(_servers()[0])
     server = {"type": "string", "description": "Which registered MCP server."}
     if names:
         server["enum"] = names
@@ -60,14 +65,19 @@ def schema() -> dict:
 
 
 def _listing() -> dict:
-    found, live = _servers(), client.connected()
-    return {"servers": [{"name": name,
-                         "description": cfg.get("description", ""),
-                         "command": " ".join([str(cfg.get("command", ""))] +
-                                             [str(a) for a in (cfg.get("args") or [])]).strip(),
-                         "loaded": name in live}
-                        for name, cfg in sorted(found.items())],
-            "config": str(loader.user_config())}
+    found, problem = _servers()
+    live = client.connected()
+    out = {"servers": [{"name": name,
+                        "description": cfg.get("description", ""),
+                        "command": " ".join([str(cfg.get("command", ""))] +
+                                            [str(a) for a in (cfg.get("args") or [])]).strip(),
+                        "loaded": name in live}
+                       for name, cfg in sorted(found.items())],
+           "config": str(loader.user_config())}
+    # An empty list and an unreadable config are different answers, and a picker
+    # drawing the first one for the second says "you have no servers" as fact.
+    if problem: out["error"] = problem
+    return out
 
 
 def _load(name: str) -> dict:
@@ -180,7 +190,7 @@ def preview(args: dict, ctx) -> dict:
     if action == "call":
         return {"summary": f"MCP {server} -> {args.get('tool')}"}
     if action == "load":
-        cfg = _servers().get(server) or {}
+        cfg = _servers()[0].get(server) or {}
         argv = " ".join([str(cfg.get("command", ""))] + [str(a) for a in (cfg.get("args") or [])])
         return {"summary": f"start MCP server {server}: {argv.strip()}"}
     return {"summary": f"MCP {action}"}
@@ -208,8 +218,8 @@ def run(args: dict, ctx) -> dict:
             return _call(server, tool, args.get("arguments") or {},
                          args.get("session"), ctx)
     except ValueError as exc:                                   # unknown server
-        return {"error": str(exc)}
+        return {"error": f"MCP {server}: {exc}"}
     except client.MCPError as exc:
-        return {"error": str(exc)}
+        return {"error": f"MCP {server}: {exc}"}
 
     return {"error": f"unknown action: {action!r}"}

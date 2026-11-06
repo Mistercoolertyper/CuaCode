@@ -10,6 +10,7 @@
 //! code, headings, bullets and fences, with the markers gone. Nothing else on a row
 //! is read that way -- a call, a result and a notice are drawn as written.
 
+use crate::keys::{KeyRow, Keymap};
 use cuacode::code::Fence;
 use cuacode::code::Tone;
 use cuacode::session;
@@ -23,134 +24,148 @@ use crate::{Opened, Turn};
 /// The page colour, in one place: the terminal's own background is set to this
 /// at startup, so a cell nothing draws is still the page.
 ///
-/// It is ember's `background` to the value, and it has to be: fleet draws the
-/// pane `theme::term_bg()` opaque and a terminal program's page lands inside it,
-/// so one digit of difference is a seam down the edge of the pane.
-pub const PAGE: (u8, u8, u8) = (0x15, 0x11, 0x10);
+/// `#191919`, neutral graphite. It has to match the pane this terminal sits in
+/// exactly -- one digit of difference is a seam down the edge of the pane -- and
+/// it is the value every tone below is measured against.
+pub const PAGE: (u8, u8, u8) = (0x19, 0x19, 0x19);
 
-/// The palette, in ember's own tones: the warm brown-black page, greys that lean
-/// warm rather than blue, a warm off-white for text and never `#fff`, and one hot
-/// orange for everything you can act on.
+/// The palette, on graphite: opencode2's, the blue theme opencode advertises --
+/// their hues, their aliases, and the one accent on anything you can act on.
 ///
-/// The tone each one quotes is named beside it, so it can be checked against
-/// `superset-src/packages/shared/src/themes/built-in/ember.ts` by eye. Nothing
-/// here is invented, and the two that are *derived* say so and say how.
+/// Every value is quoted from `packages/tui/src/theme/assets/v2/opencode2.json` in
+/// the checkout kept under `~/.cuacode/sessions/<id>/notebook/opencode`, and the
+/// line it came from is named beside it. Their dark block is `:322-394`: six hues of
+/// nine rungs and the three aliases under them, where `accent` and `interactive` are
+/// both `$hue.blue` and `neutral` is `$hue.gray` (`:390-392`). That is what makes
+/// this the blue one.
 ///
-/// A cell has no alpha, so a tone that is a wash over the page is flatten here and
-/// the flattened value is what is written: every one of these is legible against
-/// `PAGE`, and the ones that replace an old tone hold at least the contrast that
-/// tone had on the old cold page (`#282c34`).
+/// The page is the thing that is not theirs. opencode2 draws on `#080808` and this
+/// screen paints its terminal on `#191919`, the graphite of the pane it sits in, so
+/// a rung that separates on their page does not always separate on this one. The two
+/// that do not are **derived**, and each says what it measures.
+///
+/// Three levels of ink (rule 6 of `AGENTS.md`): text, one muted, and the accent.
+/// Their aliases have exactly that vocabulary -- `neutral.100`, `neutral.300` and the
+/// blue -- so the greys here are their rungs and not a cast of them. Their theme
+/// leaves `markdown` and `syntax` on the base's warm literals, which is why a link, a
+/// fenced line and a warning are still amber under chrome that is blue.
 pub mod ink {
     use ratatui::style::Color;
 
-    /// ember `foreground` (#eae8e6). Warm off-white, and never `#ffffff`: pure
-    /// white on a warm black is a different product.
+    /// opencode2 `text.base` (`$hue.neutral.100`, `:12`, `#ffffff` at `:325`). The
+    /// prose, and the mark in front of it: **17.6:1** on `PAGE`.
     pub fn text() -> Color {
-        Color::Rgb(0xea, 0xe8, 0xe6)
+        Color::Rgb(0xff, 0xff, 0xff)
     }
-    /// ember `muted-foreground` (#a8a5a3). The header's second and third lines,
-    /// a thought's own text, and anything the design drew grey.
+    /// A thought, and every grey the header speaks in: `$hue.neutral.200` (`:326`),
+    /// the rung their ramp keeps between the text and the muted tone, which is what a
+    /// thought is. **8.1:1**.
     pub fn dim() -> Color {
-        Color::Rgb(0xa8, 0xa5, 0xa3)
+        Color::Rgb(0xb0, 0xb0, 0xb0)
     }
-    /// ember `muted-foreground` one rung down (#9a9794), which is fleet's own
-    /// `faint` and the rung a label that is meant to be found rather than read
-    /// belongs on. A result: present, and not the point.
+    /// opencode2 `text.muted` (`$hue.neutral.300`, `:13`, `#808080` at `:327`). A
+    /// label that is meant to be found rather than read: **4.5:1**.
     pub fn faint() -> Color {
-        Color::Rgb(0x9a, 0x97, 0x94)
+        Color::Rgb(0x80, 0x80, 0x80)
     }
-
-    /// The corner a row's detail hangs from, which is the mark that says "this
-    /// is what came back". ember `bright-black`'s warm grey, lifted to
-    /// `#a8a5a3`-and-`bright-black` by half: it carries the corner and a detail
-    /// panel's key names, so it is read as a tone and not only felt as a rule.
-    pub fn branch() -> Color {
-        Color::Rgb(0x8a, 0x86, 0x84)
-    }
-    /// The bar behind the line you typed. ember `ring` (#3a3837), which is the
-    /// rung the window itself uses for "a surface one step above the page" (see
-    /// fleet's `line_strong`). It measures 1.61:1 against the page, the same
-    /// separation the old cold bar had, and the user's own text reads 9.5:1 on
-    /// it. Not a tint of the foreground at full strength: this is a plate under
-    /// a line, not a row lit by a pointer.
-    pub fn bar() -> Color {
-        Color::Rgb(0x3a, 0x38, 0x37)
-    }
-    /// The two rules the input sits between, and a panel's edge. ember
-    /// `bright-black` (#5c5856): the same value fleet gives its pane rim, so the
-    /// input's rules and the rim around the terminal are one hairline.
-    pub fn rule() -> Color {
-        Color::Rgb(0x5c, 0x58, 0x56)
-    }
-    /// A row that finished. ember's `terminal.green` (#7ec699) rather than its
-    /// `success`: the terminal block is the one written *for* a pane, and a tick
-    /// beside a verb reads as one word with it.
-    pub fn done() -> Color {
-        Color::Rgb(0x7e, 0xc6, 0x99)
-    }
-    /// A row that failed. ember's `terminal.red` (#dc6b6b), the terminal block's
-    /// own rather than `destructive` (#cc4444), which fleet's theme records as a
-    /// fill that reads 2.9:1 as words on a page.
-    pub fn failed() -> Color {
-        Color::Rgb(0xdc, 0x6b, 0x6b)
-    }
-    /// A row with nothing to report: neither finished nor failed. ember
-    /// `muted-foreground` one rung down (#9a9794), which is fleet's own `faint`:
-    /// one tone for "there is something here, and it is not the point", used by
-    /// both the window and the pane.
+    /// The same tone as `faint`, and the same rung: opencode2 has one muted and gives
+    /// a row's tail the grey it gives a label. That is rule 6 of this screen's law --
+    /// text, quiet, accent, and nothing invented between them.
     pub fn quiet() -> Color {
-        Color::Rgb(0x9a, 0x97, 0x94)
+        Color::Rgb(0x80, 0x80, 0x80)
     }
-    /// Code, inline and fenced. ember `chart3` (#d4a84b), the warm amber in the
-    /// chart row that is meant to be a colour rather than a state: `chart2` is
-    /// the same green as `done` and `chart5` the same red as `failed`, so `chart3`
-    /// is the only one of them that cannot be mistaken for a tick or a cross.
+    /// The corner a row's detail hangs from: `quiet`'s tone, because the corner and
+    /// the detail under it are one thing and a rung of its own would be a second grey
+    /// saying the same sentence.
+    pub fn branch() -> Color {
+        Color::Rgb(0x80, 0x80, 0x80)
+    }
+    /// The plate behind the line you typed. **Derived**: opencode2's
+    /// `background.raised.high` is `#202020` (`:331`) on a `#080808` page, which is
+    /// 1.08:1 here and no plate at all on a page this light, so this holds the
+    /// separation this screen already draws a plate at: **1.6:1**. The line on it
+    /// reads 10.9:1.
+    pub fn bar() -> Color {
+        Color::Rgb(0x3d, 0x3d, 0x3d)
+    }
+    /// The two rules the input sits between, and a panel's edge: opencode2's
+    /// `scrollbar.base` (`:97`), the hairline rung of their ramp, **2.8:1**. Their
+    /// `border.base` (`#484848`, `:94`) is the same kind of value but lands at 1.9:1
+    /// on `#191919`, and the box's two rules would go soft against the page.
+    pub fn rule() -> Color {
+        Color::Rgb(0x60, 0x60, 0x60)
+    }
+    /// A row that finished: opencode2's `feedback.success` (`:47`), which is
+    /// `$hue.green.400` (`#9ee77a` at `:383`). **11.9:1**.
+    pub fn done() -> Color {
+        Color::Rgb(0x9e, 0xe7, 0x7a)
+    }
+    /// A row that failed: `feedback.error` (`:41`), which is `$hue.red.400`
+    /// (`#ef6c6c` at `:372`). **5.9:1**.
+    pub fn failed() -> Color {
+        Color::Rgb(0xef, 0x6c, 0x6c)
+    }
+    /// Code, inline and fenced: `syntax.type` (`:130`), the warm amber their theme
+    /// leaves on the base while the chrome goes blue. Their `markdown.code` is the
+    /// green `done` already has, and a fenced line that read as a finished call would
+    /// be one tone saying two things. **10.2:1**.
     pub fn code() -> Color {
-        Color::Rgb(0xd4, 0xa8, 0x4b)
-    }
-    /// A link. ember's `terminal.blue` (#61afef). Its address is drawn beside it
-    /// in `quiet`, so the colour is what says the words are clickable.
-    pub fn link() -> Color {
-        Color::Rgb(0x61, 0xaf, 0xef)
-    }
-    /// Something to act on rather than something broken: a build origin has moved
-    /// past, which is neither a failure nor a state to ignore. ember `warning`
-    /// (#e5c07b), the same rung the window uses for its blocked state.
-    pub fn warn() -> Color {
         Color::Rgb(0xe5, 0xc0, 0x7b)
     }
-    /// A call to another agent, or a message from one. Green is a tool that
-    /// finished and red is one that failed; neither is true here, and a red mark
-    /// beside a working peer would read as something broken. Nothing in the palette
-    /// sits between them, so this is the one rung added for it.
+    /// A link: `markdown.link`, the literal `#fab283` their theme inherits from the
+    /// base and does not blue -- opencode2's markdown stays warm under blue chrome.
+    /// **9.9:1**.
+    pub fn link() -> Color {
+        Color::Rgb(0xfa, 0xb2, 0x83)
+    }
+    /// Something to act on rather than something broken: `feedback.warning` (`:44`),
+    /// a literal in the file rather than a rung. **8.8:1**.
+    pub fn warn() -> Color {
+        Color::Rgb(0xf5, 0xa7, 0x42)
+    }
+    /// A call to another agent, or a message from one: `$hue.purple.400` (`:361`).
+    /// Green is a tool that finished and red is one that failed; neither is true of a
+    /// peer, and opencode2's third hue is this one. **5.8:1**.
     pub fn peer() -> Color {
-        Color::Rgb(0x8f, 0xb8, 0xd8)
+        Color::Rgb(0xa3, 0x83, 0xe2)
     }
-    /// The verb of a call: what a row *did*. ember's accent (#e07850), the one
-    /// hue that means "you can act on this", and a call is the thing you act on.
-    /// It is 24 dE from every other tone that can share a call's row; on a call
-    /// that failed it sits 12.6 dE from the red cross beside it, which is close
-    /// but is two shapes as well as two hues.
+    /// The verb of a call, what a row *did*: `$hue.blue.400` (`:339`), the tone both
+    /// `accent` and `interactive` name (`:390-391`) and the one their theme puts on
+    /// everything you can act on. **6.5:1**.
     pub fn call() -> Color {
-        Color::Rgb(0xe0, 0x78, 0x50)
+        Color::Rgb(0x76, 0x99, 0xfe)
     }
-    /// A call in flight, and the bright end of the sweep over the step's name while one
-    /// is running. Blue because the two halves of a round have to be told apart at a
-    /// glance and the thought's sweep is warm white: the same shape of highlight in two
-    /// families, which is what makes the difference readable as a colour and not as a
-    /// change of subject. This is the band only -- the name it passes over rests at
-    /// `running_dim`, exactly as it does under the warm one, so the row keeps the tone
-    /// it always had and what arrives is a blue pass through it.
+    /// A call in flight: the same accent. opencode2 spends one hue on "live" and it is
+    /// the blue, so the band over a thought is the text tone and the band over a call
+    /// is this -- one hue, and the motion is what tells the two halves apart.
     pub fn running() -> Color {
-        Color::Rgb(0x74, 0xa9, 0xd8)
+        call()
     }
-    /// Where that name rests while the tools have the worker: `dim` cooled by a step,
-    /// not recoloured. A blue band through a warm grey reads as two things on one row;
-    /// this is the same grey with the blue's own shadow in it, and it measures 7.7:1
-    /// on the page against `dim`'s 7.6:1, so nothing about the row gets louder.
+    /// Where a call's name rests while that band passes over it: `dim`. A neutral
+    /// grey needs no cooling the way ember's warm one did, and a second tint here
+    /// would be a colour the palette does not have.
     pub fn running_dim() -> Color {
-        Color::Rgb(0xa2, 0xa6, 0xad)
+        dim()
     }
+}
+
+/// The verb of a call -- what a row *did* -- in the one place its voice is written.
+///
+/// `call` is ember's accent and the accent means "you can act on this"; the bold is
+/// the second half of the same sentence, because the verb is the one word a row is
+/// about, and a row that named it in the accent alone had to be read to be told
+/// apart from the path beside it. Nothing else on the page is bold: bold is not
+/// emphasis, it is the word the row exists to say.
+fn verb_style() -> Style {
+    Style::new().fg(ink::call()).add_modifier(Modifier::BOLD)
+}
+
+/// The model's own reasoning, in the voice a quote is set in: `branch` -- the grey
+/// the detail corner is already drawn in -- and italic, because this is somebody
+/// thinking and not the answer. The rail it hangs from stays `branch` and
+/// unitalic: a rail is a mark, and only the words are quoted.
+fn thought_style() -> Style {
+    Style::new().fg(ink::branch()).add_modifier(Modifier::ITALIC)
 }
 
 /// The dot, the tick, the cross, the prompt, and what hangs in front of a head line
@@ -164,6 +179,13 @@ pub mod ink {
 const DOT: &str = "\u{25cf}";
 const TICK: &str = "\u{2713}";
 const CROSS: &str = "\u{2717}";
+/// The checklist's own three marks: the step being worked, one not started, and one
+/// crossed out of the plan. Nothing else on the page draws them. The tick above is a
+/// call's own and a finished step's is the same word as this one, so it is shared
+/// rather than copied.
+const NOW: &str = "\u{25b8}";
+const TODO: &str = "\u{25cb}";
+const GONE: &str = "\u{2500}";
 /// The peer mark: a four-pointed star. A shape and not a picture, so it takes the
 /// row's colour and stays in the glyph column, and unlike a tick or a cross it says
 /// nothing about whether anything worked. U+2726 over the smiling face it started as:
@@ -671,9 +693,11 @@ pub fn pieces(
             // The line you typed, on its own bar, and the runtime text that keeps
             // only the line saying what it is. Neither has a dot.
             Row::User { text, images } => {
-                // One blank line above the bar and none under it: the turn is
-                // where this screen is read from, and a line of air around every
-                // answer would double the height of the conversation.
+                // The line you typed is the raised surface and the prompt, and no rail:
+                // a rail down its left made the record of what was said look like a second
+                // composer sitting in the conversation. One blank line above it and none
+                // under it: the turn is where this screen is read from, and air around
+                // every answer would double the height of the conversation.
                 out.push(Held { row: i, head: i, piece: plain(
                     "",
                     Style::new().bg(ink::bar()),
@@ -817,6 +841,23 @@ fn step(
     };
     let mut out = Vec::new();
 
+    // A `todo` call is not a call that ran: its result is the state of the work. It is
+    // drawn as the plan's own line under the head, and as the checklist when the step
+    // is open, and it is left out of the tally -- nothing was run. A todo call whose
+    // result has not arrived, or whose result is not the tool's own payload, has no
+    // plan to draw and stays a call like any other.
+    let mut plans: Vec<(usize, Plan)> = Vec::new();
+    let mut counted: Vec<usize> = Vec::new();
+    for &c in calls {
+        match &rows[c] {
+            Row::Tool { name, result: Some(r), .. } if name == "todo" => match plan(r) {
+                Some(p) => plans.push((c, p)),
+                None => counted.push(c),
+            },
+            _ => counted.push(c),
+        }
+    }
+
     // The head: the step's name. A thought is the model's own words, cut to the
     // sentence that says what it is doing; a run of calls is named by the tool it
     // ran, with the count when there is more than one.
@@ -858,7 +899,7 @@ fn step(
             let name = given.map(str::to_string).unwrap_or_else(|| thought_name(text));
             vec![(name, Style::new().fg(ink::text()))]
         }
-        None => group_head(rows, calls),
+        None => group_head(rows, if counted.is_empty() { calls } else { &counted }),
     };
     // The words on the head, which is what a detail line is compared against: a
     // thought whose whole text is already the head is not drawn again under it.
@@ -890,6 +931,14 @@ fn step(
         piece: led_runs(format!("{DOT} "), Style::new().fg(lead), said).air(true, false),
     });
 
+    // The plan, in its own words, straight under the head it belongs to: how far along
+    // it is and what it is on. One line whether the step is open or folded -- opening
+    // it adds the checklist below, it does not add to this -- and it is not in the tally
+    // below, because the plan is the state of the work and not a call that ran.
+    for (_, found) in &plans {
+        out.push(Held { row: head, head, piece: plan_line(found) });
+    }
+
     // The line under it: what the thinking cost, what the calls were, and what
     // went wrong. One line, because this row is the compression: everything a
     // reader needs to decide whether to open it, and nothing more.
@@ -903,9 +952,10 @@ fn step(
         }
         meta.push((text, Style::new().fg(colour)));
     };
-    // What the stretch cost, summed over every round in it. A merged step's rate
-    // is not a number: three rounds have three of them, so it says what they cost
-    // and lets the individual rounds keep their own rates in the panel.
+    // What the reasoning cost: every round's thinking tokens summed, and the rate
+    // of the round that reported last. A count and a rate are meta, so they are
+    // `faint`; what the calls were is the row's tail and is `quiet`, one rung
+    // further from the head it hangs under.
     if let Some(round) = rounds(think, earlier, figures).filter(|r| r.tokens > 0 || r.tps > 0.0) {
         said(reasoning(round), ink::faint(), &mut meta);
     }
@@ -914,10 +964,10 @@ fn step(
     // also the only way a failure says *what* failed without opening anything.
     // A run of calls cannot say all their results on one line, so it says what it
     // ran instead.
-    if calls.len() == 1 && !(open && think.is_some()) {
-        if let Row::Tool { args, result: Some(r), .. } = &rows[calls[0]] {
+    if counted.len() == 1 && !(open && think.is_some()) {
+        if let Row::Tool { args, result: Some(r), .. } = &rows[counted[0]] {
             if !r.is_empty() {
-                let ink = if failed(r) { ink::failed() } else { ink::faint() };
+                let ink = if failed(r) { ink::failed() } else { ink::quiet() };
                 said(call_result(args, r), ink, &mut meta);
             }
         }
@@ -925,18 +975,18 @@ fn step(
     // A failure is the one thing on this line that is worth reading collapsed: a
     // red dot says something went wrong and this says what. One call says its own
     // result; a run of them says how much of it failed.
-    let broken: Vec<usize> = calls
+    let broken: Vec<usize> = counted
         .iter()
         .copied()
         .filter(|&c| matches!(&rows[c], Row::Tool { result: Some(r), .. } if failed(r)))
         .collect();
-    if calls.len() > 1 && !calls.is_empty() && think.is_some() {
-        said(ran(calls, rows), ink::faint(), &mut meta);
+    if counted.len() > 1 && think.is_some() {
+        said(ran(&counted, rows), ink::quiet(), &mut meta);
     }
     // One call said its own failure above, or says it on its own line when the
     // step is opened. A run of them cannot, so it says how much of it broke.
-    if !broken.is_empty() && calls.len() > 1 {
-        said(format!("{} of {} failed", broken.len(), calls.len()), ink::failed(), &mut meta);
+    if !broken.is_empty() && counted.len() > 1 {
+        said(format!("{} of {} failed", broken.len(), counted.len()), ink::failed(), &mut meta);
     }
     if !meta.is_empty() {
         out.push(Held {
@@ -996,7 +1046,24 @@ fn step(
                 }
                 // The call the head is already named for is not drawn again: an
                 // opened one-call step would otherwise say the same thing twice.
-                Row::Tool { .. } if !(think.is_none() && calls.len() == 1) => {
+                Row::Tool { .. } => {
+                    // A plan's detail is the checklist, and only the newest plan in the
+                    // step draws one: an older one's list is the same list with fewer
+                    // ticks on it, and two checklists is the wall this replaced.
+                    if let Some(at) = plans.iter().position(|(c, _)| *c == r) {
+                        if at + 1 == plans.len() {
+                            for piece in checklist(&plans[at].1) {
+                                out.push(Held { row: r, head, piece });
+                            }
+                        }
+                        after_thought = false;
+                        continue;
+                    }
+                    // The call the head is already named for is not drawn again: an
+                    // opened one-call step would otherwise say the same thing twice.
+                    if think.is_none() && calls.len() == 1 {
+                        continue;
+                    }
                     let mut line = call_line(r, head, rows, writing, flash, width);
                     if after_thought {
                         line.piece.air_above = true;
@@ -1043,42 +1110,49 @@ pub fn step_start(rows: &[Row], at: usize) -> usize {
     i
 }
 
-/// What a step's rounds cost, as one figure: the tokens summed, and a rate only
-/// when there is one round to have one.
+/// What a step's reasoning line says: every round's thinking tokens summed, and the
+/// rate the last round reported.
+///
+/// The count is the step's own, because the number a reader watches climb is what
+/// the stretch has thought so far and it should never step back to zero when another
+/// round joins in. The rate is not summed or averaged: it is the newest round's own
+/// speed, which is the one the model is going at now. Three rounds have three
+/// speeds, and the tokens-over-seconds average of them described none of them (it
+/// once put 1044 tok/s against a step that had thought at 60).
 fn rounds(
     think: Option<usize>,
     earlier: &[usize],
     figures: &dyn Fn(usize) -> Option<Round>,
 ) -> Option<Round> {
-    let mut all: Vec<Round> = earlier.iter().filter_map(|&t| figures(t)).collect();
-    let last = think.and_then(|t| figures(t));
-    let last_tps = last.map(|r| r.tps).unwrap_or(0.0);
-    let last_est = last.map(|r| r.estimated).unwrap_or(false);
-    all.extend(last);
+    let all: Vec<Round> = earlier
+        .iter()
+        .chain(think.iter())
+        .filter_map(|&t| figures(t))
+        .collect();
     if all.is_empty() {
         return None;
     }
-    // The rate of a step with several rounds is the rate of all of it: the tokens
-    // of the rounds that timed themselves, over the time they took. Summing their
-    // rates would be a number about nothing; leaving the rate out for every merged
-    // step meant it never showed at all, because most steps merge.
-    let timed: Vec<Round> = all.iter().copied().filter(|r| r.tps > 0.0 && r.tokens > 0).collect();
-    let seconds: f64 = timed.iter().map(|r| r.tokens as f64 / r.tps).sum();
-    let tokens: i64 = timed.iter().map(|r| r.tokens).sum();
     Some(Round {
         tokens: all.iter().map(|r| r.tokens).sum(),
-        tps: if seconds > 0.0 { tokens as f64 / seconds } else { last_tps },
-        estimated: all.iter().any(|r| r.estimated) || last_est,
+        // The newest round that timed itself. A round still streaming may not have
+        // a rate yet, and the one before it is the latest number the worker gave.
+        tps: all.iter().rev().find(|r| r.tps > 0.0).map_or(0.0, |r| r.tps),
+        estimated: all.iter().any(|r| r.estimated),
     })
 }
 
 /// A thought with its text folded away, as an opened step draws it: the rail and a
-/// triangle, and enough words to tell whether it is worth opening.
+/// triangle, enough words to tell whether it is worth opening, and what that round
+/// cost.
 ///
 /// The words are the thought's own name, which is the same name the head carries
-/// when this is the thought the step is named for. That one line says what the
-/// round cost instead: a row whose whole text is the line above it has said
-/// nothing, and the figure is a fact about this thought rather than the step.
+/// when this is the thought the step is named for. That one leads with the figures
+/// instead: a row whose whole text is the line above it has said nothing.
+///
+/// The figures are the round's own -- its tokens and the rate it thought them at,
+/// as the worker reported them -- and not the step's total. A step merges rounds,
+/// so a reader asking what one thought cost is asking about that thought, and the
+/// numbers on the line under the head are the only ones that are about the stretch.
 fn folded_thought(
     index: usize,
     head: usize,
@@ -1088,17 +1162,26 @@ fn folded_thought(
     width: usize,
 ) -> Held {
     let own = thought_name(text);
-    let label = if own == name {
-        match figures(index) {
-            Some(round) if round.tokens > 0 => {
-                format!("{} tokens", tokens(round.tokens, round.estimated))
-            }
-            _ => "thinking".to_string(),
-        }
-    } else {
-        own
-    };
     let room = width.saturating_sub(columns(THOUGHT_LEAD) + 2).max(1);
+    let spent = figures(index).map(cost).unwrap_or_default();
+    // Words that are the head's words are said by the head, so that line is the
+    // figures alone. Every other thought leads with its own opening words, which
+    // wear the reasoning's voice, and the figures hang off them as meta.
+    let mut runs: Vec<Run> = vec![(format!("{NOW} "), Style::new().fg(ink::branch()))];
+    let words = own != name;
+    if words && spent.is_empty() {
+        runs.push((clip(&own, room), thought_style()));
+    } else if words {
+        let sep = "  \u{b7}  ";
+        let most = room.saturating_sub(columns(&spent) + columns(sep)).max(1);
+        runs.push((clip(&own, most), thought_style()));
+        runs.push((sep.to_string(), Style::new().fg(ink::branch())));
+        runs.push((spent, Style::new().fg(ink::faint())));
+    } else if spent.is_empty() {
+        runs.push(("thinking".to_string(), Style::new().fg(ink::faint())));
+    } else {
+        runs.push((clip(&spent, room), Style::new().fg(ink::faint())));
+    }
     Held {
         row: index,
         head,
@@ -1108,10 +1191,7 @@ fn folded_thought(
             lead_style: Style::new().fg(ink::branch()),
             air_above: false,
             air_below: false,
-            lines: vec![vec![
-                ("\u{25b8} ".to_string(), Style::new().fg(ink::branch())),
-                (clip(&label, room), Style::new().fg(ink::faint())),
-            ]],
+            lines: vec![runs],
         },
     }
 }
@@ -1133,7 +1213,7 @@ fn thought(index: usize, head: usize, text: &str, name: &str, width: usize) -> V
         if n == 0 && is_name(paragraph, name) {
             continue;
         }
-        let lines = formatted(paragraph, Style::new().fg(ink::dim()), room);
+        let lines = formatted(paragraph, thought_style(), room);
         if lines.is_empty() {
             continue;
         }
@@ -1182,7 +1262,7 @@ fn group_head(rows: &[Row], calls: &[usize]) -> Vec<Run> {
     };
     let (verb, hint) = call_name(name, args, call);
     if calls.len() == 1 {
-        let mut said = vec![(verb, Style::new().fg(ink::call()))];
+        let mut said = vec![(verb, verb_style())];
         if let Some(hint) = hint {
             said.push(("(".to_string(), Style::new().fg(ink::text())));
             said.extend(arg_runs(&hint, ink::text()));
@@ -1273,7 +1353,7 @@ fn call_line(
         .saturating_sub(lead_width + columns(&verb) + 2 + columns("  \u{b7}  ") + columns(&tail))
         .max(8);
     let hint = hint.map(|h| clip(&h, hint_room));
-    let mut said = vec![(verb.clone(), Style::new().fg(ink::call()))];
+    let mut said = vec![(verb.clone(), verb_style())];
     let mut head_width = columns(&verb);
     if let Some(hint) = hint {
         said.push(("(".to_string(), Style::new().fg(colour)));
@@ -1282,16 +1362,164 @@ fn call_line(
         head_width += columns(&hint) + 2;
     }
     if let Some(r) = result.as_deref().filter(|r| !r.is_empty()) {
-        let ink = if failed(r) { ink::failed() } else { ink::faint() };
+        // The result is the row's tail: the head said what ran, and this is what
+        // came back. A failure is a state and keeps the red.
+        let tone = if failed(r) { ink::failed() } else { ink::quiet() };
         let used = lead_width + head_width + columns("  \u{b7}  ");
         let room = width.saturating_sub(used).max(8);
-        said.push((format!("  \u{b7}  {}", clip(&tail, room)), Style::new().fg(ink)));
+        said.push((format!("  \u{b7}  {}", clip(&tail, room)), Style::new().fg(tone)));
     }
     Held {
         row: index,
         head,
         piece: led_runs(format!("  {DOT} "), Style::new().fg(dot), said),
     }
+}
+
+/// A plan, read off a `todo` call's result.
+///
+/// The tool answers every call with the whole list, so what comes back is the state
+/// of the work rather than a report of one action: which steps exist, which is being
+/// worked, and what each turned up. That is why a step draws it as a line of its own
+/// and leaves it out of the tally -- nothing was run.
+struct Plan {
+    /// The plan's own word on how far along it is, as the tool wrote it: `2/5 done`.
+    /// Quoted and never counted here: a second count is a second answer.
+    summary: String,
+    /// What it is on, when it is on anything.
+    current: Option<String>,
+    items: Vec<PlanItem>,
+}
+
+/// One line of a plan: the step, the state it is in, and what it turned up.
+struct PlanItem {
+    id: i64,
+    text: String,
+    state: PlanState,
+    note: Option<String>,
+}
+
+/// The four states the tool keeps.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlanState {
+    Done,
+    Now,
+    Pending,
+    Dropped,
+}
+
+/// A `todo` call's result as the plan it is, or None for everything else: a call whose
+/// result has not arrived, another tool's payload, a list this file cannot read whole.
+///
+/// Every field is required and an item that does not parse takes the plan with it. A
+/// half-read checklist would be a row that says a step is pending when the payload
+/// never said so, and the honest answer to that is the row this drew before there was
+/// a checklist: a call like any other.
+fn plan(result: &str) -> Option<Plan> {
+    let value: Value = serde_json::from_str(result).ok()?;
+    // The worker wraps every answer one level down; a row's own copy may hold either.
+    let value = match value.get("result") {
+        Some(inner @ Value::Object(_)) => inner,
+        _ => &value,
+    };
+    let summary = value.get("summary")?.as_str()?.to_string();
+    let items: Vec<PlanItem> = value.get("todo")?.as_array()?.iter().map(plan_item).collect::<Option<_>>()?;
+    let current = value
+        .get("current")
+        .and_then(|c| c.get("text"))
+        .and_then(Value::as_str)
+        .filter(|c| !c.trim().is_empty())
+        .map(str::to_string);
+    Some(Plan { summary, current, items })
+}
+
+/// One item of that list, or None if it is not the tool's own shape.
+fn plan_item(item: &Value) -> Option<PlanItem> {
+    Some(PlanItem {
+        id: item.get("id")?.as_i64()?,
+        text: item.get("text")?.as_str()?.to_string(),
+        state: match item.get("state")?.as_str()? {
+            "done" => PlanState::Done,
+            "in_progress" => PlanState::Now,
+            "pending" => PlanState::Pending,
+            "dropped" => PlanState::Dropped,
+            _ => return None,
+        },
+        note: item
+            .get("note")
+            .and_then(Value::as_str)
+            .filter(|n| !n.trim().is_empty())
+            .map(str::to_string),
+    })
+}
+
+/// The mark and the tone of one item's row, in one place: the shape says what state
+/// the step is in and the tone says it again, because a colour on its own is four
+/// things to tell apart from memory.
+fn plan_mark(state: PlanState) -> (&'static str, Style) {
+    match state {
+        PlanState::Done => (TICK, Style::new().fg(ink::done())),
+        PlanState::Now => (NOW, Style::new().fg(ink::call()).add_modifier(Modifier::BOLD)),
+        PlanState::Pending => (TODO, Style::new().fg(ink::text())),
+        PlanState::Dropped => (GONE, Style::new().fg(ink::quiet())),
+    }
+}
+
+/// The words of one item's row. Finished work recedes to `dim` rather than going grey
+/// the way a dropped step does: it is done, and it is still what the plan is made of.
+fn plan_text(state: PlanState) -> Color {
+    match state {
+        PlanState::Done => ink::dim(),
+        PlanState::Dropped => ink::quiet(),
+        PlanState::Now | PlanState::Pending => ink::text(),
+    }
+}
+
+/// A plan under a step's head: how far along it is, and what it is on.
+///
+/// The summary is the plan's own words and is in `text`, because the number in it is
+/// what this line exists to say; the step it is on follows in `dim`, and the dot
+/// between them is `quiet` like the rest of a row's tail.
+fn plan_line(plan: &Plan) -> Piece {
+    let mut said: Vec<Run> = vec![(plan.summary.clone(), Style::new().fg(ink::text()))];
+    if let Some(current) = &plan.current {
+        said.push((" \u{b7} ".to_string(), Style::new().fg(ink::quiet())));
+        said.push((current.clone(), Style::new().fg(ink::dim())));
+    }
+    led_runs(BODY_LEAD.to_string(), Style::new().fg(ink::branch()), said)
+}
+
+/// The checklist itself: one row per item, in the order the plan keeps them, and a
+/// note under the row it belongs to.
+///
+/// The mark and the id are the row's lead, so a long step wraps under its own words
+/// instead of under its mark, and the note hangs at that same column. Nothing is
+/// clipped: a step's text wraps like any other row's.
+fn checklist(plan: &Plan) -> Vec<Piece> {
+    let mut out = Vec::with_capacity(plan.items.len());
+    for item in &plan.items {
+        let (mark, style) = plan_mark(item.state);
+        // The id is two cells and right-aligned, so the words start on one column
+        // whatever the number is.
+        let lead = format!("  {mark} {:>2}  ", item.id);
+        let pad = columns(&lead);
+        out.push(led_runs(
+            lead,
+            style,
+            vec![(item.text.clone(), Style::new().fg(plan_text(item.state)))],
+        ));
+        if let Some(note) = &item.note {
+            for line in note.lines() {
+                out.push(plain(
+                    " ".repeat(pad),
+                    Style::new(),
+                    line,
+                    Style::new().fg(ink::faint()),
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// A name for a thought, taken from the thought itself.
@@ -1383,7 +1611,7 @@ pub const SHIMMER_MS: u128 = 1600;
 /// mixed per channel and invents nothing: every step of it is a tone the palette already
 /// spans. A colour that is not RGB -- a terminal on the 16-colour fallback -- is left
 /// exactly as it was rather than handed an index nobody chose.
-fn mix(base: Color, top: Color, t: f64) -> Color {
+pub(crate) fn mix(base: Color, top: Color, t: f64) -> Color {
     let (Color::Rgb(br, bg, bb), Color::Rgb(tr, tg, tb)) = (base, top) else {
         return base;
     };
@@ -2026,7 +2254,7 @@ pub fn call_lead(
     // The verb is the one coloured thing on the row: in a column of calls it is
     // what says which rows are calls at all.
     let (verb, hint) = call_name(name, args, call);
-    let mut said = vec![(verb, Style::new().fg(ink::call()))];
+    let mut said = vec![(verb, verb_style())];
     if let Some(hint) = hint {
         said.push(("(".to_string(), Style::new().fg(colour)));
         said.extend(arg_runs(&hint, colour));
@@ -2192,7 +2420,6 @@ fn framed(title: &str, body: &[Body], room: usize, indent: usize) -> Vec<Vec<Run
     let pad = " ".repeat(indent);
     let room = room.saturating_sub(indent);
     let frame = Style::new().fg(ink::rule());
-    let label = Style::new().fg(ink::branch());
     let line_no = Style::new().fg(ink::faint());
     if room < MIN_BOX {
         return body
@@ -2222,12 +2449,16 @@ fn framed(title: &str, body: &[Body], room: usize, indent: usize) -> Vec<Vec<Run
     let inside = width.saturating_sub(4 + gutter);
     // The title sits on the top edge, so the edge is not one long dash to nowhere.
     let caption = clip(title, width.saturating_sub(5));
+    // The frame's edge language is the whole page's: rounded corners, with a straight
+    // run of rule between them, so a code block and a panel are one kind of edge. The
+    // title sits on the top edge one cell in from the corner, one space either side of
+    // it, in `faint`: a caption is meta, and the edge is broken only where it is.
     let mut out = vec![vec![
-        (format!("{pad}\u{250c} "), frame),
-        (caption.clone(), label),
+        (format!("{pad}\u{256d} "), frame),
+        (caption.clone(), Style::new().fg(ink::faint())),
         (
             format!(
-                " {}\u{2510}",
+                " {}\u{256e}",
                 "\u{2500}".repeat(width.saturating_sub(columns(&caption) + 4))
             ),
             frame,
@@ -2252,7 +2483,7 @@ fn framed(title: &str, body: &[Body], room: usize, indent: usize) -> Vec<Vec<Run
         }
     }
     out.push(vec![(
-        format!("{pad}\u{2514}{}\u{2518}", "\u{2500}".repeat(width - 2)),
+        format!("{pad}\u{2570}{}\u{256f}", "\u{2500}".repeat(width - 2)),
         frame,
     )]);
     out
@@ -2413,14 +2644,10 @@ pub(crate) fn clip(text: &str, most: usize) -> String {
     format!("{head}\u{2026}")
 }
 
-/// The reasoning row's own readout, as the design draws it: the round's thinking
-/// tokens and rate, quoted from the worker and nowhere else. A round that has not
-/// reported either says just "Reasoning".
-fn reasoning(round: Round) -> String {
-    if round.tokens <= 0 && round.tps <= 0.0 {
-        return "Reasoning".to_string();
-    }
-    let mut out = String::from("Reasoning | ");
+/// The figures of one round: the thinking tokens it spent and, when it timed
+/// itself, the rate it thought them at. Empty when the worker reported neither.
+fn cost(round: Round) -> String {
+    let mut out = String::new();
     if round.tokens > 0 {
         out.push_str(&format!("{} tokens", tokens(round.tokens, round.estimated)));
         if round.tps > 0.0 {
@@ -2430,7 +2657,19 @@ fn reasoning(round: Round) -> String {
     if round.tps > 0.0 {
         out.push_str(&format!("{:.0} tok/s", round.tps));
     }
-    out.trim_end().to_string()
+    out
+}
+
+/// The reasoning row's own readout, as the design draws it: the round's thinking
+/// tokens and rate, quoted from the worker and nowhere else. A round that has not
+/// reported either says just "Reasoning".
+fn reasoning(round: Round) -> String {
+    let said = cost(round);
+    if said.is_empty() {
+        "Reasoning".to_string()
+    } else {
+        format!("Reasoning | {said}")
+    }
 }
 
 /// A call in full, as the worker keeps it: the arguments and the result, past the
@@ -2597,7 +2836,7 @@ pub fn ask_body(name: &str, data: &Value) -> Vec<Line<'static>> {
     // is the answer to the question the call raises, so it sits under it.
     let args = data.get("args").cloned().unwrap_or(Value::Null);
     let (verb, hint) = call_name(name, &describe_args(&args), &args);
-    let mut call = vec![Span::styled(verb, Style::new().fg(ink::call()))];
+    let mut call = vec![Span::styled(verb, verb_style())];
     if let Some(hint) = hint {
         call.push(Span::styled(
             format!("({hint})"),
@@ -2651,70 +2890,91 @@ pub fn ask_body(name: &str, data: &Value) -> Vec<Line<'static>> {
 /// Deliberately not on screen at startup: a row of shortcuts in the corner of
 /// every frame is noise, and the one thing it helps with is learned once. It is a
 /// panel rather than anything special, so what closes any other panel closes this
-/// one, and the list lives here with the rest of what a row looks like.
+/// one.
 ///
-/// Keys and nothing else. The commands are the `/` menu's own list, and naming
-/// one here would put a single command on a screen with no room for the rest of
-/// them: a key list that answers one command and not twenty is worse than one
-/// that answers none. The three menu triggers are here because they are keys.
-pub fn keys() -> Opened {
-    let rows: &[(&str, &str)] = &[
-        ("enter", "send"),
-        ("shift-enter, ctrl-j", "a new line in the message"),
-        ("ctrl-v", "attach the picture on the clipboard"),
-        ("drop or paste a path", "attach the picture at it"),
-        ("click a chip", "take that picture off the message"),
-        (
-            "\u{2190} \u{2192}",
-            "move the caret; ctrl or alt for a word",
-        ),
-        (
-            "cmd-\u{2190} \u{2192}, ctrl-a / ctrl-e",
-            "the ends of the line, or of the conversation",
-        ),
-        ("backspace / delete", "a character, or a whole picture"),
-        ("ctrl or alt + backspace / delete", "a word at a time"),
-        (
-            "cmd-backspace, ctrl-u",
-            "everything before the caret on the line",
-        ),
-        ("cmd-delete, cmd-k / ctrl-k", "to the end of the line"),
-        ("ctrl-y", "put back what the last delete took"),
-        (
-            "\u{2191} \u{2193}",
-            "a line of the message, or of the conversation",
-        ),
-        ("pgup / pgdn", "ten lines of the conversation"),
-        (
-            "escape",
-            "stop the round in flight, or empty what you typed",
-        ),
-        ("/ $ @", "the menus: commands, skills, files"),
-        ("ctrl-t", "every step's calls; its thinking one line each"),
-        ("ctrl-o", "the calls, to open one in full"),
-        ("ctrl-b", "push the running call into the background"),
-        ("ctrl-g", "the machine this conversation runs on"),
-        ("ctrl-d", "let go of the box; it keeps working"),
-        (
-            "double click",
-            "one row: a call in full, a thinking opened or shut",
-        ),
-        ("ctrl-c", "quit"),
-    ];
+/// The rows are the keymap's own and not a table kept here, so a key rebound in
+/// `keys.json` is what this list says: `keys::Keymap` is the one owner of what a
+/// key means. Keys and nothing else -- the commands are the `/` menu's own list,
+/// and naming one here would put a single command on a screen with no room for the
+/// rest of them. The three rows at the end are not keys and cannot come from the
+/// map; they are a mouse and a paste, which is why they read as words.
+///
+/// The page is grouped, one key to a row, and the key column is as wide as the
+/// longest *key* rather than the longest list of them: a column sized to a row of
+/// four spellings pushes every description an inch from its key, and thirty
+/// unbroken rows is not a page anybody finds a key on.
+pub fn keys(map: &Keymap) -> Opened {
+    let mut rows = map.rows();
+    rows.extend([
+        KeyRow {
+            group: "the mouse",
+            key: "drop or paste".to_string(),
+            also: "a path".to_string(),
+            what: "attach the picture at it",
+        },
+        KeyRow {
+            group: "the mouse",
+            key: "click".to_string(),
+            also: "a chip".to_string(),
+            what: "take that picture off the message",
+        },
+        KeyRow {
+            group: "the mouse",
+            key: "double click".to_string(),
+            also: String::new(),
+            what: "a call in full, or a thinking opened",
+        },
+    ]);
+    // The widest key, capped: a chord is short, and the cap is what keeps a page
+    // with one long spelling on it from setting the column for all the others.
+    let width = rows
+        .iter()
+        .map(|row| row.key.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(KEY_COL)
+        + 2;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut group = "";
+    for row in &rows {
+        if row.group != group {
+            // A blank line between groups and none before the first: the heading
+            // is what says a block starts, and a leading blank would just be a
+            // panel that starts two rows down.
+            if !group.is_empty() {
+                lines.push(Line::from(""));
+            }
+            group = row.group;
+            lines.push(Line::from(Span::styled(group, Style::new().fg(ink::faint()))));
+        }
+        let mut said = vec![
+            Span::raw("  "),
+            // A chord is a literal you type, which is what this page's other
+            // amber literals are, and it is the one hue in the palette that
+            // cannot be read as a state. `ink::link()` is the blue that means
+            // clickable, which a key is not, and that was the mistake here.
+            Span::styled(
+                format!("{:<width$}", row.key),
+                Style::new().fg(ink::code()),
+            ),
+            Span::styled(row.what, Style::new().fg(ink::text())),
+        ];
+        if !row.also.is_empty() {
+            said.push(Span::raw("  "));
+            said.push(Span::styled(row.also.clone(), Style::new().fg(ink::faint())));
+        }
+        lines.push(Line::from(said));
+    }
     Opened {
         title: "keys".to_string(),
-        lines: rows
-            .iter()
-            .map(|(key, what)| {
-                Line::from(vec![
-                    Span::styled(format!("{key:<22}"), Style::new().fg(ink::link())),
-                    Span::styled(*what, Style::new().fg(ink::text())),
-                ])
-            })
-            .collect(),
+        lines,
         scroll: 0,
     }
 }
+
+/// The widest the key column is allowed to be, before the descriptions that hang
+/// off it start reading as a second page.
+const KEY_COL: usize = 20;
 
 /// Whether a call's summary reads as a failure. The worker says so two ways: an
 /// `error:` prefix, or a non-zero exit. A successful run is still a pass when the
@@ -3199,7 +3459,7 @@ mod tests {
         assert_eq!(
             after[0].lines[0],
             vec![
-                ("write".to_string(), Style::new().fg(ink::call())),
+                ("write".to_string(), verb_style()),
                 ("(".to_string(), Style::new().fg(ink::text())),
                 (
                     "~/\u{2026}/notebook/".to_string(),
@@ -3217,17 +3477,19 @@ mod tests {
         assert_eq!(after[1].text(), "created \u{b7} written 7977");
     }
 
-    /// The verb is what says a row is something that ran, so it is the one
-    /// coloured thing on a head that is otherwise the row's own colour.
+    /// The verb is what says a row is something that ran, so it is the one word on
+    /// a head that is bold and the one word in the accent, and the thing it ran on
+    /// is neither.
     #[test]
     fn a_calls_verb_is_the_coloured_part_of_its_head() {
         let call = rows(&[
             r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"file","args":{"action":"write","path":"a.py"}}]}}"#,
         ]);
         let head = &pieces_at(&call, &all_open(), &no_figures(), None, true)[0];
-        assert_eq!(
-            head.lines[0][0],
-            ("write".to_string(), Style::new().fg(ink::call()))
+        assert_eq!(head.lines[0][0], ("write".to_string(), verb_style()));
+        assert!(
+            head.lines[0][0].1.add_modifier.contains(Modifier::BOLD),
+            "the verb is bold"
         );
         assert_eq!(
             head.text(),
@@ -3239,6 +3501,93 @@ mod tests {
         let arg = head.lines[0].last().expect("an argument");
         assert_eq!(arg.0, ")");
         assert_ne!(arg.1.fg, Some(ink::call()), "the argument is not the verb");
+    }
+
+    /// A verb is bold wherever a call is named, because there is one definition of
+    /// that voice and three places that draw a call: the row, the list behind
+    /// ctrl-o, and the document a permission is decided on. A tone written out at
+    /// each of them is how one of the three ends up not bold.
+    #[test]
+    fn a_verb_is_bold_wherever_a_call_is_named() {
+        let args = serde_json::json!({"action": "write", "path": "a.py"});
+        let result = Some("created a.py");
+        let (_, _, said) = call_lead("file", "action=write", &args, result, false, true);
+        assert_eq!(said[0], ("write".to_string(), verb_style()));
+
+        let document = ask_body("file", &serde_json::json!({"args": args}));
+        let verb = &document[0].spans[0];
+        assert_eq!(verb.content, "write");
+        assert!(
+            verb.style.add_modifier.contains(Modifier::BOLD),
+            "a verb on the permission document is the same verb: {:?}",
+            verb.style
+        );
+    }
+
+    /// The folded line an opened step gives a thought is its own words, which wear
+    /// the reasoning's voice, and that round's figures, which are meta and are not
+    /// italic. The words are said by the head when this is the thought the step is
+    /// named for, so that line is the figures alone.
+    #[test]
+    fn a_folded_thoughts_own_words_are_italic_and_its_figure_is_not() {
+        let stream = rows(&[
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"Look at the loader first. Then read the file."}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"shell","args":{"command":"ls"}}]}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"Now the loader is clear. Write the patch."}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"shell","args":{"command":"pwd"}}]}}"#,
+        ]);
+        let folded = pieces(&stream, &all_open(), &|_| false, &no_figures(), None, true, ROOM, None);
+        let words = folded
+            .iter()
+            .find(|p| p.text().starts_with("\u{25b8} Look at the loader"))
+            .expect("the folded thought's own words");
+        assert_eq!(words.lines[0][1].1, thought_style(), "the reasoning's own voice");
+        assert!(
+            !words.lines[0][0].1.add_modifier.contains(Modifier::ITALIC),
+            "the triangle is a mark, not a quote"
+        );
+
+        // The step is named for the second thought, so that line says the figure
+        // instead, and a figure is not reasoning.
+        let mine = |i: usize| {
+            (i == 2).then_some(Round {
+                tokens: 820,
+                tps: 0.0,
+                estimated: false,
+            })
+        };
+        let cost = pieces(&stream, &all_open(), &|_| false, &mine, None, true, ROOM, None);
+        let figure = cost
+            .iter()
+            .find(|p| p.text().starts_with("\u{25b8} 820 tokens"))
+            .expect("the figure");
+        assert_eq!(figure.lines[0][1].1.fg, Some(ink::faint()));
+        assert_eq!(figure.lines[0][1].1.add_modifier, Modifier::empty());
+
+        // A thought that is not the step's name keeps its words and carries its own
+        // figures beside them: what that round cost, not what the step did.
+        let both = |i: usize| {
+            (i == 0).then_some(Round {
+                tokens: 400,
+                tps: 62.0,
+                estimated: false,
+            })
+        };
+        let mixed = pieces(&stream, &all_open(), &|_| false, &both, None, true, ROOM, None);
+        let line = mixed
+            .iter()
+            .find(|p| p.text().starts_with("\u{25b8} Look at the loader"))
+            .expect("the thought's words and its figures");
+        assert_eq!(
+            line.text(),
+            "\u{25b8} Look at the loader first  \u{b7}  400 tokens, 62 tok/s"
+        );
+        assert_eq!(line.lines[0][1].1, thought_style(), "the words keep the thought's voice");
+        assert_eq!(
+            line.lines[0].last().unwrap().1.fg,
+            Some(ink::faint()),
+            "the figure is meta"
+        );
     }
 
     /// A diff is read by its colours: a line that went is red, a line that came is
@@ -3362,7 +3711,7 @@ mod tests {
         // The input is nowhere on the row: no code block, no `content`.
         let all: String = open.iter().map(|p| p.text()).collect::<Vec<_>>().join("\n");
         assert!(
-            !all.contains("content") && !all.contains('\u{250c}'),
+            !all.contains("content") && !all.contains('\u{256d}'),
             "{all}"
         );
 
@@ -3413,17 +3762,17 @@ mod tests {
             // fixed index here passes under `-p` and fails under `--workspace`.
             let start = lines
                 .iter()
-                .position(|l| l.starts_with('\u{250c}'))
+                .position(|l| l.starts_with('\u{256d}'))
                 .expect("no box opens");
             let end = lines
                 .iter()
-                .position(|l| l.ends_with('\u{2518}'))
+                .position(|l| l.ends_with('\u{256f}'))
                 .expect("no box closes");
             lines[start..=end].iter().collect()
         };
         assert!(
-            boxed[0].starts_with("\u{250c} content \u{b7} 2 lines ")
-                && boxed[0].ends_with('\u{2510}'),
+            boxed[0].starts_with("\u{256d} content \u{b7} 2 lines ")
+                && boxed[0].ends_with('\u{256e}'),
             "{lines:?}"
         );
         assert!(boxed.len() >= 3, "a box holds something: {lines:?}");
@@ -3454,7 +3803,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            !text.contains('\u{250c}') && !text.contains('\u{2502}'),
+            !text.contains('\u{256d}') && !text.contains('\u{2502}'),
             "{text}"
         );
         assert!(text.contains("short") && text.contains("xxx"), "{text}");
@@ -3481,7 +3830,7 @@ mod tests {
             .join("\n");
         // The head says the path, so the panel does not say it again.
         assert!(!text.contains("path"), "{text}");
-        assert!(text.contains("\u{250c} content \u{b7} 2 lines "), "{text}");
+        assert!(text.contains("\u{256d} content \u{b7} 2 lines "), "{text}");
         assert!(
             text.contains("\u{2502} one") && text.contains("\u{2502} two"),
             "{text}"
@@ -3750,11 +4099,10 @@ mod tests {
         assert_eq!(bare[0].text(), "hm");
     }
 
-    /// A merged step's rate is the rate of all of it: tokens over the time they
-    /// took. Summing the rounds' own rates would say a step that spent two seconds
-    /// at 50 and three at 100 was doing 150 a second.
+    /// A merged step counts all of it and rates the last of it: the tokens are the
+    /// rounds' sum, the rate is the newest round's own, never an average of the lot.
     #[test]
-    fn a_merged_step_reports_its_whole_rate() {
+    fn a_merged_step_counts_it_all_and_rates_the_last() {
         let stream = rows(&[
             r#"{"type":"token","id":"a","data":{"state":"thinking","token":"first"}}"#,
             r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"shell","args":{"command":"ls"}}]}}"#,
@@ -3770,12 +4118,38 @@ mod tests {
             _ => None,
         };
         let ps = pieces_at(&stream, &|_: usize, _: &Row| false, &mine, None, true);
-        assert_eq!(ps[1].text(), "Reasoning | 400 tokens, 80 tok/s  \u{b7}  Ran shell \u{d7}2");
+        assert_eq!(ps[1].text(), "Reasoning | 400 tokens, 100 tok/s  \u{b7}  Ran shell \u{d7}2");
     }
 
-    /// The thought under a reasoning row is drawn dimmer than the answer. It is
-    /// worth reading, and it is not what was asked for: at full white it
-    /// out-shouts the reply it was thinking towards.
+    /// While a round runs, the count is still the whole step's -- it climbs past the
+    /// rounds already behind it rather than restarting -- and the rate is the one
+    /// the round in flight is going at.
+    #[test]
+    fn a_live_step_counts_the_stretch_and_rates_the_round() {
+        let stream = rows(&[
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"first"}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"shell","args":{"command":"ls"}}]}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"shell","index":0,"result":{"result":{"exit_code":0,"stdout":"a\n"}}}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"second"}}"#,
+        ]);
+        // Rows: thought, call, thought. The second thought is the one being written.
+        let mine = |i: usize| match i {
+            0 => Some(Round { tokens: 4200, tps: 1044.0, estimated: false }),
+            2 => Some(Round { tokens: 300, tps: 80.0, estimated: false }),
+            _ => None,
+        };
+        let ps = pieces_at(&stream, &|_: usize, _: &Row| false, &mine, Some(2), true);
+        assert!(
+            ps[1].text().starts_with("Reasoning | 4.5k tokens, 80 tok/s"),
+            "the step's count with the live round's rate: {:?}",
+            ps[1].text()
+        );
+    }
+
+    /// The thought under a reasoning row is set apart from the answer, and by two
+    /// things at once: it is the quote's grey rather than the body's off-white, and
+    /// it is italic. It is worth reading, and it is not what was asked for: at full
+    /// white it out-shouted the reply it was thinking towards.
     #[test]
     fn an_open_thought_is_dimmer_than_the_answer() {
         // Two sentences, so the name is the first one and the detail under it is
@@ -3786,16 +4160,13 @@ mod tests {
         ]);
         let open = pieces_at(&thought, &all_open(), &no_figures(), None, true);
         assert_eq!(open[0].text(), "hm");
-        assert_eq!(open[1].lines[0][0].1.fg, Some(ink::dim()));
+        assert_eq!(open[1].lines[0][0].1, thought_style());
         let answer = rows(&[
             r#"{"type":"token","id":"a","data":{"state":"content","token":"it is 04:56"}}"#,
         ]);
-        assert_eq!(
-            pieces_at(&answer, &all_open(), &no_figures(), None, true)[0].lines[0][0]
-                .1
-                .fg,
-            Some(ink::text())
-        );
+        let said = &pieces_at(&answer, &all_open(), &no_figures(), None, true)[0].lines[0][0].1;
+        assert_eq!(said.fg, Some(ink::text()));
+        assert_eq!(said.add_modifier, Modifier::empty(), "the answer wears no modifier");
     }
 
     /// A step opened is its calls. Its thinking is one line each -- the thought's
@@ -4358,7 +4729,7 @@ mod tests {
             panel.title
         );
         assert_eq!(
-            text.matches('\u{250c}').count(),
+            text.matches('\u{256d}').count(),
             1,
             "one document, one box: {text}"
         );
@@ -4425,5 +4796,129 @@ mod tests {
         );
         let screen: Vec<String> = drawn.lines.iter().map(Line::to_string).collect();
         assert_eq!(screen, vec!["\u{25cf} shell \u{d7}2"]);
+    }
+
+    #[test]
+    fn the_key_panel_is_grouped_and_its_words_start_on_one_column() {
+        let map = crate::keys::defaults();
+        let panel = keys(&map);
+        let text: Vec<String> = panel.lines.iter().map(Line::to_string).collect();
+        // A heading names each run of keys, in the order the work happens: the first
+        // line is one, and a blank line is what separates two runs and nothing else.
+        let heads: Vec<&str> = text
+            .iter()
+            .map(String::as_str)
+            .filter(|line| !line.is_empty() && !line.starts_with("  "))
+            .collect();
+        assert_eq!(
+            heads,
+            ["the message", "editing", "the caret", "the conversation", "the app", "the mouse"]
+        );
+        assert_eq!(text[0], "the message");
+        for (i, line) in text.iter().enumerate() {
+            if line.is_empty() {
+                assert!(i > 0 && !text[i - 1].is_empty(), "two blank lines at {i}");
+                assert!(i + 1 < text.len() && !text[i + 1].starts_with("  "), "a gap inside a run at {i}");
+            }
+        }
+        // One key a row, the words on one column, and the other spellings after them
+        // rather than in the column: a row whose key list set the width was the wide
+        // page this replaced.
+        for row in map.rows() {
+            let line = text
+                .iter()
+                .find(|line| line.starts_with(&format!("  {} ", row.key)))
+                .unwrap_or_else(|| panic!("no row for {} in {text:#?}", row.key));
+            let start = line.find(row.what).unwrap_or_else(|| panic!("{line} says nothing about {}", row.what));
+            assert_eq!(line[..start].chars().count(), 18, "{line}");
+            if !row.also.is_empty() {
+                assert!(line.ends_with(&row.also), "{line} is missing its other spellings");
+            }
+        }
+    }
+
+    /// The plan a `todo` call answers with: five steps, two done, the third being
+    /// worked, one still to come, one given up on.
+    fn planned() -> Vec<Row> {
+        rows(&[
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"porting the composer"}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"todo","args":{"action":"start","id":3}}]}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"todo","result":{"result":{"todo":[{"id":1,"text":"read the tool","state":"done"},{"id":2,"text":"check the wrap","state":"done"},{"id":3,"text":"port the composer","state":"in_progress","note":"read the tool first"},{"id":4,"text":"wire the palette","state":"pending"},{"id":5,"text":"drop the old picker","state":"dropped"}],"summary":"2/5 done","open":2,"current":{"id":3,"text":"port the composer","state":"in_progress"}}}}}"#,
+        ])
+    }
+
+    #[test]
+    fn a_plan_on_a_folded_step_says_how_far_along_it_is() {
+        // A plan and a call in one step: the plan's line is under the head and the
+        // read is what the tally counts, so the plan never appears as a verb.
+        let step = rows(&[
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"porting the composer"}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"todo","args":{"action":"start","id":3}},{"name":"read","args":{"path":"a.py"}}]}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"todo","result":{"result":{"todo":[{"id":1,"text":"read the tool","state":"done"},{"id":2,"text":"port the composer","state":"in_progress"}],"summary":"1/2 done","open":1,"current":{"id":2,"text":"port the composer","state":"in_progress"}}}}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"read","result":{"result":{"path":"a.py","lines":1}}}}"#,
+        ]);
+        let pieces = pieces_at(&step, &|_, _| false, &no_figures(), None, true);
+        let screen: Vec<String> = draw(&pieces, 40)
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect();
+        assert_eq!(
+            screen,
+            vec![
+                "\u{25cf} porting the composer",
+                "  \u{2514} 1/2 done \u{b7} port the composer",
+                "  \u{2514} lines 1",
+            ]
+        );
+        // The plan's own summary is the tone the eye lands on, and the step it is on
+        // hangs under it in a quieter one.
+        let plan = pieces.iter().find(|p| p.text().contains("1/2 done")).unwrap();
+        assert_eq!(plan.lines[0][0].1.fg, Some(ink::text()));
+        assert_eq!(plan.lines[0][2].1.fg, Some(ink::dim()));
+        // The read is still counted; the plan is not a call that ran.
+        assert!(!screen.iter().any(|l| l.contains("plan")), "{screen:?}");
+    }
+
+    #[test]
+    fn an_opened_step_draws_the_plan_as_its_checklist() {
+        let pieces = pieces_at(&planned(), &all_open(), &no_figures(), None, true);
+        let screen: Vec<String> = draw(&pieces, 40)
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect();
+        assert_eq!(
+            screen,
+            vec![
+                "\u{25cf} porting the composer",
+                "  \u{2514} 2/5 done \u{b7} port the composer",
+                "  \u{2713}  1  read the tool",
+                "  \u{2713}  2  check the wrap",
+                "  \u{25b8}  3  port the composer",
+                "        read the tool first",
+                "  \u{25cb}  4  wire the palette",
+                "  \u{2500}  5  drop the old picker",
+            ]
+        );
+        // Four marks, four tones, in the order the plan keeps them.
+        let row = |mark: &str| {
+            pieces
+                .iter()
+                .find(|p| p.lead.contains(mark))
+                .unwrap_or_else(|| panic!("no {mark} row"))
+        };
+        assert_eq!(row("\u{2713}").lead_style.fg, Some(ink::done()));
+        assert_eq!(row("\u{25b8}").lead_style.fg, Some(ink::call()));
+        assert!(row("\u{25b8}").lead_style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(row("\u{25cb}").lead_style.fg, Some(ink::text()));
+        assert_eq!(row("\u{2500}").lead_style.fg, Some(ink::quiet()));
+        // A note hangs at the column its item's own words start on, and nowhere else.
+        let note = pieces
+            .iter()
+            .find(|p| p.text().contains("read the tool first"))
+            .unwrap();
+        assert_eq!(note.lead, " ".repeat(8));
+        assert_eq!(note.lines[0][0].1.fg, Some(ink::faint()));
     }
 }

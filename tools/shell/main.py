@@ -2,7 +2,31 @@ import os, platform, signal, subprocess, threading, time
 from pathlib import Path
 
 from tools import _window
+from handler import faults
 from tools._safety import shell as safety
+
+def irreversible(args: dict) -> str:
+    """Why bypass mode must not wave this command through, or "".
+
+    The same answer `safe` gives, for the opposite question: bypass asks nothing
+    at all, so this is then the only thing between the user and the machine. A
+    floor, not a screen -- see tools/_safety/shell.py.
+    """
+    return safety.destructive(str(args.get("command") or ""))
+
+def brief(result: dict) -> dict:
+    """The row says how much came back, not what it said.
+
+    The output is in the conversation already, where the model reads it, and a
+    build log on the wire is a build log in a frame. `bytes` is the fact a person
+    wants from it: a command that printed nothing and one that printed forty
+    lines are different rows.
+    """
+    r = result.get("result")
+    if not isinstance(r, dict): return result
+    row = {k: v for k, v in r.items() if k not in ("stdout", "stderr")}
+    row["bytes"] = len(r.get("stdout") or "") + len(r.get("stderr") or "")
+    return {"result": row}
 
 OUT_CAP = 20_000        # chars per stream
 DEFAULT_TIMEOUT = 30
@@ -126,7 +150,12 @@ def _collect(proc, timeout: float, cancel) -> tuple[str, str, str]:
 
     def drain():
         try: box["io"] = proc.communicate()
-        except Exception: box["io"] = ("", "")
+        except Exception as e:
+            # The command ran; what was lost is its output. Two empty strings would
+            # read as a command that printed nothing, so the reason goes where the
+            # output would have been.
+            box["io"] = ("", f"the command's output could not be read: {e}")
+            faults.note("reading the shell's output", e, "the result says so in stderr")
         finally: box["done"] = True
 
     t = threading.Thread(target=drain, daemon=True)
@@ -192,7 +221,10 @@ def run(args: dict, ctx) -> dict:
 
     # Only the apps that were not running before this call; one whose window
     # arrives later than its process is caught on the screenshot path instead.
-    opened = _window.park_new(getattr(ctx, "self_identity", None))
+    # The command's own duration goes with it: a person who typed or clicked while
+    # it ran is the one who opened whatever appeared, so it is named as neither.
+    opened = _window.park_new(getattr(ctx, "self_identity", None),
+                              ran_for=time.monotonic() - started)
 
     result = {"cwd": _cwd, "exit_code": proc.returncode, "stdout": out, "stderr": err,
               "duration": round(time.monotonic() - started, 2)}

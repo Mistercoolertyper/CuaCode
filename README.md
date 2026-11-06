@@ -103,6 +103,7 @@ Everything else the agent keeps lives beside it:
 
 ```
 ~/.cuacode/config.json      providers, keys, models, your permission lists
+~/.cuacode/keys.json        quik's keys: one action per row, optional
 ~/.cuacode/AGENTS.md        your standing instructions, in every conversation
 ~/.cuacode/sessions/        one directory per conversation
 ~/.cuacode/memory/          what the agent has learned about you, one fact per file
@@ -194,7 +195,11 @@ The Python agent is the worker; the Rust side is one or more interchangeable
 frontends talking to it over line-delimited JSON on stdin/stdout.
 
 ```
-main.py, handler/, tools/     the Python worker (the actual agent)
+main.py                       the worker's entry: argv, then `serve`
+handler/worker.py             the agent: one conversation and the turn that runs on it
+handler/commands.py           the wire: every command, and the loop that serves them
+WIRE.md                       the protocol, for a client that is not in this tree
+handler/, tools/              the Python worker (the actual agent)
 integrations/                 subagents, workflows, skills, MCP servers
 rust/src/wire.rs              the wire format: the envelope, its events, its fields
 rust/src/worker.rs            finds python and main.py, spawns, reads, reaps
@@ -226,7 +231,7 @@ The pointer-and-keyboard ones (`click`, `key`, `scroll`, `type_text`,
 | Name | What it is |
 | --- | --- |
 | `fastrs` | Terminal. One conversation as an action tape rather than a chat log: the model's prose is the unmarked baseline, and what you asked, what it thought and what it did to the machine are what catch the eye. Tool calls fold into one row per run - `5 calls · read, edit` - which opens on a press. `/` opens the worker's own command table (with `help` and `permissions` in front), `$` the skill menu, `@` a file picker. `Ctrl+O` opens the call under the cursor in full, `Ctrl+V` attaches a picture, `Esc` stops the run, `Shift+Enter` (or `Alt+Enter`, or `Ctrl+J`) puts a newline in the message. `/help` lists every key; there is no key row drawn in the corner of the frame. |
-| `quik` | Terminal, compact. Fastrs's code with the design still to be settled: thoughts and calls compressed, the header and the frame cut down. |
+| `quik` | Terminal, compact. The frontend the work goes into, and its design is settled in `rust/quik/AGENTS.md`: one row per thing, no mark that is not a state, no instrument readings, one glyph family, and the conversation is thirty rows of forty. |
 | `cuacode` | GUI window. A rail of promoted projects and the sessions standing in each, the conversation, and a composer that sets provider, model, permissions and location. It reads the state root directly, so the rail draws with no worker up. A run is one row, the same fold fastrs uses. `rust/app/app.sh` builds it as a real macOS bundle so it owns a Dock identity and a menu bar. |
 
 All three are documented at length in `rust/README.md`, which is the page for the
@@ -259,6 +264,25 @@ under the id it was sent with.
 `rust/fastrs` is the smallest complete example and `rust/app` the other extreme,
 a window over the same types. `rust/AGENTS.md` has the rules that keep them
 apart, and `rust/README.md` explains the fold each of them draws from.
+
+### Driving it from a program
+
+The other client of that wire is not a frontend at all: a script, in any
+language, that spawns `main.py` and drives one turn with nobody watching. No
+import of anything in this tree, no screen, and no state-root file a client could
+not read anyway.
+
+```json
+{"type":"cmd","id":"1","data":{"action":"chat","text":"summarise the diff",
+  "policy":{"tools":["file","shell"],"max_rounds":8,"max_seconds":120}}}
+```
+
+`policy` is the half of a turn a person never needs: an allowlist of tools, a
+ceiling in model calls, and a ceiling in seconds. The turn ends with a terminator
+carrying `result`: the model's last message, the reason the run is over (`done`,
+`cancelled`, `max_rounds`, `deadline`, `error`) and the session it happened in.
+`WIRE.md` is the whole contract, and `python3 main.py --wire` lists the commands
+this build answers, generated from the table that serves them.
 
 ### Cancelling
 

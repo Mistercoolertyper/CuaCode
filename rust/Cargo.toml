@@ -17,7 +17,10 @@ path = "src/bin/cuacode-doctor.rs"
 # and neither is built into it -- the terminal one must not link a GUI
 # framework, and a GUI must not link a terminal library.
 [workspace]
-members = ["fastrs", "quik", "app"]
+members = ["fastrs", "quik", "gui"]
+# The vendored zeron tree is its own workspace; without this cargo tries to make
+# every crate under `zeron/` inherit this root, which has no `workspace.package`.
+exclude = ["zeron"]
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
@@ -29,7 +32,24 @@ serde_json = "1.0.151"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console"] }
 
+# Every frontend here is a binary over the same dependency tree, so a dev build
+# pays the gpui stack's debuginfo once per frontend. That is what turns
+# `target/debug` into tens of gigabytes, and nothing in this tree runs a debugger
+# against it. Line tables keep file:line in a panic backtrace, which is the one
+# thing that gets read, and drop the type and variable DWARF that is the weight.
+# `debug = 2` (cargo's default) is what this replaces; do not put it back.
+[profile.dev]
+debug = "line-tables-only"
+
 # GPUI is slow unoptimized even in a debug build of the app itself, which makes
 # `cargo run` unusable while iterating. Zed sets this; so does zeron.
 [profile.dev.package."*"]
 opt-level = 2
+
+# zeron's own numbers: its scenes rasterize in software every frame the camera
+# moves, so those two crates are optimized even in a debug build.
+[profile.dev.package.zeron-visual]
+opt-level = 3
+
+[profile.dev.package.zeron-visual-gpu]
+opt-level = 3

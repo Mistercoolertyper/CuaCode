@@ -67,16 +67,10 @@ impl Row {
         let mut lines = text.lines();
         let head = lines.next().unwrap_or("").trim().to_string();
         let rest = lines.filter(|l| !l.trim().is_empty()).count();
-        // A tag whose body is the head said again, plus an instruction addressed to
-        // the model: `todo_status` restates the plan that produced it, and the plan
-        // itself is rows on the screen already. Counting its lines would put "+4
-        // lines" beside a notice with nothing behind it to read.
-        let restated = rest > 0 && text.contains("<todo_status>");
-        // A tagged block whose body is boilerplate keeps its head and loses only the
-        // count; an untagged one is a single line of runtime words and is drawn as
-        // written.
+        // A tagged block keeps its head and its count; an untagged one is a single
+        // line of runtime words and is drawn as written.
         let (head, hidden) = if tagged {
-            (head, if restated { 0 } else { rest })
+            (head, rest)
         } else {
             (text.trim().to_string(), 0)
         };
@@ -121,7 +115,15 @@ impl Transcript {
                 true
             }
             ("token", "notice") => {
-                self.rows.push(Row::notice(ev.token_text()));
+                // A todo note is the plan's own state said again: the plan is a row on
+                // the screen already, on the `todo` call that made it, and a notice
+                // here put a line between that call and the one after it. It stays on
+                // the records, where the model reads it.
+                let text = ev.token_text();
+                if text.trim_start().starts_with("todo:") && text.contains("<todo_status>") {
+                    return false;
+                }
+                self.rows.push(Row::notice(text));
                 true
             }
             ("token", "peer") => {
@@ -385,6 +387,19 @@ pub fn describe_args(args: &Value) -> String {
 /// command is quoted instead: its own words are the most useful thing a row can
 /// carry. Bulky values are measured, never quoted.
 fn brief(result: &Value) -> String {
+    // A plan is the one result that is not a result to summarise. It is the state
+    // of the work -- which steps exist, which is being worked, what each turned up
+    // -- and a line of `current:{3} \u{b7} next:{3} \u{b7} open 4 \u{b7} summary 0/4
+    // done \u{b7} +1` is the wall a checklist replaces. So the payload travels whole
+    // and the frontend that draws a plan reads the items out of it.
+    //
+    // ponytail: it rides the row's one result string as JSON, because `Row::Tool`
+    // has no field for a value and adding one breaks the frontends' own exhaustive
+    // destructuring of the row. Give it `result_value: Option<Value>` once those
+    // change; `view::plan` is the only reader, and it parses defensively.
+    if let Some(plan) = plan(result) {
+        return plan.to_string();
+    }
     let Value::Object(map) = result else {
         return short(result);
     };
@@ -424,6 +439,20 @@ fn brief(result: &Value) -> String {
         return format!("{{{}}}", inner.len());
     }
     truncate(&parts.join(" · "), 150)
+}
+
+/// The plan inside a `todo` result, if that is what this is: the list the tool
+/// keeps, with the summary and the step it is on. Every shape else -- another
+/// tool's result, an error, the wrapper the worker puts every answer in -- is not
+/// a plan, and says so rather than being guessed at.
+fn plan(result: &Value) -> Option<&Value> {
+    let inner = match result.get("result") {
+        Some(inner @ Value::Object(_)) => inner,
+        _ => result,
+    };
+    let is_plan = inner.get("todo").is_some_and(Value::is_array)
+        && inner.get("summary").is_some_and(Value::is_string);
+    is_plan.then_some(inner)
 }
 
 /// One key of a result as a phrase. `None` means nothing worth saying.
@@ -688,20 +717,14 @@ mod tests {
         );
     }
 
-    /// The todo note is a state the runtime handed the model, and its block says the
-    /// same thing again plus a nudge at the model. A row that counted it said
-    /// "+5 lines" beside a notice with nothing behind it, once per step of the run.
+    /// The todo note is the plan's own state, and the plan is already a row on the
+    /// screen: the `todo` call it came from. Drawing it again put a line between that
+    /// call and the one after it.
     #[test]
-    fn the_todo_note_is_one_line_and_counts_nothing() {
+    fn the_todo_note_is_not_a_row_of_its_own() {
         let mut t = Transcript::default();
         t.apply(&ev(r#"{"type":"token","id":"a","data":{"state":"notice","token":"todo: 2/7 done, 5 open, in progress: Improve the namer's input\n\n<todo_status>\n2/7 done, 5 open, in progress: Improve the namer's input.\nYou have not touched the list in a while. Update it with the todo tool if you have\nmoved on, or clear it if it no longer describes what you are doing.\n</todo_status>"}}"#));
-        assert_eq!(
-            t.rows,
-            vec![Row::Notice {
-                head: "todo: 2/7 done, 5 open, in progress: Improve the namer's input".into(),
-                hidden: 0,
-            }]
-        );
+        assert!(t.rows.is_empty(), "{:?}", t.rows);
     }
 
     #[test]

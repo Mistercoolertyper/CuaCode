@@ -3,11 +3,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from tools import _window
+from handler import faults
 
 from _grid import draw_grid
 from _session import save_screenshot
 
 OS = platform.system()
+
+def brief(result: dict) -> dict:
+    """One screenshot is one row; the encoded image lives in the message."""
+    return {"result": {"n": 1}}
 
 def _capture_module():
     if OS == "Darwin": import _capture_macos as m
@@ -44,9 +49,11 @@ def run(args: dict, ctx) -> dict:
     if self_name:
         try:
             self_snapped, self_raised = _window.park_self(self_name, raise_it=raise_it)
-        except Exception:
+        except Exception as e:
             self_snapped = False
             self_raised = False
+            faults.note("parking this worker's own window", e,
+                        "the capture is taken with the window where it is")
 
     # Raising is a Windows need: input there follows the foreground, so the window being
     # driven has to hold it. On macOS activation decides the keyboard and can hop spaces,
@@ -55,8 +62,9 @@ def run(args: dict, ctx) -> dict:
     try:
         opened = _window.park_new(self_name, focus=raise_it)
         _window.park_known(self_name)
-    except Exception:
-        pass
+    except Exception as e:
+        faults.note("parking the apps that appeared", e,
+                    "a window opened during the capture stays where it landed")
 
     # The window in front is the one the agent is looking at, whether it was
     # opened by app_open or had already been running. Park it on the right even
@@ -67,8 +75,10 @@ def run(args: dict, ctx) -> dict:
     if self_name:
         try:
             active_app = _window.park_active(self_name, focus=raise_it)
-        except Exception:
+        except Exception as e:
             active_app = ""
+            faults.note("parking the window in front", e,
+                        "the capture does not say which app is frontmost")
 
     plat = _capture_module()
     img = plat.capture()

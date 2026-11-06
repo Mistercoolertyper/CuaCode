@@ -1,6 +1,7 @@
-import json, os
+import copy, json, os
 from pathlib import Path
 
+from handler import faults
 from handler.agent import effort, providers
 from handler.session import store
 
@@ -9,7 +10,16 @@ from handler.session import store
 DEFAULTS = {"active": "ollama", "vision": "", "providers": {}, "always_skills": [],
             "effort": ""}
 
+# The four permission modes, in the order a picker shows them. One list: the config
+# reader validates against it, and so does the wire's permission.mode -- which had
+# its own copy of the four names, so a fifth mode would have been accepted by one
+# and rewritten to "ask" by the other.
+MODES = ("ask", "auto", "bypass", "off")
+
 def path() -> Path: return store.home() / "config.json"
+
+# The last file read, and the stamp it was read at. See load().
+_cache: dict = {}
 
 def blank() -> dict:
     """Everything a config can hold, at the value each reader already assumes.
@@ -85,14 +95,41 @@ def load() -> dict:
     only in memory, so the file is there to hand-edit from first boot. One that
     exists gains any option it has not heard of and the long spelling of the three
     settings that take two, and is written back when that changed anything: the file
-    a person opens is the whole template."""
-    cfg = store.read_json(path())
-    if not cfg: return save(blank())
-    full, added = _fill({**DEFAULTS, **cfg}, blank())
-    full, respelled = _spelled(full)
-    return save(full) if added or respelled else full
+    a person opens is the whole template.
+
+    Cached on `(mtime, size)`, because this is asked tens of times a turn -- once
+    per entry lookup, per window, per skill pass -- and every one of them was a
+    read and a parse of the same file. A hand-edit is still picked up on the next
+    stat, which is the guarantee the callers already relied on ("config is re-read
+    every turn: the user edits it by hand"); `save` empties the cache so our own
+    writes never wait on a filesystem timestamp's resolution.
+
+    The cached dict is never handed out: this returned the parse of a fresh file
+    every call before, so a caller that mutated what it got lost that mutation on
+    the next read. Returning the cache itself would make the same mutation stick in
+    the memory of the whole process, and `entry()` hands out a sub-dict of it.
+    """
+    p = path()
+    try: stamp = (str(p), p.stat().st_mtime_ns, p.stat().st_size)
+    except OSError: stamp = None
+    if stamp is not None and _cache.get("stamp") == stamp: return copy.deepcopy(_cache["cfg"])
+    cfg = store.read_json(p)
+    if not cfg:
+        full = save(blank())
+    else:
+        full, added = _fill({**DEFAULTS, **cfg}, blank())
+        full, respelled = _spelled(full)
+        full = save(full) if added or respelled else full
+    # Stamped with the value taken *before* the read, never a second stat: another
+    # thread saving in between would otherwise have its new stamp attached to the
+    # content we just read, and the cache would serve the old config until the file
+    # was touched again. Under the old stamp the next caller re-reads, which is the
+    # right answer either way.
+    if stamp is not None: _cache.update(stamp=stamp, cfg=full)
+    return copy.deepcopy(full)
 
 def save(cfg: dict) -> dict:
+    _cache.clear()
     store.write_json(path(), cfg)
     # The file holds API keys in plaintext, so 0600 is reapplied on every write
     # rather than trusted to stick.
@@ -165,7 +202,7 @@ def permission_mode(cfg: dict = None) -> str:
         mode = (p.get("mode") or "ask").strip().lower()
     else:
         mode = (p or "ask").strip().lower()
-    return mode if mode in ("ask", "auto", "bypass", "off") else "ask"
+    return mode if mode in MODES else "ask"
 
 def permission_decider(cfg: dict = None) -> tuple:
     """(provider, model) named to decide tool calls in auto mode. ("", "") inherits the active
@@ -438,8 +475,12 @@ def context_window(name: str, model: str, cfg: dict = None) -> int:
         p = providers.get(name)
         p.setup(api_key(name, cfg))
         found = p.context_window(model)
-    except Exception:
-        found = 0
+    except Exception as e:
+        # Not cached, and said: caching a failure would hide the window for the
+        # rest of the process, and a provider that answers later deserves to.
+        faults.note(f"the context window of {name}/{model}", e,
+                    "/context reports no window until a later turn asks again")
+        return 0
     _WINDOWS[key] = found if isinstance(found, int) and found > 0 else 0
     return _WINDOWS[key]
 

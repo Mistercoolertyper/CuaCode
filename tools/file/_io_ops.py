@@ -2,6 +2,7 @@ from pathlib import Path
 
 import _common, _diff, _undo, _verify
 from _common import READ_CAP, READ_LINES
+from handler import gate
 
 LOSSY = "not valid UTF-8 -- writing it back would destroy the bytes shown as �"
 
@@ -28,13 +29,18 @@ def read(path: Path, args: dict, ctx=None) -> dict:
         if used + len(row) + 1 > READ_CAP: break
         out.append(row); used += len(row) + 1
     # One line longer than the whole budget would otherwise return nothing and ask
-    # the model to resume from where it already was, forever.
-    if not out: out = [f"{start}\t{lines[start - 1][:READ_CAP]}"]
+    # the model to resume from where it already was, forever. Which is also why it
+    # has to report itself as truncated: the row looked complete, so the file was
+    # marked read and the next write destroyed the rest of the line.
+    cut = False
+    if not out:
+        out = [f"{start}\t{lines[start - 1][:READ_CAP]}"]
+        cut = len(lines[start - 1]) > READ_CAP
 
     _common.record(path, f["meta"])
     stop = start + len(out)
     res = {"path": str(path), "content": "\n".join(out), "lines": total,
-           "truncated": stop <= end}
+           "truncated": stop <= end or cut}
     if res["truncated"]: res["next_start"] = stop
     if f["meta"]["lossy"]: res["lossy"] = True; res["note"] = f"{path.name} is {LOSSY}"
     return res
@@ -48,7 +54,7 @@ def write(path: Path, args: dict, ctx=None) -> dict:
     if path.exists():
         # The same gate edit uses. Overwriting is the more destructive of the two
         # -- an edit that misses fails, a write that misses takes the file with it.
-        if str(path) not in _common.read_files:
+        if str(path) not in gate.read_files:
             return {"error": f"read {path} before overwriting it"}
         if msg := _common.stale(path): return {"error": msg}
         old = _common.load(path)
@@ -69,7 +75,7 @@ def write(path: Path, args: dict, ctx=None) -> dict:
 
 def edit(path: Path, args: dict, ctx=None) -> dict:
     if not path.is_file(): return {"error": f"not a file: {path}"}
-    if str(path) not in _common.read_files: return {"error": f"read {path} before editing it"}
+    if str(path) not in gate.read_files: return {"error": f"read {path} before editing it"}
     if msg := _common.stale(path): return {"error": msg}
     edits = args.get("edits")
     if not edits: return {"error": "edits required"}

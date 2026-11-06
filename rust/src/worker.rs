@@ -16,9 +16,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::hosts::Host;
 use crate::wire::{self, Envelope, Event};
+
+/// How long a worker gets to leave after being asked, before it is killed.
+const LEAVE: Duration = Duration::from_secs(2);
 
 /// Where the worker runs.
 ///
@@ -322,10 +326,34 @@ impl Worker {
         self.closing.store(true, Ordering::SeqCst);
         if self.hosted.is_none() {
             let _ = self.send(&Envelope::cmd("quit", "stop", serde_json::json!({})));
+            // Closing the pipe is the door the worker already watches, and the one
+            // that reaches a turn in flight: `ipc.eof` cancels it. A signal reaches
+            // neither, and it skips the worker's `atexit`, which is where every MCP
+            // server it started gets closed.
+            self.stdin = None;
+        }
+        self.leave();
+        Ok(())
+    }
+
+    /// Wait for the worker to leave on its own, then make sure it has.
+    ///
+    /// A SIGKILL skips `atexit`, so everything the worker started outlives it. One
+    /// lightpanda server orphaned that way sat at a full core for a week. The wait is
+    /// two seconds, and the kill stays for a turn that will not come back.
+    fn leave(&mut self) {
+        if self.hosted.is_none() {
+            let deadline = Instant::now() + LEAVE;
+            while Instant::now() < deadline {
+                match self.child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) => thread::sleep(Duration::from_millis(20)),
+                    Err(_) => break,
+                }
+            }
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
-        Ok(())
     }
 }
 
@@ -335,8 +363,8 @@ impl Drop for Worker {
         // folder, so it must not outlive the thing that spawned it. A **hosted** one is
         // the other case: what is dropped here is the tail, and the work stays.
         self.closing.store(true, Ordering::SeqCst);
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.stdin = None;
+        self.leave();
     }
 }
 

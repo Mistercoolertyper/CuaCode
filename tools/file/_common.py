@@ -1,6 +1,8 @@
 import os, tempfile
 from pathlib import Path
 
+from handler import gate
+
 READ_CAP = 50_000          # chars per read, keeps a huge file out of the model's context
 READ_LINES = 2_000         # lines per read; the cap that usually bites first
 MATCH_CAP = 100            # max glob/grep results
@@ -15,14 +17,9 @@ IGNORE_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv",
                "venv", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",
                "dist", "build", ".next", "target", ".idea", ".gradle"}
 
-# Paths read this session, gates edit. A plain set of strings because
-# handler/session persists it between runs and re-seeds it by name.
-read_files: set[str] = set()
-
-# What those files looked like when read: enough to notice one moved underneath us,
-# plus how to write it back in the shape it was found. Absent for a path restored
-# from a saved session, which was checked against disk at restore time instead.
-seen: dict[str, dict] = {}
+# Paths read this session, which gate an edit, live in handler/gate.py: the session
+# persists them into meta.json and the docs pointer reads them, so they cannot
+# belong to the module that happens to decide what reading means.
 
 def _base(ctx) -> str:
     d = (ctx or {}).get("cwd") if hasattr(ctx, "get") else None
@@ -93,8 +90,7 @@ def save(path: Path, text: str, meta: dict | None = None) -> dict:
 
 def record(path: Path, meta: dict) -> None:
     """Mark a file read: the gate edit checks, and what it checks against."""
-    read_files.add(str(path))
-    seen[str(path)] = meta
+    gate.mark(path, meta)
 
 def stale(path: Path) -> str | None:
     """Whether the file moved since the agent last saw it.
@@ -102,9 +98,9 @@ def stale(path: Path) -> str | None:
     The gate alone only proves a path was read at some point, which is the wrong
     question after a build script, a formatter or the user has rewritten the file
     in between; an edit against remembered content silently drops their work. A
-    missing fingerprint is not staleness; see `seen`.
+    missing fingerprint is not staleness; see `gate.seen`.
     """
-    prev = seen.get(str(path))
+    prev = gate.seen.get(str(path))
     if not prev: return None
     try: st = path.stat()
     except OSError as e: return f"cannot stat {path}: {e}"

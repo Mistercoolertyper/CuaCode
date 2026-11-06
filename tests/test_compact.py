@@ -24,6 +24,9 @@ from handler.agent import compact
 from handler.agent import main as agent_main
 from handler.agent import providers as registry
 from handler import context
+# The toolbox, from the module that owns it: the fold is what this file is about,
+# and it used the loop's private helper only to build a provider fixture.
+from tools.loader import registry as tools_registry, visible
 
 FAILS = []
 
@@ -211,9 +214,9 @@ for i in range(40):
 long.append({"role": "user", "content": "now finish it"})
 # The overhead is whatever the request costs with none of this conversation in it.
 _overhead = world.chars([], "you are a test", agent_main.to_provider(
-    agent_main._visible(agent_main.registry(), False), "openai"))
+    visible(tools_registry(), False), "openai"))
 world.window = _overhead + 20_000
-tools_now = agent_main.to_provider(agent_main._visible(agent_main.registry(), False), "openai")
+tools_now = agent_main.to_provider(visible(tools_registry(), False), "openai")
 size_before = world.chars(long, "you are a test", tools_now)
 check("the conversation starts over the window", size_before > world.window, (size_before, world.window))
 refusals_before = sum(1 for _, refused in world.requests if refused)

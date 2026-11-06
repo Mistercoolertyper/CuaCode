@@ -1,14 +1,15 @@
 # Working on the Rust half
 
-Two frontends over one worker, which is the Python process in the parent
-directory: `fastrs` draws one conversation in a terminal, and `app` is the base of
-an orchestrator: bin `cuacode`, it reads the state root itself and drives one
-worker. Both are built on the shared half below.
+Three frontends over one worker, which is the Python process in the parent
+directory: `quik` draws one conversation in a terminal and is the one in daily use,
+of an orchestrator: bin `cuacode`, it reads the state root itself and drives one worker.
+All four are built on the shared half below.
 
-The `app` crate is where new work goes. It is meant to be the app: projects and
-the sessions standing in each, the conversation, and a composer that sets
-provider, model, permissions and location. `README.md` says what this is; this
-file is the rules. Read both before the first change, and neither is long.
+The `app` crate is meant to be the app: projects and the sessions standing in
+each, the conversation, and a composer that sets provider, model, permissions and
+location. It is parked for now; the terminal frontend is where the work goes.
+`README.md` says what this is; this file is the rules. Read both before the first
+change, and neither is long.
 
 ## First, the test command
 
@@ -19,21 +20,30 @@ cargo test --workspace
 A bare `cargo test` here tests only the root package, so fastrs's and app's tests
 do not run at all. `--workspace` is what reaches them, and it links the gpui
 stack in the test profile for `app`, which takes minutes the first time and is
-the reason `target/` is not a build cache but a build cost, 19GB of it. That is
-the price once; every run after it is incremental.
+the reason `target/` is not a build cache but a build cost, 8.9GB of it for a
+cold full-workspace build. That is the price once; every run after it is
+incremental.
 
 `cargo check` answers "does this compile" without linking a binary, and it is
 what an agent should run while it is only reading its own edit back.
 `cargo build`/`cargo test` are for when the binary or the run is the point.
-Nothing here is worth 19GB of someone's disk to prove a type.
+Nothing here is worth 9GB of someone's disk to prove a type.
 
-When the disk does need the room back, delete the profile, not the cache: the
-debuginfo is ~90% of an `rlib` and nothing in this tree reads a debugger against it
-(`strip -S` takes a 157MB gpui rlib to 9MB). `cargo clean --profile dev` drops
-`target/debug`, `cargo clean --profile release` drops `target/release`; the next
-build relinks from crates.io, which costs minutes once. Never delete `target/`
-while a frontend is running from it, and never `rm -rf` it -- `cargo clean` is what
-knows which profile owns which file.
+The size is held down at the source by `[profile.dev] debug =
+"line-tables-only"` in `Cargo.toml`. Cargo's default is `debug = 2`, full DWARF
+on every dependency, and that is what put this tree at 38GB: the debuginfo is
+~90% of an `rlib` and nothing here ever points a debugger at one. A panic
+backtrace keeps its file:line under line tables, which is the only thing that
+was being read. Do not put `debug = 2` back, and do not add a per-crate
+override for it -- the one workspace setting covers every frontend, including
+the ones not written yet.
+
+When the disk does still need the room back, delete the profile, not the
+cache: `cargo clean --profile dev` drops `target/debug`, `cargo clean --profile
+release` drops `target/release`; the next build relinks from crates.io, which
+costs minutes once. Never delete `target/` while a frontend is running from it,
+and never `rm -rf` it -- `cargo clean` is what knows which profile owns which
+file.
 
 ## One job per file
 
@@ -79,6 +89,9 @@ knows which profile owns which file.
   branch's upstream, which a fork can leave pointing at the fork. Its tiny
   `cuacode-doctor` binary keeps Windows from having to overwrite a running
   frontend. Prints and exits, before any window is made.
+- `quik/view.rs` - what a row looks like in cells, and `ink`, quik's only palette.
+- `quik/keys.rs` - every global key as a named action, and `~/.cuacode/keys.json`.
+- `quik/main.rs`, `quik/menu.rs` - the window, the keys, and the `/`, `$`, `@` menus.
 - `fastrs/view.rs` - what a row looks like on the page, in cells.
 - `fastrs/menu.rs` - the `/`, `$` and `@` menus: the rows, the filter, and
   what choosing one writes onto the message. The calls list behind ctrl-o is the

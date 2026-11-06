@@ -25,6 +25,17 @@ def _to_b64(data: bytes, max_size: int | None = None) -> str:
     img.save(buf, format="JPEG", quality=86, optimize=True)
     return base64.b64encode(buf.getvalue()).decode()
 
+def brief(result: dict) -> dict:
+    """One row for the call, saying how many pictures it loaded.
+
+    The encoded images live in the message; a row says how many. The count is
+    read out of the result, which is where photos puts it -- the wire used to
+    look for that key on the outside and so always drew 1.
+    """
+    r = result.get("result")
+    n = r.get("count") if isinstance(r, dict) else None
+    return {"result": {"n": n if isinstance(n, int) and n else 1}}
+
 def run(args: dict, ctx) -> dict:
     sources = args.get("sources", [])
     if not sources:

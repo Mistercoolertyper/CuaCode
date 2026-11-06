@@ -3,7 +3,7 @@
 import json, os
 
 from handler.agent.images import PinnedUser
-from handler.agent.providers.base import (Delta, CallAssembler, _segments, _images, _media_type,
+from handler.agent.providers.base import (Delta, CallAssembler, _segments, images_of, _media_type,
                                            models_at, show_at, context_of, client_kwargs)
 from tools._parser.FromProvider import ToolCall
 
@@ -212,7 +212,7 @@ class OpenAI:
         out = []
         for call, result in pairs:
             data = (result or {}).get("result")
-            images = _images(data)
+            images = images_of(data)
             if not images:
                 out.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps(result)})
                 continue

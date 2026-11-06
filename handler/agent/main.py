@@ -1,34 +1,10 @@
 import os, re, socket, ssl, time
-from tools.loader import load_tools, dispatch, refresh_dynamic
+from tools.loader import dispatch, registry, visible, wire_result
 from tools._parser.ToProvider import to_provider
 from handler.agent import compact, effort, images, interrupt, providers
+from handler import faults
 from handler.agent.background import JOBS
 from handler import peers
-
-_tools_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'tools')
-_registry = None
-
-def registry():
-    """Loaded once, since load_tools re-execs every tool's main.py. Refreshed
-    each turn for the self-describing tools only, so an agent can use a subagent
-    or skill file it just wrote. Unchanged entries come back byte-identical, so
-    the prompt cache survives."""
-    global _registry
-    if _registry is None: _registry = load_tools(tools_dir=_tools_dir)
-    return refresh_dynamic(_registry)
-
-def _needs_vision(t) -> bool:
-    """Read off the tool's declared output, not a name list, so a new
-    image-returning tool is covered the day it lands."""
-    return any("base64" in str(v) for v in (t.output_schema or {}).values())
-
-def _visible(reg: dict, vision: bool) -> dict:
-    """The toolbox this model can actually use. Offered a camera it will call
-    it, and a rejected image costs the whole turn."""
-    if vision: return {k: t for k, t in reg.items() if not t.blind_only}
-    # Withheld for two different reasons: an image-returning tool fails the request outright,
-    # a coordinate-taking one silently succeeds somewhere the model never looked, which is worse.
-    return {k: t for k, t in reg.items() if not _needs_vision(t) and not t.needs_sight}
 
 def _open(p, provider: str, model: str, messages: list, tools: list, system: str, params: dict):
     """The stream, plus its first Delta, with one retry for a rejected knob. stream() is a generator
@@ -188,11 +164,15 @@ def _wait(secs: float, stop) -> bool:
 def _preview(tool, args: dict, ctx) -> dict | None:
     """What the call about to be asked about would do, when the tool can say.
     Nothing that goes wrong here may matter: a preview that raises would turn a
-    question into a failed call."""
+    question into a failed call. It is said on stderr rather than kept, so the
+    question that arrives without a preview has an explanation on the log."""
     fn = getattr(tool, "preview", None)
     if not fn: return None
     try: return fn(args, ctx)
-    except Exception: return None
+    except Exception as e:
+        faults.note(f"the preview for {tool.name if hasattr(tool, 'name') else 'this call'}", e,
+                    "the question is asked without one")
+        return None
 
 def _needs_ask(tool, args: dict, ctx) -> bool:
     """Whether this call has to be put to the user, as opposed to this tool. require_permissions is
@@ -203,7 +183,10 @@ def _needs_ask(tool, args: dict, ctx) -> bool:
     fn = getattr(tool, "safe", None)
     if not fn: return True
     try: return not fn(args, ctx)
-    except Exception: return True
+    except Exception as e:
+        faults.note(f"the safety check in {getattr(tool, 'name', 'a tool')}", e,
+                    "the call is put to the user instead")
+        return True
 
 def _tail(messages, limit: int = 6) -> str:
     """The recent turns, rendered for a permission gate. Text is a string on some
@@ -291,11 +274,8 @@ def _compact_now(messages: list, used: int, limit: int, ctx=None) -> str:
     # that quietly did nothing because of that would look like a fold that failed.
     sess = ctx.get("session") if hasattr(ctx, "get") else None
     if sess is None:
-        try:
-            from handler.session import naming
-            sess = naming.live()
-        except Exception:
-            pass
+        from integrations.memory import naming
+        sess = naming.live()
     if sess is None: return ""
     records = sess.records()
     steps = c.plan(records, used=used, limit=limit)
@@ -308,7 +288,11 @@ def _compact_now(messages: list, used: int, limit: int, ctx=None) -> str:
     if callable(emit):
         try: emit({"type": "compacting", "stage": "start", "folded": steps["folded"],
                    "freed": steps["freed"]})
-        except Exception: pass
+        except Exception as e:
+            # The screen will sit on whatever it had while a model call runs, with
+            # nothing saying what the wait is for. Said, so a fold that looks like a
+            # hang has a reason on the log.
+            faults.note("a fold's start event", e, "the screen shows no fold in progress")
     try:
         got = c.summarize(records[steps["start"]:steps["end"]], steps["words"], ctx=ctx)
     finally:
@@ -316,7 +300,9 @@ def _compact_now(messages: list, used: int, limit: int, ctx=None) -> str:
         # allowed to be left saying "compacting" because a provider went away.
         if callable(emit):
             try: emit({"type": "compacting", "stage": "done"})
-            except Exception: pass
+            except Exception as e:
+                # A frontend left saying "compacting" draws a spinner forever.
+                faults.note("a fold's done event", e, "the frontend may still show it as running")
     if "error" in got:
         # Reported, not raised: the conversation still works, it is just still long,
         # and the next round will try again with a slightly different figure.
@@ -346,8 +332,10 @@ def _todo_note(ctx) -> str:
     try:
         from tools.todo import state
         s = state.snapshot(ctx)
-    except Exception:
-        return ""
+    except Exception as e:
+        # Said in the round rather than kept: a plan the loop cannot read is why the
+        # model never hears about its own todo list again.
+        return faults.note("todo", e, "the plan is not being read or nudged this round")
     if not s: return ""
     # The head is a row, so it is short enough to draw whole: the counts and the step
     # being worked on, cut at a word. The block below says it in full for the model;
@@ -415,6 +403,25 @@ def _steer_note(typed: list[dict]) -> str:
     return ("the user sent this while you were working\n\n"
             "<user_message>\n" + "\n\n".join(parts) + "\n</user_message>")
 
+def _skill_note(typed: list[dict]) -> str:
+    """The instructions any skill named in a mid-turn message asked for, or "".
+
+    A message typed into a running turn is still a message, so `$name` in it has to
+    load what `$name` loads on the turn door: the same loader, the same block, set
+    beside the words rather than inside them. Imported late like every other reader
+    of config, and a broken skill file costs its own block rather than the turn.
+    """
+    from integrations.skills import loader as skills
+    blocks = []
+    for m in typed:
+        try: block = skills.invocation(m.get("text") or "")
+        except Exception as e:
+            # In the message, where the skill would have been: the model is told the
+            # block it was promised is missing rather than reading a turn without it.
+            block = faults.note("the skill this message names", e, "it was not loaded")
+        if block: blocks.append(block)
+    return "\n\n".join(blocks)
+
 def _closing_pairs(parsed: list, results: list, running=None) -> list:
     """The round's (call, result) pairs, with one invented for every call that never got a real
     one. Results are appended in call order, so from len(results) on is unanswered, and the
@@ -470,7 +477,7 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
     # Default sighted when a provider does not declare it: an unexpected 400 is
     # obvious, whereas withheld cameras silently look like a stupid agent.
     vision = settings.get("vision", getattr(p, "vision", True))
-    reg = _visible(registry(), vision)
+    reg = visible(registry(), vision)
     if allow is not None: reg = {k: t for k, t in reg.items() if k in allow}
     if extra: reg = {**reg, **extra}
     tools = to_provider(tools=reg, provider=p.name)
@@ -570,7 +577,7 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
         folds = 0
         while True:
             state, opened = interrupt.run(lambda: _opened(p, provider, model, messages, tools, system, params),
-                                          stop=stop)
+                                          stop=stop, label=f"the request to {provider}")
             if state != "done":
                 # Nothing was produced, so nothing to keep and nothing to tell the
                 # model about. The delete is a no-op here and stands as the guarantee.
@@ -683,7 +690,10 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
             if not _transient(e): raise
             lost = e
             try: stream.close()
-            except Exception: pass
+            except Exception as closing:
+                # The socket was already dying; the first error is the one that says
+                # why, and this one would otherwise replace it with a shutdown's.
+                faults.note("closing a stream that dropped", closing, f"the drop itself was: {e}")
         finally:
             # Closed rather than left to the collector: the generator's cleanup is what shuts
             # the socket and reaps the producer thread, and an exception on the way out must
@@ -786,11 +796,11 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
                 allow, reason = auto(tool, call.name, args, _preview(tool, args, ctx),
                                      _tail(messages), ctx)
                 if not allow:
-                    if ask is not None and not ask(call.name, args, _preview(tool, args, ctx), reason):
+                    if ask is not None and not ask(tool, call.name, args, _preview(tool, args, ctx), reason):
                         denied = "denied by the user"
                     elif ask is None:
                         denied = "denied by the permission model: %s" % reason
-            elif needed and ask is not None and not ask(call.name, args, _preview(tool, args, ctx)):
+            elif needed and ask is not None and not ask(tool, call.name, args, _preview(tool, args, ctx)):
                 denied = "denied by the user"
             if denied:
                 result = {"error": denied}
@@ -801,7 +811,8 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
                 yield {"type": "background", "job": job.brief()}
                 result = _bg_result(job)
             else:
-                state, value = interrupt.run(fn, stop=stop, detach=detach, token=token)
+                state, value = interrupt.run(fn, stop=stop, detach=detach, token=token,
+                                             label=f"the {call.name} call")
                 if state == "done":
                     result = value
                 elif state == "cancelled":
@@ -815,7 +826,11 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
                     job = JOBS.adopt(call.name, args, value)
                     yield {"type": "background", "job": job.brief()}
                     result = _bg_result(job)
-            yield {"type": "tool_output", "name": call.name, "result": result}
+            yield {"type": "tool_output", "name": call.name, "result": result,
+                   # `result` is what the model reads; `wire` is what a row says about
+                   # it, which the tool itself declares. The loop has the registry in
+                   # hand, so this is the one place that can ask.
+                   "wire": wire_result(reg, call.name, result)}
             # Something sent to a peer is drawn like something received from one: the
             # buddy row, and a head saying who to whom. Without this a sent message
             # leaves no mark in the conversation it came from, and the only evidence it
@@ -838,6 +853,9 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
         # person wrote it, and two user messages in a row is the 400 this seam avoids.
         typed = (steer() or []) if steer else []
         said = _steer_note(typed) if typed else ""
+        # A skill named in one of those messages loads here too, or the same words
+        # would mean two different things depending on whether a round was running.
+        skill_blocks = _skill_note(typed) if typed else ""
         # Peer mail rides the same seam and the same message, for the same reason. The
         # collect has to happen here and not on the main loop: that loop is parked in
         # this function for the whole turn, so a message that arrives while a tool is
@@ -853,7 +871,7 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
         if mail: peers.ack([r.get("id") for r in mail])
         told = _peer_note(mail) if mail else ""
         runtime = "\n\n".join(n for n in (_finished_note(), stale) if n)
-        note = "\n\n".join(n for n in (said, told, runtime) if n)
+        note = "\n\n".join(n for n in (said, skill_blocks, told, runtime) if n)
         # Steered attachments ride the same message through the adapter, and are
         # dropped for a blind model: the names stay in the note, beating a 400.
         steer_images = [a["b64"] for m in typed for a in (m.get("images") or [])] if vision else []
@@ -865,7 +883,7 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
             # A peer's message is neither: its head goes to the frontend as its own
             # notice, so another agent's words are not drawn as the person's.
             yield {"type": "notice", "text": note,
-                   "show": "\n\n".join(n for n in (runtime, told) if n),
+                   "show": "\n\n".join(n for n in (skill_blocks, runtime, told) if n),
                    "from_user": bool(said),
                    # Named on the record for the same reason as in the note: a reopened
                    # conversation has to say a picture was sent here.
@@ -875,6 +893,11 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
                 # the peer colour, so a peer's message is not read as a note about this
                 # machine. Head first, body after a newline, which is the shape the
                 # transcript folds into a row that opens.
+                # `body` and `from_cwd` ride along because the record the worker keeps
+                # is made from this chunk: `text` above is the row (a head and a body
+                # joined), and joining them again on the way to disk would store the
+                # head as part of what the peer said.
                 yield {"type": "peer", "text": f"{peers.head(rec)}\n{rec.get('body', '')}",
                        "show": peers.head(rec), "peer_in": True,
+                       "body": rec.get("body", ""), "from_cwd": rec.get("from_cwd", ""),
                        "from_peer": rec.get("from"), "peer_name": rec.get("from_name")}

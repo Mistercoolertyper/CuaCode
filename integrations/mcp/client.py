@@ -12,6 +12,7 @@ import json
 import os
 import platform
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -20,6 +21,10 @@ import urllib.error
 import urllib.request
 from collections import deque
 from contextvars import ContextVar
+from pathlib import Path
+
+from handler import faults
+from handler.session import store
 
 PROTOCOL = "2025-06-18"             # legacy era: the version `initialize` asks for
 MODERN = "2026-07-28"               # modern era: the version the probe asks for
@@ -36,6 +41,117 @@ START_TIMEOUT = 20          # interpreter launch + handshake
 PROBE_TIMEOUT = 3           # server/discover, which a legacy server may never answer
 CALL_TIMEOUT = 60           # a tool that drives an app can be slow; a hung one must not be forever
 STDERR_KEEP = 40            # lines, kept only to explain a server that died
+WEDGE_PCT = 90.0            # of one core, for a server with nothing asked of it
+WEDGE_SEC = 60.0            # pinned that long is a server that will not answer again
+WATCH_SEC = 15.0            # how often that is sampled
+
+
+# ---- a server must not outlive the worker that started it -------------------
+#
+# `close_all` is an `atexit` hook, and `atexit` does not run for a worker that was
+# killed rather than asked to leave. A lightpanda server orphaned that way on
+# 2026-10-24 held a whole core for a week, spinning in its own idle loop with
+# nobody asking it anything. Two things below keep that from repeating: a pidfile
+# says whose server a process is, so the next worker can end an orphan without
+# touching a session that is still running, and the watcher ends a server that is
+# burning a core with nothing asked of it.
+
+def _run_dir() -> Path:
+    """Where the pid of each running server is kept: beside its config."""
+    d = store.home() / "mcp" / "run"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _pidfile(name: str) -> Path:
+    return _run_dir() / (re.sub(r"[^\w.-]", "_", name) + ".pid")
+
+
+def _alive(pid: int) -> bool:
+    """Whether a process exists. A signalling check, not a proof: a recycled pid
+    reads as alive, which is why a pidfile is never believed on the pid alone."""
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        try:
+            import psutil
+            return bool(psutil.pid_exists(pid))
+        except Exception:                                       # noqa: BLE001
+            return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _command(pid: int) -> str:
+    """A process's command line, or empty when there is nothing to read."""
+    try:
+        return subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                              capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _cputime(pid: int) -> float | None:
+    """CPU seconds a process has used, off `ps`'s own clock. None when it is gone."""
+    try:
+        out = subprocess.run(["ps", "-o", "time=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not out:
+        return None
+    days, sep, clock = out.partition("-")
+    if not sep:
+        days, clock = "", out            # no `-`: mm:ss.cc, and no days at all
+    total = (int(days) if days else 0) * 86400.0
+    for part in clock.split(":"):
+        total = total * 60 + float(part)
+    return total
+
+
+def _end(pid: int):
+    """Ask, then insist: a wedged server is not going to read a polite message."""
+    for sig in (signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)):
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            return
+        for _ in range(25):
+            if not _alive(pid):
+                return
+            time.sleep(0.04)
+
+
+def sweep() -> list[str]:
+    """End every server whose worker is gone, and name the ones it ended.
+
+The recorded command line has to match before anything is killed: a pid is not
+proof of identity, and ending whatever inherited a recycled one would be worse
+than leaving a single orphan."""
+    ended = []
+    for f in sorted(_run_dir().glob("*.pid")):
+        try:
+            rec = json.loads(f.read_text() or "{}")
+        except (OSError, ValueError):
+            rec = {}
+        pid, owner = rec.get("pid"), rec.get("owner")
+        if not (isinstance(owner, int) and _alive(owner)):
+            argv0 = str(rec.get("argv0") or "")
+            mark = (argv0, Path(argv0).name if argv0 else "")
+            if (isinstance(pid, int) and _alive(pid)
+                    and (not argv0 or any(m and m in _command(pid) for m in mark))):
+                _end(pid)
+                ended.append(f"{rec.get('name') or f.stem} (pid {pid})")
+        f.unlink(missing_ok=True)
+    if ended:
+        print(f"[mcp] ended {len(ended)} server(s) left behind by a worker that is gone: "
+              f"{', '.join(ended)}", file=sys.stderr)
+    return ended
 
 # A server gets no console of the frontend's. The console's input mode is the
 # *console's*, not a process's, so a server that sets ENABLE_VIRTUAL_TERMINAL_INPUT
@@ -191,6 +307,7 @@ class Connection:
         self._pending: dict[int, dict] = {}
         self._events: dict[int, threading.Event] = {}
         self._lock = threading.Lock()
+        self._busy = 0                        # requests in flight: its own reason to work
         self._stderr = deque(maxlen=STDERR_KEEP)
         self.transport = config.get("transport", "stdio")
         self.url = config.get("url")
@@ -236,6 +353,56 @@ class Connection:
         except MCPError:
             self.close()
             raise
+        self._stamp()
+        threading.Thread(target=self._watch, args=(self.proc,), daemon=True).start()
+
+    def _stamp(self):
+        """Write down whose server this is, so a later worker can tell an orphan
+        from a session that is still using it."""
+        rec = {"name": self.name, "pid": self.proc.pid, "owner": os.getpid(),
+               "argv0": self._argv()[0]}
+        try:
+            _pidfile(self.name).write_text(json.dumps(rec))
+        except OSError:
+            pass
+
+    def _unstamp(self, pid: int):
+        path = _pidfile(self.name)
+        try:
+            if json.loads(path.read_text() or "{}").get("pid") == pid:
+                path.unlink()
+        except (OSError, ValueError):
+            pass
+
+    def _watch(self, proc):
+        """End a server that is burning a core with nothing asked of it.
+
+        Not a health check: a call in flight is its own reason to be busy, and a page
+        being fetched takes all of one core honestly. This is for the other case, a
+        server at 100% with an empty inbox, which is what lightpanda was doing in its
+        own idle loop for a week. Ending it costs one restart on the next call, which
+        `pool()` does without being asked."""
+        prev = _cputime(proc.pid)
+        pinned = 0.0
+        while prev is not None and proc.poll() is None:
+            time.sleep(WATCH_SEC)
+            if self._busy:
+                prev, pinned = _cputime(proc.pid), 0.0
+                continue
+            now = _cputime(proc.pid)
+            if now is None:
+                return
+            used, prev = now - prev, now
+            pinned = pinned + WATCH_SEC if used >= WEDGE_PCT / 100 * WATCH_SEC else 0.0
+            if pinned >= WEDGE_SEC:
+                self._stderr.append(f"[killed: {WEDGE_PCT:.0f}% CPU for {WEDGE_SEC:.0f}s idle]")
+                print(f"[mcp] {self.name}: pinned at {WEDGE_PCT:.0f}% of a core for "
+                      f"{WEDGE_SEC:.0f}s with nothing asked of it; ended it", file=sys.stderr)
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                return
 
     def _handshake(self):
         """Which era this server speaks, decided once and kept for its lifetime.
@@ -254,11 +421,20 @@ class Connection:
         try:
             self._discover(version, set())
         except _Legacy as fallback:
+            reason = fallback.args[0] if fallback.args else "no answer"
             if want == "modern":
                 raise MCPError(f"{self.name}: configured for the stateless protocol, but "
                                f"server/discover did not answer as a {version} server would "
-                               f"({fallback.args[0] if fallback.args else 'no answer'})")
-            self._legacy_handshake()
+                               f"({reason})")
+            try:
+                self._legacy_handshake()
+            except Exception as old:
+                # Both openings were tried, so both reasons go in the sentence. The
+                # legacy error on its own reads as the only thing that was attempted,
+                # and when a server is misconfigured it is usually the probe -- the
+                # one that never got an answer -- that says why.
+                raise MCPError(f"{self.name}: neither protocol answered - stateless "
+                               f"{version}: {reason}; legacy {PROTOCOL}: {old}") from old
 
     def _discover(self, version: str, tried: set):
         """The modern opening: ask what the server speaks, and speak it. Anything
@@ -358,12 +534,18 @@ class Connection:
         self._session_id = None
         if not proc:
             return
+        self._unstamp(proc.pid)
         try:
             if proc.stdin:
                 proc.stdin.close()
             proc.wait(timeout=3)
-        except Exception:                                       # noqa: BLE001
+        except Exception as e:                                  # noqa: BLE001
             proc.kill()
+            try:
+                proc.wait(timeout=3)            # a killed child still needs reaping
+            except Exception as stuck:          # noqa: BLE001
+                faults.note(f"reaping MCP server {self.name} (pid {proc.pid})", stuck,
+                            f"it would not exit on its own either: {e}")
 
     # -- wire --------------------------------------------------------------
 
@@ -395,8 +577,12 @@ class Connection:
                     event = self._events.get(mid)
                 if event:
                     event.set()
-        except Exception:                                       # noqa: BLE001
-            pass
+        except Exception as e:                                  # noqa: BLE001
+            # This thread is the only reader. A call made after it dies waits on an
+            # answer nothing is reading, and says "the server did not answer" -- so
+            # the reason it stopped reading belongs here, once.
+            faults.note(f"reading MCP server {self.name}", e,
+                        "every later call to it is unanswered")
         finally:
             # Whatever is still waiting will never be answered now.
             with self._lock:
@@ -409,8 +595,9 @@ class Connection:
         try:
             for line in proc.stderr:
                 self._stderr.append(line.rstrip())
-        except Exception:                                       # noqa: BLE001
-            pass
+        except Exception as e:                                  # noqa: BLE001
+            faults.note(f"collecting MCP server {self.name}'s stderr", e,
+                        "why it exits will be missing from the error")
 
     def _send(self, message: dict):
         proc = self.proc
@@ -603,10 +790,16 @@ class Connection:
     def request(self, method: str, params: dict, timeout: float = CALL_TIMEOUT,
                 session: str | None = None, version: str | None = None,
                 headers: dict | None = None) -> dict:
-        if self.transport == "http":
-            return self._http_request(method, params, timeout=timeout, session=session,
-                                      version=version, headers=headers)
-        return self._stdio_request(method, params, timeout=timeout, version=version)
+        # Counted, so the watcher can tell a server working for us from one working
+        # for nobody.
+        self._busy += 1
+        try:
+            if self.transport == "http":
+                return self._http_request(method, params, timeout=timeout, session=session,
+                                          version=version, headers=headers)
+            return self._stdio_request(method, params, timeout=timeout, version=version)
+        finally:
+            self._busy -= 1
 
     # -- MCP -------------------------------------------------------------
 
@@ -719,12 +912,21 @@ def _flatten(result: dict) -> dict:
 
 _pool: dict[str, Connection] = {}
 _pool_lock = threading.Lock()
+_swept = False
 
 
 def pool(name: str, config: dict) -> Connection:
     """The live connection for this server, started if it is not up yet. One whose
     config changed is replaced rather than reused, being a process running the
     old command."""
+    global _swept
+    if not _swept:
+        _swept = True
+        try:
+            sweep()                     # once per worker: anything a dead one left
+        except Exception as e:                                  # noqa: BLE001
+            faults.note("sweeping orphaned MCP servers", e,
+                        "one left by a dead worker stays running")
     with _pool_lock:
         conn = _pool.get(name)
         if conn and (not conn.alive() or conn.config != config):
@@ -758,8 +960,9 @@ def close_all():
     for conn in conns:
         try:
             conn.close()
-        except Exception:                                       # noqa: BLE001
-            pass
+        except Exception as e:                                  # noqa: BLE001
+            faults.note(f"closing MCP server {conn.name}", e,
+                        "its process may outlive the worker")
 
 
 # Session scope. A ContextVar, not a connection field: parallel subagents each get a browser session of their own,

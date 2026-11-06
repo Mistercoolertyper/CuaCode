@@ -8,6 +8,8 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 
+from handler import faults
+
 # Concurrent model requests, not cpu work: the threads sleep on a socket, so the cap is
 # about not opening thirty billable streams because a list happened to be long.
 MAX_WORKERS = min(8, max(2, (os.cpu_count() or 4) - 2))
@@ -17,7 +19,9 @@ def _safe(fn, on_error):
     except Exception as e:
         if on_error:
             try: on_error(e)
-            except Exception: pass
+            except Exception as complaining:
+                faults.note("a fan-out's error callback", complaining,
+                            f"the item's own failure was: {e}")
         return None
 
 def parallel(thunks, on_error=None) -> list:

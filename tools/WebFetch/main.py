@@ -7,6 +7,10 @@ import ipaddress, os, re, socket
 from urllib.parse import urlparse
 
 from handler.agent.subagent import AgentSpec, run as run_agent
+from tools.loader import brief_body
+
+# The page itself is in the conversation; the row says how much of it came back.
+brief = brief_body("output")
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -133,11 +137,13 @@ def run(args: dict, ctx) -> dict:
     try:
         text, ctype, final = _fetch(url)
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"fetching {url}: {e}"}
 
     if ctype.startswith("text/html") or ctype.startswith("application/xhtml") or not ctype:
         try: body = _markdown(text, final)
-        except Exception as e: return {"error": str(e)}
+        except Exception as e:
+            return {"error": f"turning {final or url} into markdown: {e} - "
+                              "ask for it with mode text to read the page raw"}
     else:
         body = text                                  # already plain text, json or xml
 

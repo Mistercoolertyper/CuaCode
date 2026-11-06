@@ -10,6 +10,8 @@ import json, os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from handler import faults
+
 PENDING, ACTIVE, DONE, DROPPED = "pending", "in_progress", "done", "dropped"
 STATES = (PENDING, ACTIVE, DONE, DROPPED)
 OPEN = (PENDING, ACTIVE)
@@ -42,7 +44,11 @@ def _depth() -> int:
     try:
         from handler.agent import subagent
         return subagent.depth()
-    except Exception:
+    except Exception as e:
+        # 0 means "the main loop", and a plan filed under the main loop from
+        # inside an agent writes where the parent's list lives.
+        faults.note("the agent-depth check", e,
+                    "this list is read and written as the main loop's")
         return 0
 
 
@@ -148,7 +154,8 @@ def snapshot(ctx) -> dict | None:
     """
     try:
         data = load(ctx)
-    except Exception:
+    except Exception as e:
+        faults.note("the todo list", e, "the loop cannot see the plan and will not nudge about it")
         return None
     open_items = [i for i in data["items"] if i["state"] in OPEN]
     if not open_items: return None

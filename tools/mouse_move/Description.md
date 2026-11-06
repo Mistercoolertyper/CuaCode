@@ -1,8 +1,5 @@
 ---
 name: mouse_move
-input:
-  x: int
-  y: int
 output:
   moved_to: [int, int]
 active: True

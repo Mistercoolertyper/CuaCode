@@ -4,7 +4,7 @@ one user message per round's tool results."""
 import json, os
 
 from handler.agent.images import PinnedUser
-from handler.agent.providers.base import (Delta, CallAssembler, _segments, _images, _media_type,
+from handler.agent.providers.base import (Delta, CallAssembler, _segments, images_of, _media_type,
                                            client_kwargs)
 from tools._parser.FromProvider import ToolCall
 from tools._parser.ToProvider import format_tool_result
@@ -136,7 +136,7 @@ class Anthropic:
         blocks = []
         for call, result in pairs:
             data = (result or {}).get("result")
-            images = _images(data)
+            images = images_of(data)
             if not images:
                 blocks.append(format_tool_result(call, result, self.name))
                 continue

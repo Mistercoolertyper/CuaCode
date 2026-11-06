@@ -9,9 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tools.loader import parse_frontmatter
-from handler.session import store
+from handler import catalog, faults
 
-_BUNDLED = Path(__file__).parent
 MAX_BODY = 20_000        # a skill that does not fit is a skill that should link out
 
 # What every always-on skill may cost between them, in characters: a ceiling, not a cap on how many may be marked.
@@ -48,14 +47,16 @@ def always_names() -> set:
         from handler import config
         names = config.load().get("always_skills") or []
         return {str(n).strip() for n in names if str(n).strip()}
-    except Exception:
+    except Exception as e:
+        # The forced list is a person's decision, and losing it silently means their
+        # always-on skills are not in the prompt for a turn that looks ordinary.
+        faults.note("the always_skills list in config.json", e,
+                    "no skill is forced on until it can be read")
         return set()
 
 
 def user_dir() -> Path:
-    d = store.home() / "skills"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    return catalog.user_dir("skills")
 
 def _skill(folder: Path):
     f = folder / "SKILL.md"
@@ -78,20 +79,21 @@ def _skill(folder: Path):
                  files=sorted(str(p.relative_to(folder)) for p in folder.rglob("*")
                               if p.is_file() and p.name != "SKILL.md"))
 
-def load_skills(refresh: bool = True, scope: str = None) -> dict:
+def load_skills(scope: str = None) -> dict:
     """Every installed skill, or only the ones `scope` is allowed to load.
 
     scope is "model" (the skill tool), "user" (a frontend's slash palette), or None for everything, since counting for /context does not care who may invoke what.
     An always-on skill is in neither scope: its body is already in the system prompt, so offering it would pay for it twice. A call with no scope still has it."""
     out = {}
-    for d in (_BUNDLED, user_dir()):          # user second: it overwrites
-        if not d.exists(): continue
-        for folder in sorted(p for p in d.iterdir() if p.is_dir()):
-            if folder.name.startswith(("_", ".")): continue
-            try: s = _skill(folder)
-            except Exception: continue        # one broken skill must not hide the rest
-            if not s: continue
-            out[s.name] = s
+    for folder in catalog.layered_dirs("skills"):   # user last: it overwrites
+        try: s = _skill(folder)
+        except Exception as e:            # one broken skill must not hide the rest
+            # ...and must not vanish either: a skill left out in silence is a
+            # smaller toolbox the model is offered as if it were the whole one.
+            faults.note(f"the skill {folder.name}", e, "it is left out of the list")
+            continue
+        if not s: continue
+        out[s.name] = s
     for name in always_names() & set(out):
         out[name].always = True
     if scope in ("model", "user"):
@@ -102,8 +104,7 @@ def load_skills(refresh: bool = True, scope: str = None) -> dict:
 
 def get(name: str, scope: str = None) -> Skill:
     found = load_skills(scope=scope)
-    if name not in found:
-        raise ValueError(f"unknown skill: {name!r} (have {sorted(found) or 'none installed'})")
+    if name not in found: raise catalog.unknown("skill", name, found)
     return found[name]
 
 # --------------------------------------------------------------------------

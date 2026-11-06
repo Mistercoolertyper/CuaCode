@@ -5,15 +5,25 @@ and schema(), so the model is offered the agents actually installed.
 """
 from integrations.subagents import loader as agents
 from handler.agent import subagent
+from tools.loader import brief_body
+from handler import faults
 
-def _installed() -> dict:
+# The output is the answer and it is in the conversation; the row says how big.
+brief = brief_body("output")
+
+def _installed() -> tuple[dict, str]:
     # Called once per turn to notice a subagent file written a moment ago. Two
     # directory globs are cheaper than a round trip that finds out it was missed.
-    try: return agents.load_agents(refresh=True)
-    except Exception: return {}
+    # The reason comes back with the list: a broken folder and an empty one used
+    # to read alike, and the model acted on "none installed" as fact.
+    try: return agents.load_agents(refresh=True), ""
+    except Exception as e:
+        return {}, faults.note("the subagent list could not be read", e,
+                                "fix or remove the file it names")
 
 def describe(body: str) -> str:
-    found = _installed()
+    found, problem = _installed()
+    if problem: return f"{body}\n\n{problem}"
     if not found:
         return body + "\n\nNo subagents are installed, so this tool has nothing to run."
     lines = "\n".join(f"- {name}: {spec.description or 'no description'}"
@@ -21,7 +31,7 @@ def describe(body: str) -> str:
     return f"{body}\n\nInstalled subagents:\n{lines}"
 
 def schema() -> dict:
-    found = sorted(_installed())
+    found = sorted(_installed()[0])
     agent = {"type": "string", "description": "Which subagent to run."}
     # Providers reject an empty enum, and describe() has already said the tool is
     # unusable with nothing installed.

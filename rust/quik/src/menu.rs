@@ -23,6 +23,10 @@ use crate::view::{call_ink, call_lead, call_result, clip, clip_runs, ink, runs_w
 /// on screen, and the row the cursor is on is the one worth seeing.
 const ROWS: usize = 8;
 
+/// What a menu says in one row when the filter left nothing: an empty plate reads as
+/// a list that failed to load, where this says which of the two happened.
+const NOTHING: &str = "  nothing matches";
+
 /// Which list a menu is showing, and so what choosing a row writes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -69,7 +73,10 @@ impl Kind {
         }
     }
 
-    /// The word naming the menu in its frame.
+    /// The word naming the menu in its frame. Nothing draws a title any more:
+    /// the rows are the frame. The tests read it, and it is the one place the
+    /// names of the lists are written.
+    #[cfg(test)]
     pub fn title(self) -> &'static str {
         match self {
             Kind::Commands => "command",
@@ -164,11 +171,10 @@ impl Item {
 /// The verbs the frontend answers itself.
 ///
 /// The `/` menu is the worker's own list, read off the parser that routes it, so
-/// there is one owner of what the commands are. Neither of these is down there:
-/// no worker command is called help (it is the keys, and the frontend is the side
-/// that knows them), and the permission mode is session state the worker holds
-/// but has no command for. A `/help` or a `/permissions` that went to the model
-/// as prose would be worse than two rows kept here.
+/// there is one owner of what the commands are. `/help` is not down there: no
+/// worker command is called help (it is the keys, and the frontend is the side
+/// that knows them), and a `/help` that went to the model as prose would be worse
+/// than one row kept here.
 pub fn local() -> Vec<Item> {
     vec![
         Item::new("help", "the keys", "/help"),
@@ -270,8 +276,8 @@ pub fn calls(rows: &[Row]) -> Vec<Item> {
         .collect()
 }
 
-/// The worker's rows with the local ones in front, and any name the worker sent
-/// for itself kept as the worker sent it rather than doubled.
+/// The worker's rows with the local ones in front, any name the worker sent for
+/// itself kept as the worker sent it rather than doubled.
 pub fn with_local(items: Vec<Item>) -> Vec<Item> {
     let mut out = local();
     for item in items {
@@ -401,9 +407,9 @@ pub fn from_reply(kind: &str, data: &serde_json::Value) -> Option<Reply> {
                 })
                 .collect()
         }
-        // Never arrives: the four permission modes are the frontend's own, and
-        // the calls are read off the transcript. Here so the match stays
-        // exhaustive over what a menu can be.
+        // Never arrives: the four permission modes are the frontend's own, the
+        // calls are read off the transcript, and the machines are a file. Here so
+        // the match stays exhaustive over what a menu can be.
         Kind::Permissions | Kind::Calls | Kind::Hosts => Vec::new(),
     };
     let provider = data.get("provider").and_then(|p| p.as_str()).unwrap_or("").to_string();
@@ -542,11 +548,13 @@ impl Menu {
         self.shown.get(self.sel).map(|i| &self.all[*i])
     }
 
-    /// The word naming the menu in its frame, and how many rows are on hand.
+    /// The word naming the menu and how many rows are on hand.
     ///
     /// The window shows eight whatever the list holds, so a long list without a
     /// count is a place with no way to tell how big it is or where in it you are.
     /// The count is what the filter left, because that is what the keys can reach.
+    /// Nothing draws it since the palette went; the tests read it.
+    #[cfg(test)]
     pub fn title(&self) -> String {
         let said = match self.shown.len() {
             0 => self.kind.title().to_string(),
@@ -616,7 +624,10 @@ impl Menu {
     pub fn lines(&self, width: usize) -> Vec<Line<'static>> {
         let mut out = Vec::new();
         if self.shown.is_empty() {
-            out.push(Line::from(Span::styled("  nothing matches", Style::new().fg(ink::quiet()))));
+            out.push(Line::from(Span::styled(
+                format!("  {NOTHING}"),
+                Style::new().fg(ink::quiet()),
+            )));
             return out;
         }
         let n = self.shown.len().min(ROWS);
@@ -625,8 +636,17 @@ impl Menu {
             let item = &self.all[self.shown[k]];
             let selected = k == self.sel;
             // The row's own text, in the colours it was given and cut to the
-            // room there is, and how wide what is left draws.
-            let (runs, drawn) = item.cell(selected, width.saturating_sub(6).max(1));
+            // room there is, and how wide what is left draws. The hint has the right
+            // end of the row, so the label is cut to what is left of the gutter and a
+            // gap -- but a row with no hint gets the whole width, because three cells
+            // of a label cut away for a sentence that is not there is a row that lies
+            // about how long it is.
+            let room = match item.hint.is_empty() {
+                true => width.saturating_sub(2),
+                false => width.saturating_sub(6),
+            }
+            .max(1);
+            let (runs, drawn) = item.cell(selected, room);
             let used = 2 + drawn;
             // A hint is dropped rather than cut to nothing when there is no room
             // for it: three characters of a sentence is not help.
@@ -637,8 +657,10 @@ impl Menu {
             // ember's one hue means "you can act on this", and the row the enter
             // key is about is the one thing here you can act on.
             let tone = if selected { ink::call() } else { ink::quiet() };
+            // The selected row is the only one with a rail beside it, which is the same
+            // mark the composer uses for "this is yours".
             let mut spans = vec![Span::styled(
-                if selected { "\u{203a} " } else { "  " },
+                if selected { "\u{2503} " } else { "  " },
                 Style::new().fg(tone),
             )];
             spans.extend(runs);
@@ -649,10 +671,9 @@ impl Menu {
             spans.push(Span::styled(hint, Style::new().fg(item.hint_ink.unwrap_or_else(ink::quiet))));
             out.push(Line::from(spans));
         }
-        out.push(Line::from(Span::styled(
-            "\u{2191}\u{2193} choose  \u{b7}  enter select  \u{b7}  esc cancel",
-            Style::new().fg(ink::faint()),
-        )));
+        // No line saying what the keys do. Arrow keys and enter are the thing every list
+        // in every terminal has done since before either of us was born, and a row of
+        // three hints under nine rows of commands is chrome that has to be read past.
         out
     }
 }
@@ -675,6 +696,20 @@ mod tests {
 
     fn labels(menu: &Menu) -> Vec<&str> {
         menu.shown.iter().map(|i| menu.all[*i].label.as_str()).collect()
+    }
+
+    /// The `/` menu is the worker's own list with this screen's own verbs in front,
+    /// and every command the worker sends is a row: a picker is reached by its name,
+    /// not by a second menu opened first.
+    #[test]
+    fn the_slash_menu_is_every_command_the_worker_sends() {
+        let items = vec![
+            Item::new("provider", "", "/provider"),
+            Item::new("model", "", "/model"),
+            Item::new("compact", "", "/compact"),
+        ];
+        let labels: Vec<String> = with_local(items).into_iter().map(|i| i.label).collect();
+        assert_eq!(labels, ["help", "permissions", "provider", "model", "compact"]);
     }
 
     /// A menu's rows, and what choosing one writes onto the message.
@@ -1005,13 +1040,16 @@ mod tests {
         let mut menu = Menu::open(Kind::Commands, 0);
         menu.fill(named(&["row"; 30]));
         let lines = menu.lines(40);
-        assert_eq!(lines.len(), ROWS + 1);
+        assert_eq!(lines.len(), ROWS, "no footer, so the window is the rows");
         for _ in 0..20 {
             menu.move_sel(1);
         }
         assert_eq!(menu.sel, 20);
-        assert_eq!(menu.lines(40).len(), ROWS + 1);
+        assert_eq!(menu.lines(40).len(), ROWS);
         // The row under the cursor is in the window, not scrolled off it.
-        assert!(menu.lines(40).iter().any(|l| l.to_string().contains('\u{203a}')));
+        assert!(
+            menu.lines(40).iter().any(|l| l.to_string().starts_with('\u{2503}')),
+            "the row under the cursor is not marked"
+        );
     }
 }

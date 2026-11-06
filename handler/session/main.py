@@ -1,7 +1,7 @@
-import os, sys
+import os
 from pathlib import Path
 
-from handler import usage
+from handler import gate, usage
 from handler.agent import effort, providers
 from handler.session import blobs, replay, store
 
@@ -211,7 +211,7 @@ class Session:
         self._mark = 0
         self.meta.update(updated=store.now_iso(), records=len(self._records),
                          turns=sum(1 for r in self._records if r.get("t") == "assistant"),
-                         read_files=_read_files(),
+                         read_files=gate.snapshot(),
                          # Rolled up here so a conversation is answered from the meta
                          # files alone; recomputed, so a rewound round takes its cost.
                          usage=usage.of_records(self._records))
@@ -304,39 +304,6 @@ class Session:
         self.meta["provider"] = name
         if self._records: store.write_json(self.dir / "meta.json", self.meta)
 
-    def restore_tool_state(self):
-        """Re-seed the edit gate in tools/file, minus anything that moved on disk while
-        the session was closed: a stale entry lets the agent edit unseen content."""
-        fresh = [e["path"] for e in (self.meta.get("read_files") or []) if _unchanged(e)]
-        if not fresh: return
-        from tools.loader import load_tools
-        load_tools(str(store.tools_dir()))   # importing the tools is what puts _common in sys.modules
-        _seed_read_files(fresh)
-
-# tools/file/main.py puts its helpers on sys.path directly, so _common lands
-# as a top-level module rather than under a package.
-def _read_files() -> list[dict]:
-    """Snapshot the edit gate with enough to detect drift later: paths alone would be a
-    lie after a reload, three days and an outside edit on."""
-    m = sys.modules.get("_common")
-    if not m: return []
-    out = []
-    for p in sorted(getattr(m, "read_files", ())):
-        # mtime+size rather than a hash: commit runs every round, and the
-        # agent reads files it has no reason to re-checksum that often.
-        try: st = os.stat(p)
-        except OSError: continue
-        out.append({"path": p, "mtime_ns": st.st_mtime_ns, "size": st.st_size})
-    return out
-
-def _unchanged(e: dict) -> bool:
-    try: st = os.stat(e["path"])
-    except (OSError, KeyError, TypeError): return False
-    return st.st_mtime_ns == e.get("mtime_ns") and st.st_size == e.get("size")
-
-def _seed_read_files(paths):
-    m = sys.modules.get("_common")
-    if m and hasattr(m, "read_files"): m.read_files.update(paths)
 
 
 if __name__ == "__main__":

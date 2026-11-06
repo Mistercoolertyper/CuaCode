@@ -209,7 +209,17 @@ def destructive(command: str) -> str:
     A floor, not a screen: a recursive forced delete, a write straight onto a device, a reformat, and nothing else. Read by
     shape, and a delete hidden inside another command's own string (`bash -c "rm -rf /"`) is not seen."""
     for line in (command or "").splitlines():
-        for argv in (_segments(line) or []):
+        # A line with a redirect in it does not parse, and skipping those is how
+        # `rm -rf build 2>/dev/null` was waved through in bypass mode -- the one
+        # place this answer is the only thing standing there. Unreadable is not the
+        # same as safe: if it cannot be read as one command and it names something
+        # that wipes, ask.
+        segs = _segments(line)
+        if segs is None:
+            if re.search(r"\b(rm|dd|mkfs\w*|diskutil)\b", line):
+                return "cannot be read as one command, and it names a deleting one"
+            continue
+        for argv in segs:
             # `sudo rm -rf /` is the same call wearing a prefix: step over the
             # wrappers rather than let one of them vouch for what follows.
             i = 0

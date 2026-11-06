@@ -2,6 +2,7 @@ import os, platform, shutil
 from pathlib import Path
 
 import _common, _undo
+from handler import gate
 
 LS_CAP = 200
 TRASH = Path.home() / ".Trash" if platform.system() == "Darwin" else None
@@ -11,7 +12,7 @@ def ls(path: Path, args: dict, ctx=None) -> dict:
     if path.is_file(): return {"path": str(path), "entries": [_entry(path)],
                                "count": 1, "truncated": False}
     try: kids = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
-    except OSError as e: return {"error": str(e)}
+    except OSError as e: return {"error": f"listing {path}: {e}"}
     return {"path": str(path), "entries": [_entry(p) for p in kids[:LS_CAP]],
             "count": len(kids), "truncated": len(kids) > LS_CAP}
 
@@ -27,7 +28,7 @@ def delete(path: Path, args: dict, ctx=None) -> dict:
                              "delete its files first, or use the shell tool"}
         return {"deleted": str(path)}
     try: before = path.read_bytes()
-    except OSError as e: return {"error": str(e)}
+    except OSError as e: return {"error": f"reading {path} before deleting it: {e}"}
 
     _undo.record(ctx, path, "delete", before=before)
     where = None
@@ -38,9 +39,8 @@ def delete(path: Path, args: dict, ctx=None) -> dict:
         except (OSError, shutil.Error): where = None
     if where is None:
         try: path.unlink()
-        except OSError as e: return {"error": str(e)}
-    _common.read_files.discard(str(path))
-    _common.seen.pop(str(path), None)
+        except OSError as e: return {"error": f"deleting {path}: {e}"}
+    gate.forget(path)
     return {"deleted": str(path), "trash": where, "undo": "file undo restores it"}
 
 def move(path: Path, args: dict, ctx=None) -> dict:
@@ -54,17 +54,12 @@ def move(path: Path, args: dict, ctx=None) -> dict:
     if dest.exists(): return {"error": f"{dest} already exists"}
     dest.parent.mkdir(parents=True, exist_ok=True)
     try: shutil.move(str(path), str(dest))
-    except (OSError, shutil.Error) as e: return {"error": str(e)}
+    except (OSError, shutil.Error) as e: return {"error": f"moving {path} to {dest}: {e}"}
 
     # The gate follows the file: it is the same content the agent already read,
     # and making it re-read the file it just renamed teaches it nothing.
-    if str(path) in _common.read_files:
-        _common.read_files.discard(str(path))
-        meta = _common.seen.pop(str(path), None)
-        _common.read_files.add(str(dest))
-        if meta:
-            try: _common.seen[str(dest)] = {**meta, "mtime_ns": dest.stat().st_mtime_ns}
-            except OSError: pass
+    if str(path) in gate.read_files:
+        gate.moved(path, dest, gate.seen.get(str(path)))
     _undo.record(ctx, dest, "move", src=path)
     return {"moved": str(path), "to": str(dest)}
 
