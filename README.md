@@ -6,7 +6,7 @@ It reads and writes files, runs commands, opens apps, clicks, types, and takes
 screenshots. You watch it work in a terminal or in a window, and you can stop it
 any time.
 
-![how the pieces fit](assets/how-it-fits.svg)
+![CuaCode running in a terminal](demo.png)
 
 > [!WARNING]
 > Still a work in progress. Not a virus, but back up anything you care about.
@@ -24,10 +24,6 @@ did.
 
 It also remembers. Things that stay true go into `~/.cuacode/memory`, one small
 file per fact, and come back when they matter.
-
-## A turn
-
-![one turn](assets/a-turn.svg)
 
 ## Install
 
