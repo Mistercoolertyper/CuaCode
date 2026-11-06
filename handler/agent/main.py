@@ -386,6 +386,22 @@ def _steer_note(typed: list[dict]) -> str:
     return ("the user sent this while you were working\n\n"
             "<user_message>\n" + "\n\n".join(parts) + "\n</user_message>")
 
+def _skill_note(typed: list[dict]) -> str:
+    """The instructions any skill named in a mid-turn message asked for, or "".
+
+    A message typed into a running turn is still a message, so `$name` in it has to
+    load what `$name` loads on the turn door: the same loader, the same block, set
+    beside the words rather than inside them. Imported late like every other reader
+    of config, and a broken skill file costs its own block rather than the turn.
+    """
+    from integrations.skills import loader as skills
+    blocks = []
+    for m in typed:
+        try: block = skills.invocation(m.get("text") or "")
+        except Exception: block = ""
+        if block: blocks.append(block)
+    return "\n\n".join(blocks)
+
 def _closing_pairs(parsed: list, results: list, running=None) -> list:
     """The round's (call, result) pairs, with one invented for every call that never got a real
     one. Results are appended in call order, so from len(results) on is unanswered, and the
@@ -791,6 +807,9 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
         # person wrote it, and two user messages in a row is the 400 this seam avoids.
         typed = (steer() or []) if steer else []
         said = _steer_note(typed) if typed else ""
+        # A skill named in one of those messages loads here too, or the same words
+        # would mean two different things depending on whether a round was running.
+        skill_blocks = _skill_note(typed) if typed else ""
         # Peer mail rides the same seam and the same message, for the same reason. The
         # collect has to happen here and not on the main loop: that loop is parked in
         # this function for the whole turn, so a message that arrives while a tool is
@@ -806,7 +825,7 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
         if mail: peers.ack([r.get("id") for r in mail])
         told = _peer_note(mail) if mail else ""
         runtime = "\n\n".join(n for n in (_finished_note(), stale) if n)
-        note = "\n\n".join(n for n in (said, told, runtime) if n)
+        note = "\n\n".join(n for n in (said, skill_blocks, told, runtime) if n)
         # Steered attachments ride the same message through the adapter, and are
         # dropped for a blind model: the names stay in the note, beating a 400.
         steer_images = [a["b64"] for m in typed for a in (m.get("images") or [])] if vision else []
@@ -818,7 +837,7 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
             # A peer's message is neither: its head goes to the frontend as its own
             # notice, so another agent's words are not drawn as the person's.
             yield {"type": "notice", "text": note,
-                   "show": "\n\n".join(n for n in (runtime, told) if n),
+                   "show": "\n\n".join(n for n in (skill_blocks, runtime, told) if n),
                    "from_user": bool(said),
                    # Named on the record for the same reason as in the note: a reopened
                    # conversation has to say a picture was sent here.
