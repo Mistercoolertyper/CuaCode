@@ -27,6 +27,7 @@
 
 mod keys;
 mod menu;
+mod scan;
 mod view;
 #[cfg(windows)]
 mod winpaste;
@@ -63,8 +64,8 @@ use cuacode::wire::{self, Event, State};
 use cuacode::worker::Target;
 
 use keys::Action;
-use menu::{Act, Item, Kind, Menu};
-use view::{ink, Drawn, PROMPT};
+use menu::{Item, Kind, Menu};
+use view::{ink, Drawn};
 
 /// How long two clicks on the same row must be apart to be a fold rather than
 /// two clicks.
@@ -94,6 +95,10 @@ fn needs_you() -> &'static str {
 fn answered() -> &'static str {
     "\u{1b}]9;cua-code-needs-you-answer\u{7}"
 }
+
+/// The box's own line: two cells, a light vertical rule and the cell the text
+/// starts in. The same weight the box's two rules are drawn in.
+const RAIL: &str = "\u{2502} ";
 
 /// The tallest the box grows. A message of twenty lines is a document, and the
 /// conversation behind it is what the screen is for; past this the box scrolls
@@ -999,16 +1004,6 @@ impl App {
                 Kind::Skills => self.skills = reply.items,
                 _ => {}
             }
-            // The palette lists the worker's commands beside its own rows, so the
-            // same reply fills one that is already up: it was opened before this list
-            // arrived, and a palette of nothing but pickers is not the palette.
-            if reply.kind == Kind::Commands && self.menu.as_ref().is_some_and(|o| o.kind == Kind::Actions) {
-                let mode = self.sess.as_ref().map(|s| s.snap.mode.clone()).unwrap_or_default();
-                let rows = menu::actions(&mode, &self.commands);
-                if let Some(open) = self.menu.as_mut() {
-                    open.fill(rows);
-                }
-            }
             return;
         }
         // The answer to opening a call: the arguments and the result the worker
@@ -1135,9 +1130,23 @@ impl App {
         self.log.rows.is_empty() && self.prompt.is_none() && self.opened.is_none()
     }
 
-    /// The design's header: what this is, and where. The model moved to the row
-    /// under the message, where it is read while typing rather than looked for at
-    /// the top of the screen.
+    /// The top row of the frame: what this is, and where it is running. The build
+    /// id is the one fact a screen cannot show by being used, and the directory is
+    /// the conversation's own -- on a box that is a path on that machine, and this
+    /// process's cwd is a path on this one.
+    fn header(&self) -> Vec<Line<'static>> {
+        let mut out = vec![Line::from(vec![
+            Span::styled(" Cuacode-RS", Style::new().fg(ink::text()).add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            Span::styled(format!("v{}", version::ID), Style::new().fg(ink::faint())),
+        ])];
+        let dir = self.working_dir();
+        if !dir.is_empty() {
+            out.push(Line::from(Span::styled(format!(" {dir}"), Style::new().fg(ink::dim()))));
+        }
+        out
+    }
+
     /// Where a message typed into this screen would run: the conversation's own
     /// directory, read off the worker's list of its sessions, because on a box that is a
     /// path on that machine and this process's cwd is a path on this one. A conversation
@@ -1164,7 +1173,7 @@ impl App {
     /// `width` is the pane, which the right zone is pushed against.
     fn status_text(&self, width: usize) -> Option<Line<'static>> {
         let sess = self.sess.as_ref()?;
-        Some(status_line(&sess.snap, width))
+        Some(status_line(&sess.snap, width, self.ms()))
     }
 
     /// The message inside the composer: the rows it wraps to, with the caret in it. The
@@ -1188,17 +1197,18 @@ impl App {
         // The prompt's two cells are the box's, not the text's: a row wraps where the
         // text stops fitting beside them, which is what `field_height` counts too.
         let inner = width.saturating_sub(LEAD).max(1);
-        let (cols, rows, caret_col, caret_row) = self.drawn(inner, self.keep());
+        let (cols, rows, caret_col, caret_row) = self.drawn(inner);
         let n = rows.len();
         let shown = height.clamp(1, n.max(1));
         let first_shown = (caret_row + 1).saturating_sub(shown).min(n - shown.min(n));
         let mut out = Vec::new();
         for li in first_shown..first_shown + shown {
             let first = li == 0;
-            // The prompt is the one control on the screen, so it is drawn in the tone
-            // that means "you can act on this": the accent. A continuation row owes a
-            // blank of the same width and nothing else.
-            let lead = if first { format!("{PROMPT} ") } else { " ".repeat(LEAD) };
+            // The box's own line, down every row of the message: one mark in the
+            // accent, the text a cell inside it. `\u{2502}` is the light weight, the same
+            // one the box's two rules are drawn in, so the box is one family at one
+            // weight and the accent is what says it is a line rather than a border.
+            let lead = RAIL;
             let (line, tags): (Vec<char>, Vec<u8>) = cols[rows[li].0..rows[li].1]
                 .iter()
                 .map(|(c, t)| (*c, *t))
@@ -1214,10 +1224,7 @@ impl App {
                 let text = self.field_left + LEAD as u16;
                 (row && x >= text).then(|| x.saturating_sub(text) as usize)
             });
-            let mut spans = vec![Span::styled(
-                lead,
-                Style::new().fg(if first { ink::call() } else { ink::text() }),
-            )];
+            let mut spans = vec![Span::styled(lead, Style::new().fg(ink::call()))];
             let cs: Vec<char> = text.chars().collect();
             // Which chip the pointer is over, if it is over one of them at all.
             let under_pointer = pointer.and_then(|p| tags.get(p).copied()).filter(|t| *t != 0);
@@ -1256,16 +1263,6 @@ impl App {
                     Style::new().fg(ink::text()).add_modifier(Modifier::REVERSED),
                 ));
             }
-            // The one thing that moves while a round is in flight: the turn's own
-            // readout, at the right end of the message's first row. It is the only
-            // animation on the screen, and this is the row the person is looking at.
-            if first {
-                if let Some(status) = self.turn.as_ref().map(|t| view::turn(t, self.ms())) {
-                    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-                    spans.push(Span::raw(" ".repeat(width.saturating_sub(used + status.width()))));
-                    spans.extend(status.spans.iter().cloned());
-                }
-            }
             // An empty box says what it is for, the way opencode's does.
             if self.input.is_empty() && self.shots.is_empty() {
                 let said = if first { "Ask anything, or /help" } else { "" };
@@ -1291,7 +1288,7 @@ impl App {
     ///
     /// `keep` is gone: the turn's readout lives on the composer's model row now, so no row
     /// of the message owes anything at its right end.
-    fn drawn(&self, width: usize, keep: usize) -> (Vec<(char, u8)>, Vec<(usize, usize)>, usize, usize) {
+    fn drawn(&self, width: usize) -> (Vec<(char, u8)>, Vec<(usize, usize)>, usize, usize) {
         let cs: Vec<char> = self.input.chars().collect();
         let mut tags = vec![0u8; cs.len()];
         for (n, shot) in self.shots.iter().enumerate() {
@@ -1330,16 +1327,11 @@ impl App {
         let mut space: Option<usize> = None;
         let mut k = 0usize;
         while k < cols.len() {
-            // The first row owes the readout its cells, so the message wraps beside it
-            // rather than under it; every row after that gets the whole width.
-            let room = if rows.is_empty() {
-                width.saturating_sub(keep).max(1)
-            } else {
-                // The last cell of a row is the caret's when the typing reaches the end
-                // of it, so the wrap stops one short rather than putting the bar off the
-                // edge of the box.
-                width.saturating_sub(1).max(1)
-            };
+            // Every row wraps one cell short of the box's edge: the last cell of a row
+            // is the caret's when the typing reaches the end of it, so the wrap keeps it.
+            // Nothing at the right end of the first row any more -- the round's readout
+            // is on the metadata row under it -- so one rule for every row.
+            let room = width.saturating_sub(1).max(1);
             let (c, tag) = cols[k];
             if c == '\n' {
                 rows.push((start, k));
@@ -1414,17 +1406,7 @@ impl App {
     /// ceiling.
     fn field_height(&self, width: usize) -> u16 {
         let inner = width.saturating_sub(LEAD).max(1);
-        (self.drawn(inner, self.keep()).1.len()).clamp(1, FIELD_MAX) as u16
-    }
-
-    /// The cells the round's readout needs at the right end of the message's first row:
-    /// its own width and the air before it. A message that runs under it is a message
-    /// whose last words are cut off by a clock.
-    fn keep(&self) -> usize {
-        match &self.turn {
-            Some(t) => view::turn(t, self.ms()).width() + 3,
-            None => 0,
-        }
+        (self.drawn(inner).1.len()).clamp(1, FIELD_MAX) as u16
     }
 
     /// How many characters are in the message.
@@ -1938,44 +1920,6 @@ impl App {
         self.menu = Some(open);
     }
 
-    /// The palette, ctrl+p: every list this screen can put up, and every command the
-    /// worker routes, in one place.
-    ///
-    /// A picker, so it chooses rather than writes: typing filters it and never reaches
-    /// the message, and a row that opens a list writes nothing on the way there. The
-    /// command rows are the worker's own list rather than a table kept here, and the
-    /// ask is the one a `/` menu makes, so a palette opened before that list arrives is
-    /// filled under itself when it lands (see `feed`).
-    fn open_actions(&mut self) {
-        let mode = self.sess.as_ref().map(|s| s.snap.mode.clone()).unwrap_or_default();
-        let rows = menu::actions(&mode, &self.commands);
-        let mut open = Menu::open_apart(Kind::Actions);
-        open.fill(rows);
-        self.menu = Some(open);
-        if self.commands.is_empty() {
-            self.act("command.list", serde_json::json!({}));
-        }
-    }
-
-    /// Run a command chosen from the palette.
-    ///
-    /// The line is the whole of how a command runs -- the send path reads a `/help`
-    /// and a `/permissions` itself and the worker parses the rest -- so the command
-    /// goes onto the message and enter follows it. With a message already being
-    /// typed there is no enter to follow: the command stays a word on that message,
-    /// the way a `/` menu row leaves one, because throwing away what someone was in
-    /// the middle of is not what "run" means.
-    fn run_command(&mut self, command: &str) {
-        for c in command.chars() {
-            self.insert(c);
-        }
-        if self.input.trim() == command {
-            self.send();
-        } else {
-            self.insert(' ');
-        }
-    }
-
     /// A bracketed paste, which is how a terminal hands over what was dropped on
     /// it or pasted in from elsewhere.
     ///
@@ -2395,9 +2339,6 @@ impl App {
             // The calls, listed: a keyboard's answer to a mouse's double click,
             // and a way to reach one that is not the newest.
             Action::Calls => self.open_calls(),
-            // The palette: every list this screen can put up and every command the
-            // worker routes, in one place and one keystroke from the composer.
-            Action::Palette => self.open_actions(),
             // The machine this conversation runs on. The only key that starts a
             // different conversation rather than talking to this one.
             Action::Host => self.pick_hosts(),
@@ -2595,9 +2536,8 @@ impl App {
                     ("model.list", serde_json::json!({}))
                 }
             }
-            // Asked for by the launch, once, before any of this. The palette is the
-            // other door to it, and it opens before that reply has to be there, so a
-            // list that is not in hand yet is asked for by name.
+            // Asked for by the launch, once, before any of this, and asked by
+            // name when a list is not in hand yet.
             Kind::Sessions => {
                 if !open.is_empty() {
                     return;
@@ -2607,10 +2547,8 @@ impl App {
             // Handed to the menu when it opens, not asked for: the four modes
             // are this frontend's own list, the calls are read off the
             // transcript it already holds, and the machines are a file it read at
-            // launch. A worker cannot speak for a machine it has never met. The
-            // palette's own rows are all of those put beside each other, and its
-            // command rows are asked for where it is opened.
-            Kind::Permissions | Kind::Calls | Kind::Hosts | Kind::Actions => return,
+            // launch. A worker cannot speak for a machine it has never met.
+            Kind::Permissions | Kind::Calls | Kind::Hosts => return,
             Kind::Files | Kind::Dirs => {
                 let (dir, _) = open.walked();
                 let dir = dir.to_string();
@@ -2784,19 +2722,6 @@ impl App {
                     self.start_new_session();
                 } else {
                     self.switch(&value);
-                }
-            }
-            // The palette: a row carries the thing it does, not its name, so a
-            // picker row can only open the list that already exists and there is no
-            // second table of what the screen can run. A command row carries no
-            // action and runs its line, which is all a command is.
-            Kind::Actions => {
-                self.menu = None;
-                match item.act {
-                    Some(Act::Pick(kind)) => self.pick(kind),
-                    Some(Act::Calls) => self.open_calls(),
-                    Some(Act::Keys) => self.opened = Some(view::keys(&self.keys)),
-                    None => self.run_command(&value),
                 }
             }
             // A picker is a switch, so nothing about it goes on the line.
@@ -3150,24 +3075,13 @@ fn switch_refusal(snap: Option<&Snapshot>) -> Option<&'static str> {
     }
 }
 
-/// The row under the card, as three zones: what is happening on the left, how full
-/// the window is in the middle, and the counts and the permission mode on the right,
-/// against the pane's own edge.
-///
-/// Every figure is one the worker sent, or the one clock this frontend owns -- the
-/// round's elapsed seconds, which `view::turn` also draws and which is why it is
-/// written to the same tenth. A zone with nothing to say says nothing: an absence is
-/// not a zero, and the space it would have taken stays empty.
-///
-/// A free function over the snapshot, rather than only a method on `App`, so the row
-/// can be read in a test without a worker behind it.
-fn status_line(snap: &Snapshot, width: usize) -> Line<'static> {
-    let mut left: Vec<Span<'static>> = Vec::new();
-    let mut right: Vec<Span<'static>> = Vec::new();
 
-    // The context gauge. Both numbers are the wire's; with no window reported there is
-    // no percentage to take, so the zone says what it does know instead of a fraction
-    // of a number nobody sent.
+/// The context gauge: how much of the window the conversation fills, as a bar and a
+/// percentage. Both numbers are the wire's; with no window reported there is no
+/// percentage to take, so it says what it does know instead of a fraction of a number
+/// nobody sent.
+fn context_gauge(snap: &Snapshot) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
     if snap.context_max > 0 {
         let percent = (snap.context_used * 100 / snap.context_max).clamp(0, 100) as usize;
         let filled = (percent * GAUGE_CELLS / 100).min(GAUGE_CELLS);
@@ -3180,27 +3094,74 @@ fn status_line(snap: &Snapshot, width: usize) -> Line<'static> {
         } else {
             ink::faint()
         };
-        left.push(Span::styled(GAUGE_FULL.repeat(filled), Style::new().fg(tone)));
+        out.push(Span::styled(GAUGE_FULL.repeat(filled), Style::new().fg(tone)));
         // The empty rungs are the hairline this screen draws an edge in, so a gauge at
         // a fifth reads as one lit cell and five cells of track rather than as six of
         // the same thing.
-        left.push(Span::styled(
+        out.push(Span::styled(
             GAUGE_EMPTY.repeat(GAUGE_CELLS - filled),
             Style::new().fg(ink::rule()),
         ));
-        left.push(Span::styled(format!(" {percent}%"), Style::new().fg(ink::faint())));
+        out.push(Span::styled(format!(" {percent}%"), Style::new().fg(ink::faint())));
     } else if snap.context_used > 0 {
-        left.push(Span::styled(
+        out.push(Span::styled(
             format!("ctx {} (window unknown)", plenty(snap.context_used)),
             Style::new().fg(ink::faint()),
         ));
     }
-    // Only a rate the wire sent. A round that has reported nothing about how fast it
-    // is going says nothing about it.
+    out
+}
+
+/// The rate the worker reported, when it reported one: a round that has said nothing
+/// about how fast it is going says nothing about it.
+fn token_rate(snap: &Snapshot) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
     if snap.tps > 0.0 {
-        spaced(&mut left);
         let est = if snap.tps_est { " est" } else { "" };
-        left.push(Span::styled(format!("{:.0} tok/s{est}", snap.tps), Style::new().fg(ink::quiet())));
+        out.push(Span::styled(format!("{:.0} tok/s{est}", snap.tps), Style::new().fg(ink::quiet())));
+    }
+    out
+}
+
+/// A hint as this screen writes one: the key in the tone you read by and its words
+/// after it, quieter. A key map is read as pairs -- the key is what you are looking
+/// for and the words are what you check it against -- so the two are told apart
+/// rather than set as one grey line.
+fn hint(key: &str, words: &str) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(key.to_string(), Style::new().fg(ink::text())),
+        Span::styled(format!(" {words}"), Style::new().fg(ink::quiet())),
+    ]
+}
+
+/// Two hints, two cells of air between them: opencode's own spacing for a pair of
+/// keys at the end of a bar.
+fn hint_pair(first: (&str, &str), second: (&str, &str)) -> Vec<Span<'static>> {
+    let mut spans = hint(first.0, first.1);
+    spans.push(Span::raw("  "));
+    spans.extend(hint(second.0, second.1));
+    spans
+}
+
+/// The row under the card, as three zones: the dots and what is happening at its left,
+/// the conversation's figures in the middle, and the counts, the permission mode and
+/// the keys at its right, against the pane's own edge.
+///
+/// Every figure is one the worker sent, or the one clock this frontend owns -- the
+/// round's elapsed seconds, which `view::turn` also draws and which is why it is
+/// written to the same tenth. A zone with nothing to say says nothing: an absence is
+/// not a zero, and the space it would have taken stays empty.
+///
+/// A free function over the snapshot, rather than only a method on `App`, so the row
+/// can be read in a test without a worker behind it.
+fn status_line(snap: &Snapshot, width: usize, ms: u128) -> Line<'static> {
+    // The dots and the key that is live beside them are never given up: they are what
+    // says a round is running, and how to get out of it.
+    let mut lead: Vec<Span<'static>> = scan::dots(&snap.state, ms);
+    lead.push(Span::raw(" "));
+    let mut head: Vec<Span<'static>> = Vec::new();
+    if snap.state.busy() {
+        head.extend(hint("esc", "interrupt"));
     }
 
     // Another agent's message is in the mailbox and the round in flight has not carried
@@ -3208,34 +3169,79 @@ fn status_line(snap: &Snapshot, width: usize) -> Line<'static> {
     // changes here; the row says the wait, with the name the worker put on the knock,
     // and a knock from nobody in particular still says a peer is waiting rather than
     // inventing a name for it.
-    if let Some(name) = &snap.peer_waiting {
-        right.push(Span::styled(waiting_words(name), Style::new().fg(ink::quiet())));
-        spaced(&mut right);
-    }
+    //
     // A fold is the one pause where the worker is blocked on a model the person cannot
     // see, so the row says what it is doing rather than sitting still for a minute.
+    let mut note: Vec<Span<'static>> = Vec::new();
+    if let Some(name) = &snap.peer_waiting {
+        note.push(Span::styled(waiting_words(name), Style::new().fg(ink::quiet())));
+    }
     if !snap.compacting.is_empty() && snap.compacting != "done" {
-        right.push(Span::styled(compacting_words(snap), Style::new().fg(ink::warn())));
-        spaced(&mut right);
+        if !note.is_empty() {
+            spaced(&mut note);
+        }
+        note.push(Span::styled(compacting_words(snap), Style::new().fg(ink::warn())));
     }
+    let mut perms: Vec<Span<'static>> = Vec::new();
     if !snap.mode.is_empty() {
-        right.push(Span::styled("perms ", Style::new().fg(ink::faint())));
-        right.push(Span::styled(snap.mode.clone(), Style::new().fg(ink::text())));
-        spaced(&mut right);
+        perms.push(Span::styled("perms ", Style::new().fg(ink::faint())));
+        perms.push(Span::styled(snap.mode.clone(), Style::new().fg(ink::text())));
     }
-    // Two keys, and only the ones that are live: a round in flight has no enter to send,
-    // and a row of twenty bindings is a key map on the screen rather than an answer to
+    // The two keys that are true either way, at the end of the line: a round in flight
+    // has no enter to send, so its pair is the calls a run can be watched through, and
+    // a row of twenty bindings is a key map on the screen rather than an answer to
     // "what do I press now". `/help` is the door to the rest.
-    let hint = if snap.state.busy() { "esc stop" } else { "enter send \u{b7} /help" };
-    right.push(Span::styled(hint, Style::new().fg(ink::quiet())));
+    let keys = hint_pair(
+        match snap.state.busy() {
+            true => ("ctrl+o", "calls"),
+            false => ("enter", "send"),
+        },
+        ("/help", "keys"),
+    );
 
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let lead = zone_width(&left);
-    spans.extend(left);
-    // Pushed to the column's own right edge, so the hint sits where the eye goes for
-    // one and the gauge never has to be counted to. On a pane too narrow for both the
-    // hint is what is kept: it is the thing a person is looking for.
-    spans.push(Span::raw(" ".repeat(width.saturating_sub(lead + zone_width(&right)))));
+    // A pane too narrow for the whole row gives up the asides before it gives up the
+    // keys: the rate, then the gauge, then the note, then the permission mode. The
+    // dots, the key beside them and the two at the right end stay, because what to
+    // press is what this row is for.
+    let mut keep = [true; 2];
+    loop {
+        let left = joined(&lead, &[head.as_slice()]);
+        let right = joined(&[], &[
+            if keep[0] { note.as_slice() } else { &[] },
+            if keep[1] { perms.as_slice() } else { &[] },
+            keys.as_slice(),
+        ]);
+        if zone_width(&left) + zone_width(&right) + 1 <= width || !keep.iter().any(|k| *k) {
+            return row(left, right, width);
+        }
+        match keep.iter().position(|k| *k) {
+            Some(at) => keep[at] = false,
+            None => return row(left, right, width),
+        }
+    }
+}
+
+/// A zone out of its parts, two cells of air between them and the empty ones skipped:
+/// a run of facts about one line, in the order they are read in.
+fn joined(lead: &[Span<'static>], parts: &[&[Span<'static>]]) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = lead.to_vec();
+    for part in parts {
+        if part.is_empty() {
+            continue;
+        }
+        spaced(&mut out);
+        out.extend(part.iter().cloned());
+    }
+    out
+}
+
+/// The two zones of one row: the left against the pane's left edge and the right against
+/// its right, with at least one cell between them however narrow the pane gets. A row
+/// that ran the two together read as one broken figure (`8 tok/sperms auto`).
+fn row(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: usize) -> Line<'static> {
+    let mut spans = left;
+    let gap = width.saturating_sub(zone_width(&spans) + zone_width(&right)).max(1);
+    spans.push(Span::raw(" ".repeat(gap)));
     spans.extend(right);
     Line::from(spans)
 }
@@ -3255,9 +3261,10 @@ const STREAM_MS: u64 = 16;
 /// slow clock across every gap is what makes one answer look like it keeps
 /// restarting.
 const STREAM_HOLD: Duration = Duration::from_millis(250);
-/// A round in flight with nothing arriving: the spinner and the sweep, which step
-/// 90ms at a time and have nothing finer to show. The pace this screen had.
-const MOVING_MS: u64 = 60;
+/// A round in flight with nothing arriving: the scanner and the sweep. The scanner
+/// steps every `scan::DOT_STEP_MS`, and a frame that arrives late drops a step, so
+/// this is that number: one frame of this screen, one cell of the wire.
+const MOVING_MS: u64 = scan::DOT_STEP_MS as u64;
 /// A still screen still has to notice a session being written to.
 const STILL_MS: u64 = 500;
 
@@ -3617,49 +3624,96 @@ fn draw(f: &mut Frame, app: &mut App) {
         draw_home(f, app, column);
         return;
     }
+    let head = app.header();
     let status = app.status_text(column.width as usize);
+    let meta = composer_meta(app, column.width as usize, true);
     let news = app.news.as_ref().and_then(|n| n.behind());
     // Read once and used twice: the row's highlight and the status line's are the same
     // sweep off the same clock, which is what keeps the two moving at one speed.
     let shimmer = app.shimmer();
 
-    // The frame is the update notice, the conversation, the box between its two rules
-    // and the status row under it. A pane that cannot hold all of it gives up the status
-    // row first, then the notice, then the box's rules: the conversation and one row of
-    // the message are never given up.
-    let lead = usize::from(news.is_some());
-    let framed = usize::from(area.height) >= lead + 4 + usize::from(status.is_some());
+    // The frame is the header, the update notice, the conversation, the box -- a rule,
+    // the message, its own row and a rule -- and the status row under it. A pane that
+    // cannot hold all of it gives up the status row first, then the notice, then the
+    // header, then the box's own row, then the box's rules: the conversation and one row
+    // of the message are never given up.
+    let mut head_on = true;
+    let mut notice_on = news.is_some();
+    let mut meta_on = meta.is_some();
+    let mut status_on = status.is_some();
+    let need = |with_head: bool, notice: bool, meta: bool, status: bool| {
+        (if with_head { head.len() } else { 0 })
+            + usize::from(notice)
+            + usize::from(meta)
+            + usize::from(status)
+            + 4
+    };
+    while need(head_on, notice_on, meta_on, status_on) > usize::from(area.height) {
+        if status_on {
+            status_on = false;
+        } else if notice_on {
+            notice_on = false;
+        } else if head_on {
+            head_on = false;
+        } else if meta_on {
+            meta_on = false;
+        } else {
+            break;
+        }
+    }
+    let framed = usize::from(area.height) >= 4;
     let chunks = if framed {
-        let spare = usize::from(area.height) - lead - 3 - usize::from(status.is_some());
+        let chrome = 3 + usize::from(meta_on);
+        let spare = usize::from(area.height)
+            - (if head_on { head.len() } else { 0 })
+            - usize::from(notice_on)
+            - chrome
+            - usize::from(status_on);
         let field_h = (app.field_height(column.width as usize) as usize)
             .min(spare.max(1))
             .max(1) as u16;
-        let mut rows = Vec::with_capacity(5 + lead);
-        if lead == 1 {
+        let mut rows = Vec::with_capacity(5 + head.len() + 2);
+        if head_on {
+            rows.push(Constraint::Length(head.len() as u16));
+        }
+        if notice_on {
             rows.push(Constraint::Length(1));
         }
         rows.extend([
             Constraint::Min(1),
             Constraint::Length(1),
             Constraint::Length(field_h),
+        ]);
+        if meta_on {
+            rows.push(Constraint::Length(1));
+        }
+        rows.extend([
             Constraint::Length(1),
-            Constraint::Length(u16::from(status.is_some())),
+            Constraint::Length(u16::from(status_on)),
         ]);
         Layout::vertical(rows).split(column)
     } else {
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(column)
     };
-    let (notice_at, body, rules, field_at, status_at) = if framed {
+    let (head_at, notice_at, body, rules, field_at, meta_at, status_at) = if framed {
+        let head_slot = usize::from(head_on);
+        let meta_slot = usize::from(meta_on);
+        let at = head_slot + usize::from(notice_on);
         (
-            (lead == 1).then(|| chunks[0]),
-            chunks[lead],
-            Some((chunks[lead + 1], chunks[lead + 3])),
-            chunks[lead + 2],
-            status.is_some().then(|| chunks[lead + 4]),
+            head_on.then(|| chunks[0]),
+            notice_on.then(|| chunks[head_slot]),
+            chunks[at],
+            Some((chunks[at + 1], chunks[at + 3 + meta_slot])),
+            chunks[at + 2],
+            meta_on.then(|| chunks[at + 3]),
+            status_on.then(|| chunks[at + 4 + meta_slot]),
         )
     } else {
-        (None, chunks[0], None, chunks[1], None)
+        (None, None, chunks[0], None, chunks[1], None, None)
     };
+    if let Some(at) = head_at {
+        f.render_widget(Paragraph::new(head), at);
+    }
     if let (Some(at), Some(behind)) = (notice_at, news) {
         f.render_widget(Paragraph::new(notice_line(behind)), at);
     }
@@ -3693,10 +3747,9 @@ fn draw(f: &mut Frame, app: &mut App) {
     }
     f.render_widget(Paragraph::new(lines).scroll((app.scroll, 0)), body);
 
-    // The box: one rule over the message and one under it, which is where the field
-    // stops being the conversation and starts being a place to type. Two rules and a
-    // `\u{276f}` are the whole of the chrome: a rail, a foot and a half-block pedestal
-    // under the same input was three marks saying it was an input.
+    // The box: a rule over the message, the message on its own line, the box's own
+    // row under that, and a rule closing it. Three marks and the rail: the foot and the
+    // half-block pedestal that used to fence the same input were two more.
     if let Some((top, bottom)) = rules {
         let rule = Line::from(Span::styled(
             "\u{2500}".repeat(column.width as usize),
@@ -3716,6 +3769,12 @@ fn draw(f: &mut Frame, app: &mut App) {
     app.field_top = field_at.y;
     app.field_left = field_at.x;
     f.render_widget(Paragraph::new(field), field_at);
+    // The box's own row, under the message: what would answer it, and the round's clock
+    // pushed against the right end. Inside the box, between the message and the rule
+    // under it, which is where it is read without leaving the line being typed.
+    if let (Some(at), Some(line)) = (meta_at, meta) {
+        f.render_widget(Paragraph::new(line), at);
+    }
 
     if let (Some(at), Some(line)) = (status_at, status) {
         f.render_widget(Paragraph::new(line), at);
@@ -3986,7 +4045,7 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 /// window to remember and no offset to add back: the column a click lands in is
 /// the column of the row.
 fn field_windows(app: &App, width: usize) -> Vec<(u16, usize, Vec<u8>)> {
-    let (cols, rows, _, _) = app.drawn(width.saturating_sub(LEAD).max(1), app.keep());
+    let (cols, rows, _, _) = app.drawn(width.saturating_sub(LEAD).max(1));
     let mut out = Vec::new();
     for (k, (start, end)) in rows.iter().enumerate() {
         let styles: Vec<u8> = cols[*start..*end].iter().map(|(_, t)| *t).collect();
@@ -4090,14 +4149,17 @@ const MARK_MIN: usize = 40;
 fn draw_home(f: &mut Frame, app: &mut App, column: Rect) {
     let width = (column.width as usize).min(HOME_WIDTH).max(12) as u16;
     let x = column.x + column.width.saturating_sub(width) / 2;
-    let who = home_who(app);
+    let meta = composer_meta(app, width as usize, false);
+    let name = who(app);
     let message_rows = app.field_height(width as usize).max(1) as u16;
-    // The mark, the model under it, and the box: a blank between each of them.
+    // The mark, who would answer, then the box: a blank between each of them. The box
+    // is a rule, the message, its own row (the figures) and a rule -- the name is what
+    // this screen says at the top, and the figures are what belongs beside the typing.
     let mut block = if column.width as usize >= MARK_MIN { 7 } else { 1 };
-    if who.is_some() {
+    if !name.is_empty() {
         block += 2;
     }
-    block += message_rows + 2;
+    block += 1 + 1 + message_rows + u16::from(meta.is_some()) + 1;
     let top = column.y + column.height.saturating_sub(block) / 2;
     let rule = || {
         Line::from(Span::styled(
@@ -4137,10 +4199,10 @@ fn draw_home(f: &mut Frame, app: &mut App, column: Rect) {
         }
     }
     let mut y = top + art;
-    if let Some(who) = who {
+    if !name.is_empty() {
         y += 2;
         f.render_widget(
-            Paragraph::new(centre_in(who, width as usize)),
+            Paragraph::new(centre_in(Line::from(name), width as usize)),
             Rect { x, y, width, height: 1 },
         );
         y += 1;
@@ -4155,6 +4217,13 @@ fn draw_home(f: &mut Frame, app: &mut App, column: Rect) {
     app.field_left = x;
     f.render_widget(Paragraph::new(field), Rect { x, y, width, height: message_rows });
     y += message_rows;
+    // The box's own row: what would answer the message, and the round's clock, inside
+    // the two rules. The opening screen has one whenever there is anything to say --
+    // a session has a model from its first status, so it is there from the start.
+    if let Some(line) = meta {
+        f.render_widget(Paragraph::new(line), Rect { x, y, width, height: 1 });
+        y += 1;
+    }
     f.render_widget(Paragraph::new(rule()), Rect { x, y, width, height: 1 });
 
     // The floor: where a message typed into this box would run, and what it would run
@@ -4172,11 +4241,11 @@ fn draw_home(f: &mut Frame, app: &mut App, column: Rect) {
     draw_menu(f, app, Rect { x, y: 0, width, height: box_top.saturating_sub(column.y) });
 }
 
-/// Who a message sent from the opening screen would go to: the model, the provider that
-/// serves it, and the effort it thinks at, as the wire last said them. `None` when there
-/// is no session yet, rather than a line pretending somebody chose a model.
-fn home_who(app: &App) -> Option<Line<'static>> {
-    let snap = app.sess.as_ref().map(|sess| &sess.snap)?;
+/// Who would answer a message: the model, the provider that serves it, and the
+/// effort it thinks at, as the wire last said them. The left half of the box's own
+/// row, on either screen.
+fn who(app: &App) -> Vec<Span<'static>> {
+    let Some(snap) = app.sess.as_ref().map(|sess| &sess.snap) else { return Vec::new() };
     let sep = Span::styled("  \u{b7}  ", Style::new().fg(ink::faint()));
     let mut spans: Vec<Span<'static>> = Vec::new();
     if !snap.model.is_empty() {
@@ -4197,7 +4266,46 @@ fn home_who(app: &App) -> Option<Line<'static>> {
             Style::new().fg(ink::warn()).add_modifier(Modifier::BOLD),
         ));
     }
-    (!spans.is_empty()).then(|| Line::from(spans))
+    spans
+}
+
+/// The box's own row, under the message: who would answer it on the left, where a
+/// conversation has nothing else saying it, and the conversation's figures pushed
+/// against the right end -- the context gauge, the rate, and the round's own clock.
+///
+/// `None` when there is nothing to say: a replay has no session and a round that has
+/// not run has no clock, and a blank row inside the box is a blank row.
+fn composer_meta(app: &App, width: usize, with_who: bool) -> Option<Line<'static>> {
+    let snap = app.sess.as_ref().map(|sess| &sess.snap);
+    let name = if with_who { who(app) } else { Vec::new() };
+    let gauge = snap.map(context_gauge).unwrap_or_default();
+    let rate = snap.map(token_rate).unwrap_or_default();
+    let clock = app.turn.as_ref().map(|t| view::turn(t, app.ms()));
+    if name.is_empty() && gauge.is_empty() && rate.is_empty() && clock.is_none() {
+        return None;
+    }
+    // A pane too narrow for all of it gives up the clock first, then the rate, then the
+    // gauge, then the name: the name is what this row exists to say, and the figures are
+    // on the opening screen's floor as well.
+    let mut keep = [true; 4];
+    loop {
+        let left = joined(&[Span::styled(RAIL, Style::new().fg(ink::call()))], &[
+            if keep[3] { name.as_slice() } else { &[] },
+            if keep[2] { gauge.as_slice() } else { &[] },
+            if keep[1] { rate.as_slice() } else { &[] },
+        ]);
+        let right = match (keep[0], clock.as_ref()) {
+            (true, Some(clock)) => clock.spans.clone(),
+            _ => Vec::new(),
+        };
+        if zone_width(&left) + zone_width(&right) + 1 <= width || !keep.iter().any(|k| *k) {
+            return Some(row(left, right, width));
+        }
+        match keep.iter().position(|k| *k) {
+            Some(at) => keep[at] = false,
+            None => return Some(row(left, right, width)),
+        }
+    }
 }
 
 /// The opening screen's floor: the directory a message would run in, and against the
@@ -4239,12 +4347,6 @@ fn draw_menu(f: &mut Frame, app: &App, area: Rect) {
     if area.height < 3 {
         return;
     }
-    // The palette is the one menu that is not a view of the line: it is its own
-    // surface, with its own header, and it is drawn as one.
-    if menu.kind == Kind::Actions {
-        draw_palette(f, menu, area);
-        return;
-    }
     // As wide as the widest row it holds, not as wide as the pane: a menu stretched to the
     // column's full width is mostly empty and reads as a panel with a list lost in it, and
     // in a wide pane it puts a row's hint half a screen from the word it explains.
@@ -4275,106 +4377,6 @@ fn draw_menu(f: &mut Frame, app: &App, area: Rect) {
 /// The widest a menu gets, whatever the pane: wide enough for a command and the longest
 /// hint the worker sends, and no wider.
 const MENU_W: usize = 68;
-
-/// How wide the palette's plate is: opencode's own medium dialog, sixty cells, and
-/// no wider than the pane it is in. A list of names and a column of shortcuts does
-/// not need more, and a plate that grew with the pane is a form across the screen.
-const PALETTE: usize = 60;
-
-/// Where the plate's text starts: opencode's gutter cell and three cells of inset,
-/// which is where its rows, its header and its footer all line up.
-const PALETTE_INSET: usize = 4;
-
-/// The page stepped down once, for the scrim behind the palette.
-///
-/// opencode's dialog darkens what it covers, and a terminal cannot composite an
-/// overlay: half of `PAGE` is as near as a cell gets to it. Derived from the page
-/// rather than added to `ink`, because the palette is quoted and not extended.
-fn scrim() -> Color {
-    let (r, g, b) = view::PAGE;
-    Color::Rgb(r / 2, g / 2, b / 2)
-}
-
-/// The palette: opencode's dialog, which is a plate on the page and not a box on it.
-///
-/// No frame and no title on an edge: the conversation behind goes down a step, the
-/// plate sits above it a quarter of the way down, the filter on its first row with
-/// `esc` at the other end, the rows under a blank line, and the keys it answers to
-/// under another. Fixed at `PALETTE` wide so it does not change shape as the list does.
-fn draw_palette(f: &mut Frame, menu: &Menu, area: Rect) {
-    // Sixty cells, two clear of the pane's edges, and never wider than the pane itself:
-    // a plate drawn past the buffer is a plate drawn into cells that are not there.
-    let width = (PALETTE as u16)
-        .min(area.width.saturating_sub(2))
-        .max(12)
-        .min(area.width.max(1));
-    let inner = width as usize;
-    let rows = menu.lines(inner);
-    let mut plate: Vec<Line<'static>> = Vec::with_capacity(rows.len() + 6);
-    plate.push(Line::from(""));
-    plate.push(palette_head(menu, inner));
-    plate.push(Line::from(""));
-    plate.extend(rows);
-    plate.push(Line::from(""));
-    plate.push(palette_foot(inner));
-    plate.push(Line::from(""));
-    // A quarter of the way down the page, and never off the bottom of it.
-    let y = area.y + area.height / 4;
-    let height = (plate.len() as u16).min(area.bottom().saturating_sub(y));
-    let popup = Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y,
-        width,
-        height,
-    };
-    // The scrim first, over everything the plate is about to cover: a dialog is
-    // something over the page, and the page going down a step is what says so. It is a
-    // background only, so the conversation's words keep the ink they were drawn in --
-    // this is a plate laid over a page, not a wash over the text.
-    f.buffer_mut().set_style(area, Style::new().bg(scrim()));
-    f.render_widget(Clear, popup);
-    // The surface goes down before the rows rather than over them: the row the cursor
-    // is on is a band across the plate, and a pass that repainted every cell's
-    // background afterwards would take that band off it again.
-    f.buffer_mut().set_style(popup, Style::new().bg(ink::bar()));
-    f.render_widget(Paragraph::new(plate), popup);
-}
-
-/// The plate's first row: what is being typed at the left, the key that leaves at the
-/// right. With nothing typed it says what the list is, in the tone a placeholder is set
-/// in.
-fn palette_head(menu: &Menu, width: usize) -> Line<'static> {
-    let typed = !menu.filter.is_empty();
-    // opencode's palette puts its search field where the title was and says what can
-    // be searched for; with nothing typed this says the same thing about this list.
-    let left = if typed {
-        menu.filter.clone()
-    } else {
-        format!("search {}", menu.kind.title())
-    };
-    let used = PALETTE_INSET + left.chars().count();
-    let right = "esc";
-    let gap = width.saturating_sub(used + right.len() + 2).max(1);
-    Line::from(vec![
-        Span::raw(" ".repeat(PALETTE_INSET)),
-        Span::styled(left, Style::new().fg(if typed { ink::text() } else { ink::faint() })),
-        Span::raw(" ".repeat(gap)),
-        Span::styled(right, Style::new().fg(ink::faint())),
-        Span::raw("  ".to_string()),
-    ])
-}
-
-/// The plate's last row: the two keys a list needs, under the list and in the tone
-/// opencode gives its footer. `esc` is not repeated here; it is on the header.
-fn palette_foot(width: usize) -> Line<'static> {
-    let said = "\u{2191}\u{2193} move    enter select";
-    let used = PALETTE_INSET + said.chars().count();
-    Line::from(vec![
-        Span::raw(" ".repeat(PALETTE_INSET)),
-        Span::styled(said, Style::new().fg(ink::faint())),
-        Span::raw(" ".repeat(width.saturating_sub(used).max(1))),
-    ])
-}
 
 /// A line of the mark, centred in the width it is drawn in.
 fn centre_in(line: Line<'static>, width: usize) -> Line<'static> {
@@ -4776,7 +4778,7 @@ mod tests {
     fn field_text(app: &App) -> (String, Vec<u8>) {
         let lines = app.field_lines(80, 8, 0);
         let text: String = lines.iter().map(Line::to_string).collect::<Vec<_>>().join("\n");
-        let (cols, rows, _, _) = app.drawn(80, 0);
+        let (cols, rows, _, _) = app.drawn(80);
         let tags: Vec<u8> = cols[rows[0].0..rows[0].1].iter().map(|(_, t)| *t).collect();
         (text, tags)
     }
@@ -5242,13 +5244,13 @@ mod tests {
         let buf = term.backend().buffer();
         let lines: Vec<String> =
             (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
-        // No header above the conversation, so the body starts on the first row; the
-        // menu is plain rows, so which list it is comes from the `$` that opened it.
+        // The header is above the conversation, so the body starts under it; the menu is
+        // plain rows, and the box keeps its line wherever the menu draws over it.
         let body = lines[..h as usize - 2].join("\n");
         assert!(body.contains("unslop"), "{body}");
         assert!(body.contains("review"), "{body}");
         assert!(
-            said(&lines[h as usize - 2], w as usize).starts_with('\u{276f}'),
+            said(&lines[h as usize - 2], w as usize).starts_with('\u{2502}'),
             "{:?}",
             lines[h as usize - 2]
         );
@@ -5486,10 +5488,46 @@ mod tests {
         assert!(kept.ended.is_some());
     }
 
-    /// The round's readout rides the message's own first row, at its right end: one clock
-    /// on the screen, and the message wraps beside it rather than under it.
+    /// The status row in each state, and the colour of its dots: the row is drawn in
+    /// a live pane only -- it needs a worker's snapshot -- so this is how it is read
+    /// without one.
+    ///
+    ///   cargo test -p cuacode-quik -- --ignored --nocapture show_the_status_row
     #[test]
-    fn the_readout_rides_the_message_row() {
+    #[ignore]
+    fn show_the_status_row() {
+        let mut snap = Snapshot::default();
+        snap.mode = "auto".into();
+        snap.context_used = 8_400;
+        snap.context_max = 20_000;
+        snap.tps = 128.0;
+        for (state, ms) in [
+            (State::Idle, 0u128),
+            (State::Running, 360),
+            (State::Tools, 600),
+            (State::Error, 0),
+        ] {
+            snap.state = state.clone();
+            for width in [100usize, 76] {
+                let line = status_line(&snap, width, ms);
+                let said: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+                let dots: Vec<String> = line
+                    .spans
+                    .iter()
+                    .take(scan::DOT_CELLS)
+                    .map(|s| format!("{:?} {:?}", s.style.fg, s.content))
+                    .collect();
+                println!("{state:?} @{width}  {said}");
+                println!("  {}", dots.join(" "));
+            }
+        }
+    }
+
+    /// The round's readout has a row of its own: the box's own row, under the message
+    /// and inside the two rules, where the three facts about who is answering live. The
+    /// message stops owing it cells, so it wraps at the box's whole width now.
+    #[test]
+    fn the_readout_rides_the_boxs_own_row() {
         let mut app = App::new(None);
         typed(&mut app, &"x".repeat(30));
         app.turn = Some(Turn {
@@ -5504,11 +5542,17 @@ mod tests {
         let buf = term.backend().buffer();
         let lines: Vec<String> =
             (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
-        let field = lines.iter().find(|l| l.contains('\u{276f}')).expect("no field line");
-        assert!(field.contains("~12.3k tok"), "the readout is not on the message row: {field}");
-        assert!(field.trim_end().ends_with('s'), "{field}");
-        // And the message is not drawn under it: the wrap left the readout its cells.
-        assert!(lines.iter().all(|l| !l.contains("~12.3k tok") || l.contains('\u{276f}')));
+        let field = lines.iter().position(|l| l.contains("xxx")).expect("no message row");
+        let at = lines
+            .iter()
+            .position(|l| l.contains("~12.3k tok"))
+            .expect("the readout is not on screen");
+        // It is the row under the message, carrying the box's own line, and the message
+        // above it is not drawn under it: the clock has a row of its own now.
+        assert_eq!(at, field + 1, "the box's own row is the row under the message");
+        assert!(lines[at].starts_with('\u{2502}'), "the rail runs through it: {:?}", lines[at]);
+        assert!(lines[at].trim_end().ends_with('s'), "{:?}", lines[at]);
+        assert!(!lines[field].contains("~12.3k tok"), "the clock is back on the message: {:?}", lines[field]);
     }
 
     /// The field is an editor, not a line that only grows at its end: the caret
@@ -5592,9 +5636,9 @@ mod tests {
         term.draw(|f| draw(f, &mut app)).unwrap();
         let buf = term.backend().buffer();
         let lines: Vec<String> = (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
-        let first = lines.iter().position(|l| l.contains('\u{276f}')).expect("no field line");
-        assert!(said(&lines[first], w as usize).starts_with('\u{276f}'), "{:?}", lines[first]);
-        assert!(said(&lines[first + 1], w as usize).starts_with("  second"), "{:?}", lines[first + 1]);
+        let first = lines.iter().position(|l| l.contains('\u{2502}')).expect("no field line");
+        assert!(said(&lines[first], w as usize).starts_with('\u{2502}'), "{:?}", lines[first]);
+        assert!(said(&lines[first + 1], w as usize).starts_with("\u{2502} second"), "{:?}", lines[first + 1]);
 
         // Ten lines is more than the box will show, so the window moves to the
         // line the caret is on and the first line goes off the top of it.
@@ -5627,13 +5671,13 @@ mod tests {
         let buf = term.backend().buffer();
         let lines: Vec<String> =
             (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
-        let first = lines.iter().position(|l| l.contains('\u{276f}')).expect("no field line");
+        let first = lines.iter().position(|l| l.contains('\u{2502}')).expect("no field line");
         let field: Vec<&String> = lines[first..first + 3].iter().collect();
-        // The prompt is on the first row and the continuations are not, and each
-        // one starts with a word rather than with half of one.
-        assert!(said(field[0], 30).starts_with('\u{276f}'), "{:?}", field[0]);
-        assert!(said(field[1], 30).starts_with("  "), "{:?}", field[1]);
-        assert!(said(field[2], 30).starts_with("  "), "{:?}", field[2]);
+        // Every row of the box carries its line, and each one starts with a word rather
+        // than with half of one.
+        assert!(said(field[0], 30).starts_with('\u{2502}'), "{:?}", field[0]);
+        assert!(said(field[1], 30).starts_with("\u{2502} "), "{:?}", field[1]);
+        assert!(said(field[2], 30).starts_with("\u{2502} "), "{:?}", field[2]);
         // Everything typed is on the screen, word for word: wrapping is not
         // clipping, and it is not cutting a word at the edge either.
         let shown = field.iter().map(|l| l.trim_end()).collect::<Vec<_>>().join(" ");
@@ -5667,7 +5711,7 @@ mod tests {
             .iter()
             .filter(|l| {
                 let l = l.trim_start_matches('\u{2503}');
-                l.starts_with("  ") || l.starts_with('\u{276f}')
+                l.starts_with("\u{2502} ") || l.starts_with('\u{276f}')
             })
             .collect();
         // The label is on one row and undivided, wherever the wrap fell.
@@ -5706,8 +5750,8 @@ mod tests {
             lines[caret + 1]
         );
         assert!(
-            lines[caret].starts_with("  "),
-            "a continuation row is the wrap's own indent: {:?}",
+            lines[caret].starts_with("\u{2502} "),
+            "a continuation row carries the box's own line: {:?}",
             lines[caret]
         );
     }
@@ -5787,11 +5831,38 @@ mod tests {
         assert!(matches!(&said, Row::Notice { head, .. } if head.contains("no mode called")), "{said:?}");
     }
 
+    /// The `/` menu as it is drawn: the worker's own list, with this screen's two
+    /// verbs in front of it.
+    ///
+    ///   cargo test -p cuacode-quik -- --ignored --nocapture show_the_command_menu
+    #[test]
+    #[ignore]
+    fn show_the_command_menu() {
+        let mut app = App::new(None);
+        seed(&mut app);
+        app.commands = vec![
+            Item::new("help", "the keys", "/help"),
+            Item::new("permissions", "ask, auto, bypass, or off", "/permissions"),
+            Item::new("provider", "which provider answers, from here on", "/provider"),
+            Item::new("model", "which model that provider runs", "/model"),
+            Item::new("vision", "which provider looks at pictures", "/vision"),
+            Item::new("effort", "how hard it thinks: off low medium high max", "/effort"),
+            Item::new("cwd", "where the next conversation stands", "/cwd"),
+            Item::new("compact", "fold the conversation now", "/compact"),
+            Item::new("context", "how much of the window the conversation fills", "/context"),
+            Item::new("usage", "what this and every other session has cost", "/usage"),
+            Item::new("version", "which build of cuacode this worker runs", "/version"),
+        ];
+        app.open_menu(Kind::Commands);
+        frame_of(&mut app, 100, 30);
+        print!("{}", frame_of(&mut app, 100, 30));
+    }
+
     /// The `/` menu is filled twice: from the rows in hand when it opens, and
     /// again from the list that lands under it. The second fill must keep this
     /// frontend's own verb, or the row being filtered for goes out from under
-    /// the keystrokes -- which is what `/help` did the first time. A command that only
-    /// opens a picker is not a row here any more: the palette is where a picker lives.
+    /// the keystrokes -- which is what `/help` did the first time. A command that
+    /// opens a picker is a row like any other: the list is the worker's own.
     #[test]
     fn the_workers_command_list_keeps_the_frontends_own_verb() {
         let mut app = App::new(None);
@@ -5805,143 +5876,9 @@ mod tests {
         let open = app.menu.as_ref().expect("the menu closed");
         let rows: String = open.lines(60).iter().map(Line::to_string).collect::<Vec<_>>().join("\n");
         assert!(rows.contains("help"), "{rows}");
-        assert!(!rows.contains("model"), "a picker is the palette's, not the menu's: {rows}");
-        assert!(rows.contains("usage"), "the worker's own list is still a menu: {rows}");
-    }
-
-    /// ctrl+p is the palette: one list of the lists this screen can put up and the
-    /// commands the worker routes. Typing filters it, and the filter stays in the
-    /// panel -- a picker that wrote its search into the message would be editing a
-    /// line nobody asked it to touch.
-    #[test]
-    fn ctrl_p_opens_the_palette_and_typing_filters_it() {
-        let mut app = App::new(None);
-        app.commands = vec![Item::new("compact", "fold the conversation now", "/compact")];
-        app.key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        let open = app.menu.as_ref().expect("ctrl-p opened nothing");
-        assert_eq!(open.kind, Kind::Actions, "ctrl-p is the palette");
-
-        let screen = frame_of(&mut app, 100, 30);
-        for row in [
-            "search actions",
-            "switch model",
-            "switch provider",
-            "permission mode",
-            "resume session",
-            "run /compact",
-            "open the calls",
-            "keys",
-        ] {
-            assert!(screen.contains(row), "{row} is not on the palette:\n{screen}");
-        }
-        assert!(screen.contains("esc"), "the way out is on the header:\n{screen}");
-        assert!(app.input.is_empty(), "a picker writes nothing on the line");
-        // The picker verbs are not command rows here either: `switch model` above is
-        // that door, and a list offering both is the same list twice.
-        assert!(!screen.contains("run /model"), "the model picker twice:\n{screen}");
-        assert!(!screen.contains("run /provider"), "the provider picker twice:\n{screen}");
-
-        for c in "res".chars() {
-            app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
-        }
-        let screen = frame_of(&mut app, 100, 30);
-        assert!(screen.contains("resume session"), "the filter does not read:\n{screen}");
-        assert!(!screen.contains("switch model"), "the rest of the list is left out:\n{screen}");
-        assert!(app.input.is_empty(), "the filter went into the message: {:?}", app.input);
-
-        // A filter nothing answers to says so in one row instead of drawing an
-        // empty plate.
-        for c in "zzz".chars() {
-            app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
-        }
-        let screen = frame_of(&mut app, 100, 30);
-        assert!(screen.contains("nothing matches"), "{screen}");
-
-        // A pane too narrow for the plate still draws it, clipped, rather than past its
-        // own buffer: the palette is opened from any size of window.
-        let narrow = frame_of(&mut app, 40, 12);
-        assert!(narrow.lines().count() == 12, "{narrow}");
-    }
-
-    /// A palette row is the thing it opens: `Kind` is the list, so a row can only
-    /// reach a picker that already exists. Choosing one leaves the message alone,
-    /// which is the whole difference between a picker and a word.
-    #[test]
-    fn a_palette_row_opens_the_list_it_names_and_touches_nothing_else() {
-        let mut app = App::new(None);
-        app.input = "a half-written message".into();
-        app.caret = app.chars();
-        app.key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        for c in "permission".chars() {
-            app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
-        }
-        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(
-            app.menu.as_ref().map(|m| m.kind),
-            Some(Kind::Permissions),
-            "the row opens the list the command used to open"
-        );
-        assert_eq!(app.input, "a half-written message", "a picker wrote on the line");
-        // And it is the modes, not an empty box: the list behind the row is the one
-        // `/permissions` fills.
-        let rows: String = app
-            .menu
-            .as_ref()
-            .unwrap()
-            .lines(60)
-            .iter()
-            .map(Line::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(rows.contains("bypass"), "{rows}");
-
-        // The last row is the keys, which is the panel `/help` opens.
-        app.menu = None;
-        app.key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        for c in "keys".chars() {
-            app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
-        }
-        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.opened.as_ref().map(|o| o.title.as_str()), Some("keys"));
-        assert!(app.menu.is_none(), "the palette stayed up under the panel");
-    }
-
-    /// The palette as it is drawn, characters and then the colour of every cell:
-    ///
-    ///   cargo test -p cuacode-quik -- --ignored --nocapture show_the_palette
-    ///
-    /// `--frame --colour` prints a screen that no key opened, so the palette cannot be
-    /// looked at that way: it is opened by one, and this is the door.
-    #[test]
-    #[ignore]
-    fn show_the_palette() {
-        let mut app = App::new(None);
-        seed(&mut app);
-        // The worker's own list, as `command.list` sends it: nine commands, two of which
-        // are the pickers already on the plate above.
-        app.commands = vec![
-            Item::new("provider", "which provider answers, from here on", "/provider"),
-            Item::new("model", "which model that provider runs", "/model"),
-            Item::new("vision", "which provider looks at pictures", "/vision"),
-            Item::new("effort", "how hard it thinks: off low medium high max", "/effort"),
-            Item::new("cwd", "where the next conversation stands", "/cwd"),
-            Item::new("compact", "fold the conversation now, or set the limit it folds at", "/compact"),
-            Item::new("context", "how much of the window the conversation fills", "/context"),
-            Item::new("usage", "what this and every other session has cost", "/usage"),
-            Item::new("version", "which build of cuacode this worker is running", "/version"),
-        ];
-        app.key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        // Twice: at a pane the plate fills and at one wider than it, where opencode's
-        // dialog keeps its own width and the page behind it is the whole pane.
-        for (w, h) in [(100u16, 30u16), (160, 26)] {
-            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-            term.draw(|f| draw(f, &mut app)).unwrap();
-            println!("--- {w}x{h}");
-            print!("{}", term.backend());
-        }
-        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        term.draw(|f| draw(f, &mut app)).unwrap();
-        print_colours(term.backend().buffer());
+        assert!(rows.contains("permissions"), "this screen's own verb: {rows}");
+        assert!(rows.contains("model"), "the worker's list is the menu: {rows}");
+        assert!(rows.contains("usage"), "{rows}");
     }
 
     /// ctrl-o opens the calls: the conversation's own rows, newest first, so a

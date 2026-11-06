@@ -16,7 +16,7 @@ use ratatui::text::{Line, Span};
 use cuacode::hosts::Host;
 use cuacode::transcript::Row;
 
-use crate::view::{call_ink, call_lead, call_result, clip, clip_runs, columns, ink, runs_width, thought_name, Run};
+use crate::view::{call_ink, call_lead, call_result, clip, clip_runs, ink, runs_width, thought_name, Run};
 
 /// How many rows a menu shows at once. Past this the window follows the
 /// selection rather than the menu growing: the field it sits above has to stay
@@ -60,10 +60,6 @@ pub enum Kind {
     /// new conversation over there, because a conversation belongs to the machine
     /// its worker runs on.
     Hosts,
-    /// The palette behind ctrl+p: every list this screen can put up, and every
-    /// command the worker routes, in one place. A picker, so a row chooses rather
-    /// than writes, and the only menu whose rows are mostly not lists.
-    Actions,
 }
 
 impl Kind {
@@ -77,7 +73,10 @@ impl Kind {
         }
     }
 
-    /// The word naming the menu in its frame.
+    /// The word naming the menu in its frame. Nothing draws a title any more:
+    /// the rows are the frame. The tests read it, and it is the one place the
+    /// names of the lists are written.
+    #[cfg(test)]
     pub fn title(self) -> &'static str {
         match self {
             Kind::Commands => "command",
@@ -90,25 +89,8 @@ impl Kind {
             Kind::Permissions => "permission",
             Kind::Calls => "call",
             Kind::Hosts => "host",
-            Kind::Actions => "actions",
         }
     }
-}
-
-/// What a palette row does, when it does something other than write text.
-///
-/// A picker row names the list that already does the job rather than what the job
-/// is, so the palette carries no second idea of one: `Kind` is the list, and the row
-/// is a way in. The other two are the panels this frontend answers itself, which
-/// have no list of rows behind them to name.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Act {
-    /// Open the list of that kind, exactly as its command or its key does.
-    Pick(Kind),
-    /// The conversation's own calls, as ctrl-o lists them.
-    Calls,
-    /// The panel of keys, as `/help` opens it.
-    Keys,
 }
 
 /// One row of a menu: what it says, the line of help beside it, and what
@@ -129,16 +111,6 @@ pub struct Item {
     /// conversation does, and one grey help line for every outcome is what makes a
     /// list of calls read as one colour.
     hint_ink: Option<Color>,
-    /// What the row says after its own name, in the tone of a thing read rather than
-    /// picked: a command's own words about itself. Empty for every other row, and for
-    /// every row outside the palette, which draws its hint at the end of the line
-    /// instead.
-    note: String,
-    /// What choosing this row does, for a palette row. `None` for every row that
-    /// writes text or is opened by something else, which is every other menu: a
-    /// palette row that carried a command's name instead would be the second table
-    /// of what can be run, and it is the thing this list exists to avoid.
-    pub act: Option<Act>,
 }
 
 impl Item {
@@ -149,21 +121,7 @@ impl Item {
             value: value.into(),
             runs: Vec::new(),
             hint_ink: None,
-            note: String::new(),
-            act: None,
         }
-    }
-
-    /// A palette row: what it says, and the list or panel choosing it opens. There
-    /// is no value, because a row whose job is to put a list up writes nothing.
-    fn acting(act: Act, label: impl Into<String>, hint: impl Into<String>) -> Item {
-        Item { act: Some(act), ..Item::new(label, hint, "") }
-    }
-
-    /// The same row with the description that trails its name.
-    fn noting(mut self, note: impl Into<String>) -> Item {
-        self.note = note.into();
-        self
     }
 
     /// A row whose own text is drawn in more than one colour. The label is that
@@ -173,7 +131,7 @@ impl Item {
         let mut runs = vec![(lead, lead_style)];
         runs.extend(said);
         let label = runs.iter().map(|(text, _)| text.as_str()).collect();
-        Item { label, hint, value, runs, hint_ink: None, note: String::new(), act: None }
+        Item { label, hint, value, runs, hint_ink: None }
     }
 
     /// The same row with its help line in a state's own colour.
@@ -208,74 +166,6 @@ impl Item {
             wide,
         )
     }
-
-    /// One palette row, built the way opencode builds a dialog row.
-    ///
-    /// A one-cell gutter carrying the bar that says which row enter is about, three
-    /// cells in from the plate's edge, then the name, the thing it says about itself
-    /// trailing it in the tone of text that is read rather than picked, and a right
-    /// column that lines up down the list instead of landing wherever a row's words
-    /// happen to end. The row under the cursor is a band across the plate, which is
-    /// opencode's selection: the bar alone leaves the eye hunting for the other end
-    /// of the row.
-    ///
-    /// `foot` is how wide that right column is at its widest, so every row of the
-    /// list is measured against the same one.
-    fn palette_row(&self, selected: bool, width: usize, foot: usize) -> Line<'static> {
-        // Every cell of this row is on the plate, and the row the cursor is on is a
-        // band across it: the background goes on with the ink, not with the frame.
-        let on = |tone: Color| {
-            let style = Style::new().fg(tone);
-            if selected {
-                style.bg(ink::rule())
-            } else {
-                style
-            }
-        };
-        let gutter = 1;
-        let inset = 3;
-        let right = 2;
-        let column = if foot > 0 { foot + 2 } else { 0 };
-        let room = width.saturating_sub(gutter + inset + column + right).max(1);
-        let (runs, drawn) = self.cell(selected, room);
-        // The name is drawn in its own ink by `cell`, so the band has to be put on it
-        // here as well: a selection that stopped at the end of its own sentence is the
-        // bar plus a hole where the row is.
-        let runs: Vec<Span<'static>> = runs
-            .into_iter()
-            .map(|span| match selected {
-                true => Span::styled(span.content, span.style.bg(ink::rule())),
-                false => span,
-            })
-            .collect();
-        let mut used = gutter + inset + drawn;
-        let mut spans = vec![
-            Span::styled(if selected { "\u{2503}" } else { " " }, on(ink::call())),
-            Span::styled(" ".repeat(inset), on(ink::text())),
-        ];
-        spans.extend(runs);
-        // What the row says about itself, when there is room for more than a stub of
-        // it: a name cut short to make room for its own sentence is a row that says
-        // neither thing.
-        let note_room = width.saturating_sub(used + 1 + column + right);
-        if !self.note.is_empty() && note_room >= 8 {
-            spans.push(Span::styled(format!(" {}", clip(&self.note, note_room)), on(ink::faint())));
-            used += 1 + columns(&self.note).min(note_room);
-        }
-        let fill = width.saturating_sub(used + self.hint_len() + right);
-        spans.push(Span::styled(" ".repeat(fill), on(ink::text())));
-        if !self.hint.is_empty() {
-            spans.push(Span::styled(self.hint.clone(), on(ink::faint())));
-        }
-        spans.push(Span::styled(" ".repeat(right), on(ink::text())));
-        Line::from(spans)
-    }
-
-    /// How much of the right column this row wants: the shortcut that already does the
-    /// job, or the value the row is on now. Empty for a row with neither.
-    fn hint_len(&self) -> usize {
-        columns(&self.hint)
-    }
 }
 
 /// The verbs the frontend answers itself.
@@ -284,57 +174,12 @@ impl Item {
 /// there is one owner of what the commands are. `/help` is not down there: no
 /// worker command is called help (it is the keys, and the frontend is the side
 /// that knows them), and a `/help` that went to the model as prose would be worse
-/// than one row kept here. `/permissions` was the second of these and is a picker,
-/// so it lives in the palette now, with every other one.
+/// than one row kept here.
 pub fn local() -> Vec<Item> {
-    vec![Item::new("help", "the keys", "/help")]
-}
-
-/// The commands the `/` menu no longer offers.
-///
-/// Each of them only ever opened a picker, and a picker is one keystroke away in
-/// the palette (ctrl+p): two doors to one list is a list with two owners. Nothing
-/// is taken off the worker -- every name here still routes from a typed line -- and
-/// this is about which rows the screen offers. One list, one place, and both doors
-/// read it: the `/` menu through `with_local`, the palette through `actions`.
-const PICKER_ONLY: &[&str] = &["provider", "model"];
-
-/// The worker's commands as the rows the screen offers: the ones that only open a
-/// picker are not among them.
-fn offered(items: Vec<Item>) -> Vec<Item> {
-    items
-        .into_iter()
-        .filter(|item| !PICKER_ONLY.contains(&item.label.as_str()))
-        .collect()
-}
-
-/// The rows of the palette behind ctrl+p: this screen's own lists, the worker's
-/// commands, and the two panels that are answers rather than lists.
-///
-/// Nothing here is a second table. A picker row is the list that already does the
-/// job, named as the `Kind` it opens, so the palette cannot fall out of step with a
-/// picker that changed. A command row is the worker's own list, which is also what
-/// fills the `/` menu, so a command added down there is on this list in the same
-/// edit. `mode` is the permission mode the worker is in, which is the one thing
-/// here with a current value worth saying.
-pub fn actions(mode: &str, commands: &[Item]) -> Vec<Item> {
-    let mut rows = vec![
-        Item::acting(Act::Pick(Kind::Models), "switch model", ""),
-        Item::acting(Act::Pick(Kind::Providers), "switch provider", ""),
-        Item::acting(Act::Pick(Kind::Permissions), "permission mode", mode),
-        Item::acting(Act::Pick(Kind::Sessions), "resume session", ""),
-    ];
-    // The word in front is what tells a command from a list: the row runs a line
-    // the worker parses, where every row above it puts a list up. What the command
-    // says about itself trails the row in the quieter tone -- the worker's own words,
-    // not a description kept here. The picker verbs are not here: `switch model` two
-    // rows up is the same door, and a list with both is a list with two of everything.
-    rows.extend(offered(commands.to_vec()).into_iter().map(|item| {
-        Item::new(format!("run {}", item.value), "", item.value.clone()).noting(item.hint.clone())
-    }));
-    rows.push(Item::acting(Act::Calls, "open the calls", "ctrl-o"));
-    rows.push(Item::acting(Act::Keys, "keys", ""));
-    rows
+    vec![
+        Item::new("help", "the keys", "/help"),
+        Item::new("permissions", "ask, auto, bypass, or off", "/permissions"),
+    ]
 }
 
 /// The machines a conversation can run on, this one first.
@@ -432,11 +277,10 @@ pub fn calls(rows: &[Row]) -> Vec<Item> {
 }
 
 /// The worker's rows with the local ones in front, any name the worker sent for
-/// itself kept as the worker sent it rather than doubled, and the ones that only
-/// open a picker left to the palette.
+/// itself kept as the worker sent it rather than doubled.
 pub fn with_local(items: Vec<Item>) -> Vec<Item> {
     let mut out = local();
-    for item in offered(items) {
+    for item in items {
         if !out.iter().any(|l| l.label == item.label) {
             out.push(item);
         }
@@ -564,10 +408,9 @@ pub fn from_reply(kind: &str, data: &serde_json::Value) -> Option<Reply> {
                 .collect()
         }
         // Never arrives: the four permission modes are the frontend's own, the
-        // calls are read off the transcript, the machines are a file, and the
-        // palette is built from all of those. Here so the match stays
-        // exhaustive over what a menu can be.
-        Kind::Permissions | Kind::Calls | Kind::Hosts | Kind::Actions => Vec::new(),
+        // calls are read off the transcript, and the machines are a file. Here so
+        // the match stays exhaustive over what a menu can be.
+        Kind::Permissions | Kind::Calls | Kind::Hosts => Vec::new(),
     };
     let provider = data.get("provider").and_then(|p| p.as_str()).unwrap_or("").to_string();
     let error = data.get("error").and_then(|e| e.as_str()).unwrap_or("").to_string();
@@ -705,11 +548,13 @@ impl Menu {
         self.shown.get(self.sel).map(|i| &self.all[*i])
     }
 
-    /// The word naming the menu in its frame, and how many rows are on hand.
+    /// The word naming the menu and how many rows are on hand.
     ///
     /// The window shows eight whatever the list holds, so a long list without a
     /// count is a place with no way to tell how big it is or where in it you are.
     /// The count is what the filter left, because that is what the keys can reach.
+    /// Nothing draws it since the palette went; the tests read it.
+    #[cfg(test)]
     pub fn title(&self) -> String {
         let said = match self.shown.len() {
             0 => self.kind.title().to_string(),
@@ -721,46 +566,6 @@ impl Menu {
             true => said,
             false => format!("{said} \u{b7} {}", self.error),
         }
-    }
-
-    /// How wide the palette's right column is: the widest shortcut or value any row on
-    /// the list carries, so the column lines up instead of wandering row to row.
-    pub fn foot(&self) -> usize {
-        self.shown
-            .iter()
-            .map(|i| self.all[*i].hint_len())
-            .max()
-            .unwrap_or(0)
-    }
-
-    /// The palette's rows, in opencode's shape: the bar, the name, what it says about
-    /// itself, and the shortcut at the same right edge on every row.
-    ///
-    /// Its keys are in the plate's own chrome rather than under the last row, which is
-    /// why no menu's footer hint is drawn here.
-    fn actions_lines(&self, width: usize) -> Vec<Line<'static>> {
-        if self.shown.is_empty() {
-            return vec![Line::from(vec![
-                Span::raw("    "),
-                Span::styled(NOTHING, Style::new().fg(ink::dim())),
-            ])];
-        }
-        let foot = self.foot();
-        let n = self.shown.len().min(ROWS);
-        let start = if self.sel < n { 0 } else { self.sel - n + 1 };
-        let mut out: Vec<Line<'static>> = (start..start + n)
-            .map(|k| self.all[self.shown[k]].palette_row(k == self.sel, width, foot))
-            .collect();
-        // More than the plate holds: opencode marks that with an ellipsis under the
-        // last row rather than letting the list look complete. The window follows the
-        // cursor, so the only thing missing is the knowledge that there is more.
-        if self.shown.len() > n {
-            out.push(Line::from(vec![
-                Span::raw("    "),
-                Span::styled("\u{2026}", Style::new().fg(ink::faint())),
-            ]));
-        }
-        out
     }
 
     /// Move the selection, wrapping at both ends: the list is short, and the
@@ -815,12 +620,8 @@ impl Menu {
     }
 
     /// The menu as the lines a screen draws: the rows that matched, and the one
-    /// line saying what the keys do. The palette is the one list with a row shape of
-    /// its own, and its chrome belongs to the frame, so it is drawn apart.
+    /// line saying what the keys do.
     pub fn lines(&self, width: usize) -> Vec<Line<'static>> {
-        if self.kind == Kind::Actions {
-            return self.actions_lines(width);
-        }
         let mut out = Vec::new();
         if self.shown.is_empty() {
             out.push(Line::from(Span::styled(
@@ -897,52 +698,18 @@ mod tests {
         menu.shown.iter().map(|i| menu.all[*i].label.as_str()).collect()
     }
 
-    /// The `/` menu stops advertising the commands that only open a picker; the
-    /// palette is where they live now. Everything the worker actually parses is
-    /// still a row.
+    /// The `/` menu is the worker's own list with this screen's own verbs in front,
+    /// and every command the worker sends is a row: a picker is reached by its name,
+    /// not by a second menu opened first.
     #[test]
-    fn the_slash_menu_keeps_what_the_worker_parses_and_not_the_pickers() {
+    fn the_slash_menu_is_every_command_the_worker_sends() {
         let items = vec![
             Item::new("provider", "", "/provider"),
             Item::new("model", "", "/model"),
             Item::new("compact", "", "/compact"),
         ];
         let labels: Vec<String> = with_local(items).into_iter().map(|i| i.label).collect();
-        assert_eq!(labels, ["help", "compact"], "a picker is not a command");
-    }
-
-    /// The palette is built out of what already exists: a row per list this
-    /// frontend can put up, a row per command the worker routes, and the two
-    /// panels. No command name is written into it here, which is what keeps it from
-    /// being the second table.
-    #[test]
-    fn the_palette_is_the_lists_and_the_workers_commands() {
-        let commands = vec![Item::new("compact", "fold the conversation now", "/compact")];
-        let rows = actions("auto", &commands);
-        let labels: Vec<&str> = rows.iter().map(|i| i.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            [
-                "switch model",
-                "switch provider",
-                "permission mode",
-                "resume session",
-                "run /compact",
-                "open the calls",
-                "keys",
-            ]
-        );
-        // A row opens the list that already does the job; a command row opens none,
-        // because what it does is a line the worker parses.
-        let opens: Vec<Option<Act>> = rows.iter().map(|i| i.act).collect();
-        assert_eq!(opens[0], Some(Act::Pick(Kind::Models)));
-        assert_eq!(opens[3], Some(Act::Pick(Kind::Sessions)));
-        assert_eq!(opens[4], None);
-        assert_eq!(rows[4].value, "/compact", "the worker's own name, unfiltered");
-        // What a row says about itself: the mode in use, and the key that already
-        // does the job where there is one.
-        assert_eq!(rows[2].hint, "auto");
-        assert_eq!(rows[5].hint, "ctrl-o");
+        assert_eq!(labels, ["help", "permissions", "provider", "model", "compact"]);
     }
 
     /// A menu's rows, and what choosing one writes onto the message.

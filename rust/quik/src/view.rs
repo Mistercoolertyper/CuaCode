@@ -24,136 +24,128 @@ use crate::{Opened, Turn};
 /// The page colour, in one place: the terminal's own background is set to this
 /// at startup, so a cell nothing draws is still the page.
 ///
-/// It is ember's `background` to the value, and it has to be: fleet draws the
-/// pane `theme::term_bg()` opaque and a terminal program's page lands inside it,
-/// so one digit of difference is a seam down the edge of the pane.
-pub const PAGE: (u8, u8, u8) = (0x15, 0x11, 0x10);
+/// `#191919`, neutral graphite. It has to match the pane this terminal sits in
+/// exactly -- one digit of difference is a seam down the edge of the pane -- and
+/// it is the value every tone below is measured against.
+pub const PAGE: (u8, u8, u8) = (0x19, 0x19, 0x19);
 
-/// The palette, in ember's own tones: the warm brown-black page, greys that lean
-/// warm rather than blue, a warm off-white for text and never `#fff`, and one hot
-/// orange for everything you can act on.
+/// The palette, on graphite: opencode2's, the blue theme opencode advertises --
+/// their hues, their aliases, and the one accent on anything you can act on.
 ///
-/// The tone each one quotes is named beside it, so it can be checked against
-/// `superset-src/packages/shared/src/themes/built-in/ember.ts` by eye. Nothing
-/// here is invented, and the ones that are *derived* say so and say how.
+/// Every value is quoted from `packages/tui/src/theme/assets/v2/opencode2.json` in
+/// the checkout kept under `~/.cuacode/sessions/<id>/notebook/opencode`, and the
+/// line it came from is named beside it. Their dark block is `:322-394`: six hues of
+/// nine rungs and the three aliases under them, where `accent` and `interactive` are
+/// both `$hue.blue` and `neutral` is `$hue.gray` (`:390-392`). That is what makes
+/// this the blue one.
 ///
-/// A cell has no alpha, so a tone that is a wash over the page is flatten here and
-/// the flattened value is what is written: every one of these is legible against
-/// `PAGE`, and the ones that replace an old tone hold at least the contrast that
-/// tone had on the old cold page (`#282c34`).
+/// The page is the thing that is not theirs. opencode2 draws on `#080808` and this
+/// screen paints its terminal on `#191919`, the graphite of the pane it sits in, so
+/// a rung that separates on their page does not always separate on this one. The two
+/// that do not are **derived**, and each says what it measures.
+///
+/// Three levels of ink (rule 6 of `AGENTS.md`): text, one muted, and the accent.
+/// Their aliases have exactly that vocabulary -- `neutral.100`, `neutral.300` and the
+/// blue -- so the greys here are their rungs and not a cast of them. Their theme
+/// leaves `markdown` and `syntax` on the base's warm literals, which is why a link, a
+/// fenced line and a warning are still amber under chrome that is blue.
 pub mod ink {
     use ratatui::style::Color;
 
-    /// ember `foreground` (#eae8e6). Warm off-white, and never `#ffffff`: pure
-    /// white on a warm black is a different product.
+    /// opencode2 `text.base` (`$hue.neutral.100`, `:12`, `#ffffff` at `:325`). The
+    /// prose, and the mark in front of it: **17.6:1** on `PAGE`.
     pub fn text() -> Color {
-        Color::Rgb(0xea, 0xe8, 0xe6)
+        Color::Rgb(0xff, 0xff, 0xff)
     }
-    /// ember `muted-foreground` (#a8a5a3). The header's second and third lines,
-    /// a thought's own text, and anything the design drew grey.
+    /// A thought, and every grey the header speaks in: `$hue.neutral.200` (`:326`),
+    /// the rung their ramp keeps between the text and the muted tone, which is what a
+    /// thought is. **8.1:1**.
     pub fn dim() -> Color {
-        Color::Rgb(0xa8, 0xa5, 0xa3)
+        Color::Rgb(0xb0, 0xb0, 0xb0)
     }
-    /// ember `muted-foreground` one rung down (#9a9794), which is fleet's own
-    /// `faint` and the rung a label that is meant to be found rather than read
-    /// belongs on. A result: present, and not the point.
+    /// opencode2 `text.muted` (`$hue.neutral.300`, `:13`, `#808080` at `:327`). A
+    /// label that is meant to be found rather than read: **4.5:1**.
     pub fn faint() -> Color {
-        Color::Rgb(0x9a, 0x97, 0x94)
+        Color::Rgb(0x80, 0x80, 0x80)
     }
-
-    /// The corner a row's detail hangs from, which is the mark that says "this
-    /// is what came back". ember `bright-black`'s warm grey, lifted to
-    /// `#a8a5a3`-and-`bright-black` by half: it carries the corner and a detail
-    /// panel's key names, so it is read as a tone and not only felt as a rule.
-    pub fn branch() -> Color {
-        Color::Rgb(0x8a, 0x86, 0x84)
-    }
-    /// The bar behind the line you typed. ember `ring` (#3a3837), which is the
-    /// rung the window itself uses for "a surface one step above the page" (see
-    /// fleet's `line_strong`). It measures 1.61:1 against the page, the same
-    /// separation the old cold bar had, and the user's own text reads 9.5:1 on
-    /// it. Not a tint of the foreground at full strength: this is a plate under
-    /// a line, not a row lit by a pointer.
-    pub fn bar() -> Color {
-        Color::Rgb(0x3a, 0x38, 0x37)
-    }
-    /// The two rules the input sits between, and a panel's edge. ember
-    /// `bright-black` (#5c5856): the same value fleet gives its pane rim, so the
-    /// input's rules and the rim around the terminal are one hairline.
-    pub fn rule() -> Color {
-        Color::Rgb(0x5c, 0x58, 0x56)
-    }
-    /// A row that finished. ember's `terminal.green` (#7ec699) rather than its
-    /// `success`: the terminal block is the one written *for* a pane, and a tick
-    /// beside a verb reads as one word with it.
-    pub fn done() -> Color {
-        Color::Rgb(0x7e, 0xc6, 0x99)
-    }
-    /// A row that failed. ember's `terminal.red` (#dc6b6b), the terminal block's
-    /// own rather than `destructive` (#cc4444), which fleet's theme records as a
-    /// fill that reads 2.9:1 as words on a page.
-    pub fn failed() -> Color {
-        Color::Rgb(0xdc, 0x6b, 0x6b)
-    }
-    /// A row's tail: what came back, a tally, the second-order reading of a row
-    /// that has already said its point. **Derived**, and not a quote: `faint`
-    /// stepped one rung towards `PAGE`, so that the two kinds of secondary text on
-    /// a page -- the one you find and the one you read -- are two tones and not one
-    /// name for the same value. It measures **4.13:1 on `PAGE`**, which is over the
-    /// 4:1 floor for words that have to be read, and it leaves `faint` at its own
-    /// 6.46:1 above it.
+    /// The same tone as `faint`, and the same rung: opencode2 has one muted and gives
+    /// a row's tail the grey it gives a label. That is rule 6 of this screen's law --
+    /// text, quiet, accent, and nothing invented between them.
     pub fn quiet() -> Color {
-        Color::Rgb(0x7a, 0x75, 0x73)
+        Color::Rgb(0x80, 0x80, 0x80)
     }
-    /// Code, inline and fenced. ember `chart3` (#d4a84b), the warm amber in the
-    /// chart row that is meant to be a colour rather than a state: `chart2` is
-    /// the same green as `done` and `chart5` the same red as `failed`, so `chart3`
-    /// is the only one of them that cannot be mistaken for a tick or a cross.
+    /// The corner a row's detail hangs from: `quiet`'s tone, because the corner and
+    /// the detail under it are one thing and a rung of its own would be a second grey
+    /// saying the same sentence.
+    pub fn branch() -> Color {
+        Color::Rgb(0x80, 0x80, 0x80)
+    }
+    /// The plate behind the line you typed. **Derived**: opencode2's
+    /// `background.raised.high` is `#202020` (`:331`) on a `#080808` page, which is
+    /// 1.08:1 here and no plate at all on a page this light, so this holds the
+    /// separation this screen already draws a plate at: **1.6:1**. The line on it
+    /// reads 10.9:1.
+    pub fn bar() -> Color {
+        Color::Rgb(0x3d, 0x3d, 0x3d)
+    }
+    /// The two rules the input sits between, and a panel's edge: opencode2's
+    /// `scrollbar.base` (`:97`), the hairline rung of their ramp, **2.8:1**. Their
+    /// `border.base` (`#484848`, `:94`) is the same kind of value but lands at 1.9:1
+    /// on `#191919`, and the box's two rules would go soft against the page.
+    pub fn rule() -> Color {
+        Color::Rgb(0x60, 0x60, 0x60)
+    }
+    /// A row that finished: opencode2's `feedback.success` (`:47`), which is
+    /// `$hue.green.400` (`#9ee77a` at `:383`). **11.9:1**.
+    pub fn done() -> Color {
+        Color::Rgb(0x9e, 0xe7, 0x7a)
+    }
+    /// A row that failed: `feedback.error` (`:41`), which is `$hue.red.400`
+    /// (`#ef6c6c` at `:372`). **5.9:1**.
+    pub fn failed() -> Color {
+        Color::Rgb(0xef, 0x6c, 0x6c)
+    }
+    /// Code, inline and fenced: `syntax.type` (`:130`), the warm amber their theme
+    /// leaves on the base while the chrome goes blue. Their `markdown.code` is the
+    /// green `done` already has, and a fenced line that read as a finished call would
+    /// be one tone saying two things. **10.2:1**.
     pub fn code() -> Color {
-        Color::Rgb(0xd4, 0xa8, 0x4b)
-    }
-    /// A link. ember's `terminal.blue` (#61afef). Its address is drawn beside it
-    /// in `quiet`, so the colour is what says the words are clickable.
-    pub fn link() -> Color {
-        Color::Rgb(0x61, 0xaf, 0xef)
-    }
-    /// Something to act on rather than something broken: a build origin has moved
-    /// past, which is neither a failure nor a state to ignore. ember `warning`
-    /// (#e5c07b), the same rung the window uses for its blocked state.
-    pub fn warn() -> Color {
         Color::Rgb(0xe5, 0xc0, 0x7b)
     }
-    /// A call to another agent, or a message from one. Green is a tool that
-    /// finished and red is one that failed; neither is true here, and a red mark
-    /// beside a working peer would read as something broken. Nothing in the palette
-    /// sits between them, so this is the one rung added for it.
+    /// A link: `markdown.link`, the literal `#fab283` their theme inherits from the
+    /// base and does not blue -- opencode2's markdown stays warm under blue chrome.
+    /// **9.9:1**.
+    pub fn link() -> Color {
+        Color::Rgb(0xfa, 0xb2, 0x83)
+    }
+    /// Something to act on rather than something broken: `feedback.warning` (`:44`),
+    /// a literal in the file rather than a rung. **8.8:1**.
+    pub fn warn() -> Color {
+        Color::Rgb(0xf5, 0xa7, 0x42)
+    }
+    /// A call to another agent, or a message from one: `$hue.purple.400` (`:361`).
+    /// Green is a tool that finished and red is one that failed; neither is true of a
+    /// peer, and opencode2's third hue is this one. **5.8:1**.
     pub fn peer() -> Color {
-        Color::Rgb(0x8f, 0xb8, 0xd8)
+        Color::Rgb(0xa3, 0x83, 0xe2)
     }
-    /// The verb of a call: what a row *did*. ember's accent (#e07850), the one
-    /// hue that means "you can act on this", and a call is the thing you act on.
-    /// It is 24 dE from every other tone that can share a call's row; on a call
-    /// that failed it sits 12.6 dE from the red cross beside it, which is close
-    /// but is two shapes as well as two hues.
+    /// The verb of a call, what a row *did*: `$hue.blue.400` (`:339`), the tone both
+    /// `accent` and `interactive` name (`:390-391`) and the one their theme puts on
+    /// everything you can act on. **6.5:1**.
     pub fn call() -> Color {
-        Color::Rgb(0xe0, 0x78, 0x50)
+        Color::Rgb(0x76, 0x99, 0xfe)
     }
-    /// A call in flight, and the bright end of the sweep over the step's name while one
-    /// is running. Blue because the two halves of a round have to be told apart at a
-    /// glance and the thought's sweep is warm white: the same shape of highlight in two
-    /// families, which is what makes the difference readable as a colour and not as a
-    /// change of subject. This is the band only -- the name it passes over rests at
-    /// `running_dim`, exactly as it does under the warm one, so the row keeps the tone
-    /// it always had and what arrives is a blue pass through it.
+    /// A call in flight: the same accent. opencode2 spends one hue on "live" and it is
+    /// the blue, so the band over a thought is the text tone and the band over a call
+    /// is this -- one hue, and the motion is what tells the two halves apart.
     pub fn running() -> Color {
-        Color::Rgb(0x74, 0xa9, 0xd8)
+        call()
     }
-    /// Where that name rests while the tools have the worker: `dim` cooled by a step,
-    /// not recoloured. A blue band through a warm grey reads as two things on one row;
-    /// this is the same grey with the blue's own shadow in it, and it measures 7.7:1
-    /// on the page against `dim`'s 7.6:1, so nothing about the row gets louder.
+    /// Where a call's name rests while that band passes over it: `dim`. A neutral
+    /// grey needs no cooling the way ember's warm one did, and a second tint here
+    /// would be a colour the palette does not have.
     pub fn running_dim() -> Color {
-        Color::Rgb(0xa2, 0xa6, 0xad)
+        dim()
     }
 }
 
@@ -960,11 +952,10 @@ fn step(
         }
         meta.push((text, Style::new().fg(colour)));
     };
-    // What the stretch cost, summed over every round in it. A merged step's rate
-    // is not a number: three rounds have three of them, so it says what they cost
-    // and lets the individual rounds keep their own rates in the panel. A count and
-    // a rate are meta, so they are `faint`; what the calls were is the row's tail
-    // and is `quiet`, one rung further from the head it hangs under.
+    // What the reasoning cost: every round's thinking tokens summed, and the rate
+    // of the round that reported last. A count and a rate are meta, so they are
+    // `faint`; what the calls were is the row's tail and is `quiet`, one rung
+    // further from the head it hangs under.
     if let Some(round) = rounds(think, earlier, figures).filter(|r| r.tokens > 0 || r.tps > 0.0) {
         said(reasoning(round), ink::faint(), &mut meta);
     }
@@ -1119,42 +1110,49 @@ pub fn step_start(rows: &[Row], at: usize) -> usize {
     i
 }
 
-/// What a step's rounds cost, as one figure: the tokens summed, and a rate only
-/// when there is one round to have one.
+/// What a step's reasoning line says: every round's thinking tokens summed, and the
+/// rate the last round reported.
+///
+/// The count is the step's own, because the number a reader watches climb is what
+/// the stretch has thought so far and it should never step back to zero when another
+/// round joins in. The rate is not summed or averaged: it is the newest round's own
+/// speed, which is the one the model is going at now. Three rounds have three
+/// speeds, and the tokens-over-seconds average of them described none of them (it
+/// once put 1044 tok/s against a step that had thought at 60).
 fn rounds(
     think: Option<usize>,
     earlier: &[usize],
     figures: &dyn Fn(usize) -> Option<Round>,
 ) -> Option<Round> {
-    let mut all: Vec<Round> = earlier.iter().filter_map(|&t| figures(t)).collect();
-    let last = think.and_then(|t| figures(t));
-    let last_tps = last.map(|r| r.tps).unwrap_or(0.0);
-    let last_est = last.map(|r| r.estimated).unwrap_or(false);
-    all.extend(last);
+    let all: Vec<Round> = earlier
+        .iter()
+        .chain(think.iter())
+        .filter_map(|&t| figures(t))
+        .collect();
     if all.is_empty() {
         return None;
     }
-    // The rate of a step with several rounds is the rate of all of it: the tokens
-    // of the rounds that timed themselves, over the time they took. Summing their
-    // rates would be a number about nothing; leaving the rate out for every merged
-    // step meant it never showed at all, because most steps merge.
-    let timed: Vec<Round> = all.iter().copied().filter(|r| r.tps > 0.0 && r.tokens > 0).collect();
-    let seconds: f64 = timed.iter().map(|r| r.tokens as f64 / r.tps).sum();
-    let tokens: i64 = timed.iter().map(|r| r.tokens).sum();
     Some(Round {
         tokens: all.iter().map(|r| r.tokens).sum(),
-        tps: if seconds > 0.0 { tokens as f64 / seconds } else { last_tps },
-        estimated: all.iter().any(|r| r.estimated) || last_est,
+        // The newest round that timed itself. A round still streaming may not have
+        // a rate yet, and the one before it is the latest number the worker gave.
+        tps: all.iter().rev().find(|r| r.tps > 0.0).map_or(0.0, |r| r.tps),
+        estimated: all.iter().any(|r| r.estimated),
     })
 }
 
 /// A thought with its text folded away, as an opened step draws it: the rail and a
-/// triangle, and enough words to tell whether it is worth opening.
+/// triangle, enough words to tell whether it is worth opening, and what that round
+/// cost.
 ///
 /// The words are the thought's own name, which is the same name the head carries
-/// when this is the thought the step is named for. That one line says what the
-/// round cost instead: a row whose whole text is the line above it has said
-/// nothing, and the figure is a fact about this thought rather than the step.
+/// when this is the thought the step is named for. That one leads with the figures
+/// instead: a row whose whole text is the line above it has said nothing.
+///
+/// The figures are the round's own -- its tokens and the rate it thought them at,
+/// as the worker reported them -- and not the step's total. A step merges rounds,
+/// so a reader asking what one thought cost is asking about that thought, and the
+/// numbers on the line under the head are the only ones that are about the stretch.
 fn folded_thought(
     index: usize,
     head: usize,
@@ -1165,20 +1163,25 @@ fn folded_thought(
 ) -> Held {
     let own = thought_name(text);
     let room = width.saturating_sub(columns(THOUGHT_LEAD) + 2).max(1);
-    // The line says one of two things: the thought's own opening words, which are
-    // the reasoning and wear its voice, or what the round cost, which is a figure
-    // about the thought and is meta. One tone each, and neither is the answer's.
-    let (label, tone) = if own == name {
-        match figures(index) {
-            Some(round) if round.tokens > 0 => (
-                format!("{} tokens", tokens(round.tokens, round.estimated)),
-                Style::new().fg(ink::faint()),
-            ),
-            _ => ("thinking".to_string(), Style::new().fg(ink::faint())),
-        }
+    let spent = figures(index).map(cost).unwrap_or_default();
+    // Words that are the head's words are said by the head, so that line is the
+    // figures alone. Every other thought leads with its own opening words, which
+    // wear the reasoning's voice, and the figures hang off them as meta.
+    let mut runs: Vec<Run> = vec![(format!("{NOW} "), Style::new().fg(ink::branch()))];
+    let words = own != name;
+    if words && spent.is_empty() {
+        runs.push((clip(&own, room), thought_style()));
+    } else if words {
+        let sep = "  \u{b7}  ";
+        let most = room.saturating_sub(columns(&spent) + columns(sep)).max(1);
+        runs.push((clip(&own, most), thought_style()));
+        runs.push((sep.to_string(), Style::new().fg(ink::branch())));
+        runs.push((spent, Style::new().fg(ink::faint())));
+    } else if spent.is_empty() {
+        runs.push(("thinking".to_string(), Style::new().fg(ink::faint())));
     } else {
-        (own, thought_style())
-    };
+        runs.push((clip(&spent, room), Style::new().fg(ink::faint())));
+    }
     Held {
         row: index,
         head,
@@ -1188,10 +1191,7 @@ fn folded_thought(
             lead_style: Style::new().fg(ink::branch()),
             air_above: false,
             air_below: false,
-            lines: vec![vec![
-                (format!("{NOW} "), Style::new().fg(ink::branch())),
-                (clip(&label, room), tone),
-            ]],
+            lines: vec![runs],
         },
     }
 }
@@ -1611,7 +1611,7 @@ pub const SHIMMER_MS: u128 = 1600;
 /// mixed per channel and invents nothing: every step of it is a tone the palette already
 /// spans. A colour that is not RGB -- a terminal on the 16-colour fallback -- is left
 /// exactly as it was rather than handed an index nobody chose.
-fn mix(base: Color, top: Color, t: f64) -> Color {
+pub(crate) fn mix(base: Color, top: Color, t: f64) -> Color {
     let (Color::Rgb(br, bg, bb), Color::Rgb(tr, tg, tb)) = (base, top) else {
         return base;
     };
@@ -2644,14 +2644,10 @@ pub(crate) fn clip(text: &str, most: usize) -> String {
     format!("{head}\u{2026}")
 }
 
-/// The reasoning row's own readout, as the design draws it: the round's thinking
-/// tokens and rate, quoted from the worker and nowhere else. A round that has not
-/// reported either says just "Reasoning".
-fn reasoning(round: Round) -> String {
-    if round.tokens <= 0 && round.tps <= 0.0 {
-        return "Reasoning".to_string();
-    }
-    let mut out = String::from("Reasoning | ");
+/// The figures of one round: the thinking tokens it spent and, when it timed
+/// itself, the rate it thought them at. Empty when the worker reported neither.
+fn cost(round: Round) -> String {
+    let mut out = String::new();
     if round.tokens > 0 {
         out.push_str(&format!("{} tokens", tokens(round.tokens, round.estimated)));
         if round.tps > 0.0 {
@@ -2661,7 +2657,19 @@ fn reasoning(round: Round) -> String {
     if round.tps > 0.0 {
         out.push_str(&format!("{:.0} tok/s", round.tps));
     }
-    out.trim_end().to_string()
+    out
+}
+
+/// The reasoning row's own readout, as the design draws it: the round's thinking
+/// tokens and rate, quoted from the worker and nowhere else. A round that has not
+/// reported either says just "Reasoning".
+fn reasoning(round: Round) -> String {
+    let said = cost(round);
+    if said.is_empty() {
+        "Reasoning".to_string()
+    } else {
+        format!("Reasoning | {said}")
+    }
 }
 
 /// A call in full, as the worker keeps it: the arguments and the result, past the
@@ -3516,10 +3524,10 @@ mod tests {
         );
     }
 
-    /// The folded line an opened step gives a thought is one of two things: the
-    /// thought's own words, which wear the reasoning's voice, or what the round
-    /// cost, which is meta and is not italic. The second is the row saying a fact
-    /// about the thinking rather than the thinking.
+    /// The folded line an opened step gives a thought is its own words, which wear
+    /// the reasoning's voice, and that round's figures, which are meta and are not
+    /// italic. The words are said by the head when this is the thought the step is
+    /// named for, so that line is the figures alone.
     #[test]
     fn a_folded_thoughts_own_words_are_italic_and_its_figure_is_not() {
         let stream = rows(&[
@@ -3555,6 +3563,31 @@ mod tests {
             .expect("the figure");
         assert_eq!(figure.lines[0][1].1.fg, Some(ink::faint()));
         assert_eq!(figure.lines[0][1].1.add_modifier, Modifier::empty());
+
+        // A thought that is not the step's name keeps its words and carries its own
+        // figures beside them: what that round cost, not what the step did.
+        let both = |i: usize| {
+            (i == 0).then_some(Round {
+                tokens: 400,
+                tps: 62.0,
+                estimated: false,
+            })
+        };
+        let mixed = pieces(&stream, &all_open(), &|_| false, &both, None, true, ROOM, None);
+        let line = mixed
+            .iter()
+            .find(|p| p.text().starts_with("\u{25b8} Look at the loader"))
+            .expect("the thought's words and its figures");
+        assert_eq!(
+            line.text(),
+            "\u{25b8} Look at the loader first  \u{b7}  400 tokens, 62 tok/s"
+        );
+        assert_eq!(line.lines[0][1].1, thought_style(), "the words keep the thought's voice");
+        assert_eq!(
+            line.lines[0].last().unwrap().1.fg,
+            Some(ink::faint()),
+            "the figure is meta"
+        );
     }
 
     /// A diff is read by its colours: a line that went is red, a line that came is
@@ -4066,11 +4099,10 @@ mod tests {
         assert_eq!(bare[0].text(), "hm");
     }
 
-    /// A merged step's rate is the rate of all of it: tokens over the time they
-    /// took. Summing the rounds' own rates would say a step that spent two seconds
-    /// at 50 and three at 100 was doing 150 a second.
+    /// A merged step counts all of it and rates the last of it: the tokens are the
+    /// rounds' sum, the rate is the newest round's own, never an average of the lot.
     #[test]
-    fn a_merged_step_reports_its_whole_rate() {
+    fn a_merged_step_counts_it_all_and_rates_the_last() {
         let stream = rows(&[
             r#"{"type":"token","id":"a","data":{"state":"thinking","token":"first"}}"#,
             r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"shell","args":{"command":"ls"}}]}}"#,
@@ -4086,7 +4118,32 @@ mod tests {
             _ => None,
         };
         let ps = pieces_at(&stream, &|_: usize, _: &Row| false, &mine, None, true);
-        assert_eq!(ps[1].text(), "Reasoning | 400 tokens, 80 tok/s  \u{b7}  Ran shell \u{d7}2");
+        assert_eq!(ps[1].text(), "Reasoning | 400 tokens, 100 tok/s  \u{b7}  Ran shell \u{d7}2");
+    }
+
+    /// While a round runs, the count is still the whole step's -- it climbs past the
+    /// rounds already behind it rather than restarting -- and the rate is the one
+    /// the round in flight is going at.
+    #[test]
+    fn a_live_step_counts_the_stretch_and_rates_the_round() {
+        let stream = rows(&[
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"first"}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_calls","token":[{"name":"shell","args":{"command":"ls"}}]}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"tool_output","token":"shell","index":0,"result":{"result":{"exit_code":0,"stdout":"a\n"}}}}"#,
+            r#"{"type":"token","id":"a","data":{"state":"thinking","token":"second"}}"#,
+        ]);
+        // Rows: thought, call, thought. The second thought is the one being written.
+        let mine = |i: usize| match i {
+            0 => Some(Round { tokens: 4200, tps: 1044.0, estimated: false }),
+            2 => Some(Round { tokens: 300, tps: 80.0, estimated: false }),
+            _ => None,
+        };
+        let ps = pieces_at(&stream, &|_: usize, _: &Row| false, &mine, Some(2), true);
+        assert!(
+            ps[1].text().starts_with("Reasoning | 4.5k tokens, 80 tok/s"),
+            "the step's count with the live round's rate: {:?}",
+            ps[1].text()
+        );
     }
 
     /// The thought under a reasoning row is set apart from the answer, and by two

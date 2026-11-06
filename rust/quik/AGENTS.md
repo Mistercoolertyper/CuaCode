@@ -33,29 +33,36 @@ Nine rules. A change that breaks one is reverted, not argued with.
 3. **A cost says what the work cost.** `0.3s · stdout:29B · +1` under a call, and the
    token figure and rate under a step. They come from the wire and nowhere else; a
    row that reports a number the worker did not send is a lie with three decimals.
-4. **There is no header.** What a title bar would hold is on the opening screen: the
-   mark, who would answer (model, provider, effort), and along the floor the
-   directory, the permission mode and the build. On a conversation the same facts are
-   on the status row. A title bar drawn above every frame said them twice and pushed
-   the conversation down a row it did not have.
+4. **The header says what this is and where.** Two rows over every conversation: the
+   build, and the conversation's own directory (on a box, that box's path). The
+   opening screen says both on its floor, so it carries no header. On a short pane
+   the header is the first thing given up after the status row and the notice.
 5. **One glyph family.** See below. Three glyph families in one frame is why the
    type looks wrong even when the font is right.
 6. **Three levels of ink, not seven.** Text, quiet, and the one live thing in
    accent. A row that is dimmer than another row must be dimmer for a reason
    somebody can say out loud.
-7. **The palette is ember's, and the accent is one colour.** A tone that is not in
-   `ink` is a bug. The mint `#7ec699` is ember's terminal green on paper, but it is
-   cold against a warm page and it is the green every generated page is: finished
-   work is quiet, not green. `ink::done()` becomes the text tone and the accent
-   stays the only saturated thing on screen.
+7. **The palette is opencode2's, on this page.** A tone that is not in `ink` is a
+   bug, and every tone in `ink` quotes a line of opencode2 -- the blue theme opencode
+   advertises, `packages/tui/src/theme/assets/v2/opencode2.json`, dark: text
+   `#ffffff`, one muted `#808080`, the accent `#7699fe` on anything you can act on,
+   their green on a finished row, their red on a failed one, their purple on a peer.
+   Their `markdown` and `syntax` stay on the base's warm literals, so a link and a
+   fenced line are amber under chrome that is blue: that is their theme, not drift.
+   The page is not theirs -- `#191919`, this terminal's graphite -- so the rungs that
+   do not separate on it say so and say what they measure, and the accent is still
+   the only saturated thing on screen.
 8. **A placeholder is not a manual.** `Ask anything, or /help` teaches the program
    on the first line a person sees. The empty state says what this is in a word, or
    nothing.
 9. **Motion says one thing.** One thing moves at a time: the run in flight. A
    shimmer that travels over a peer row, a pulse, a sweep and a blink in the same
-   frame is a demo reel. `SHIMMER_STEP_MS` and `SHIMMER_MS` are the only clock in
-   the conversation; anything else that animates needs a reason that is not "it
-   looked flat".
+   frame is a demo reel. Three clocks, each with a reason written beside it:
+   `SHIMMER_STEP_MS`/`SHIMMER_MS` for the sweep over the conversation, `STREAM_MS` for
+   the readout on the box's own row, and `DOT_STEP_MS` for the scanner in the status
+   row. The loop's own clock while a round runs is that last one, so a frame of this
+   screen is a step of the wire. Anything else that animates needs a reason that is
+   not "it looked flat".
 
 ## The rows
 
@@ -65,7 +72,7 @@ One shape per `Row`, and nothing draws a row another way.
 | --- | --- |
 | `User` | `❯` and the text on the raised surface, and no rail: a rail down it made the record of what was said look like a second composer |
 | `Content` | `●` and the prose at the body column. This is the baseline the rest is read against |
-| `Thinking` | `●` and one quiet line, the text dim, folded to its head when the step is closed, with the step's own cost under it |
+| `Thinking` | `●` and one quiet line, the text dim, folded to its head when the step is closed, with the cost under it: every round's thinking tokens summed, and the rate the last round reported. The count never restarts when another round joins the step; the rate is never averaged across rounds (2026-11-04) |
 | `Tool` | `●`, `name(arg)` in one line, the fold under it when it is opened: a single call says nothing under its head, a run says what it ran |
 | `Notice` | the head only, quiet, no mark. A payload is for the model |
 | `Peer` | buddy mark in the peer colour, body hanging under it, opens on a press |
@@ -75,23 +82,44 @@ A step is one row: a thought, its calls, the calls' results. It opens on a press
 and it is the only fold. A new shape means a new `Row` variant in
 `src/transcript.rs` first, and a frontend cannot invent one.
 
+An opened step gives each thought one rail line: its own opening words and that
+round's own tokens and rate, `▸ Looking at the loader  ·  820 tokens, 62 tok/s`.
+The thought the step is named for leads with the figures alone, because the head
+already said its words. The figures are the round's, never the step's: a step
+merges rounds, and the only line about the whole stretch is the one under the head.
+
 ## The frame
 
-Top to bottom: an optional update notice, the conversation, the box, the status row.
-Nothing else, and no banner, key row, welcome line or border around the pane.
+Top to bottom: the header, an optional update notice, the conversation, the box, the
+status row. Nothing else, and no banner, key row, welcome line or border around the
+pane.
 
 When the pane cannot hold all of it, they go in this order: the status row, the
-notice, then the box's two rules. The message being typed and one row of it are
-never given up.
+notice, the header, then the box's two rules. The message being typed and one row of
+it are never given up.
 
-The box is a rule, the message and a rule: `❯` is the only mark in it, and the
-message keeps the whole width of the pane. A rail down its left, a foot under it and
-a `▀` pedestal under that were three marks saying it was an input. The round's own
-readout rides the right end of the message's first row, because that is the row the
-person is looking at.
+The box is a rule, the message, the box's own row and a rule. One mark in it: a
+`│` down the left of every row of the message, in the accent, at the same light
+weight the two rules are drawn at. A foot under it and a `▀` pedestal under that were
+two more marks saying it was an input. The box's own row is inside the box, under the
+message: who would answer it on the left -- a conversation has nowhere else to say it;
+the opening screen says it above the box -- and the figures pushed against the right
+end, the context gauge, the rate and the round's clock. A pane too narrow for all of it
+gives up the clock, then the rate, then the gauge, then the name.
 
-The status row: the context gauge and the rate on the left, the state or a fold, the
-permission mode and the one key that is live on the right.
+The status row: the scanner and the key that is live at its left, then the peer or
+fold note, the permission mode and two keys (`enter send  /help keys` with nothing
+running, `ctrl+o calls` beside it while a round is in flight). The conversation's
+figures are not here: they are on the box's own row, beside the line they describe.
+
+The scanner is opencode's, not a dot lapping a track: eight cells, `■` where it is
+lit on a wire of `·` where it is not, six of them lit at most, a head that sweeps
+right with five cells of trail behind it, drains where it stopped, comes back from
+the right and rests at the left before it goes again. One step every `DOT_STEP_MS`
+(40ms, the frame the loop draws at while a round runs), fifty-four steps to a cycle,
+which is 2.16 seconds. `scan.rs` is the motion and this is what it means: grey while
+the model thinks, blue while a tool has it, red on a round that failed, and the text
+tone with nothing running, which is what a finished round settles to.
 
 A menu draws over the tail of the conversation, above the field, as plain rows: no
 border, no title on an edge, no footer of keys. The selected row is the one with a
@@ -104,8 +132,9 @@ The opening screen is the mark: the word in opencode's own font
 grids), with `cua` in the muted tones and `code` in the bright ones and every letter
 cut in the font's two bands - rows above `MARK_BAND` in the half's bright tone, the
 rest one rung down. `MARK_GLYPHS` holds the letter grids, not shapes drawn to match
-them. Then who would answer, then the box, and the floor line pinned to the bottom
-edge. It is centred as one block and it is the only screen that shows the build.
+them. Then who would answer, then the box -- its own row inside it carries the figures
+-- and the floor line pinned to the bottom edge. It is centred as one block and it is
+the one screen with no header: its floor carries the build and the directory instead.
 Under `MARK_MIN` columns the art is replaced by the word.
 
 ## Glyphs, and the font
@@ -122,8 +151,9 @@ Allowed, and nothing else:
 - `U+2500..U+257F`, box drawing. Every cell of these is on the grid by
   definition, and it is the only family whose weight can be chosen per glyph.
 - `U+2580..U+259F`, block elements, for a bar that is a bar.
-- `·` and `…`, which every mono text font carries.
-- The marks the rows are drawn with: `●` a thought or an answer, `❯` the prompt,
+- `·`, `•` and `…`, which every mono text font carries.
+- The marks the rows are drawn with: `●` a thought or an answer, `❯` a message you
+  sent, `│` the box's own line, `■` the scanner's lit cells on the status row's wire,
   `▸` an opened fold, `└` a result under its head, `✓`/`✗` a passing and a failing
   call, `☑`/`☐` a plan's two states, `◆` a fold in progress, `○` an idle peer, `↑↓`
   in a picker's keys, `×` a removed attachment.
@@ -142,13 +172,15 @@ is one.
 | File | Owns | Budget |
 | --- | --- | --- |
 | `view.rs` | `ink`, `PAGE`, the marks, `pieces`, `step`, `draw`, the rows | 1800 |
+| `scan.rs` | the status row's scanner: its cells, its step, and the walk round the wire | 160 |
 | `main.rs` | the window, `App`, the keys dispatch, the loop | 1500 |
-| `menu.rs` | the `/`, `$`, `@` menus and the palette | 900 |
+| `menu.rs` | the `/`, `$`, `@` menus and every list they open | 900 |
 | `keys.rs` | the action table and `keys.json` | 800 |
 
 A frontend owns no conversation logic and the shared half draws nothing. `ink` is
-the only code that names a colour, `BODY_LEAD` and `LEAD` the only code that names
-an indent, and a second copy of either is the bug.
+the only code that names a colour -- `scan.rs` takes its tones from `ink` and names
+none -- `BODY_LEAD` and `LEAD` the only code that names an indent, and a second copy
+of either is the bug.
 
 ## How a change lands
 
@@ -178,12 +210,13 @@ an indent, and a second copy of either is the bug.
 
 ## The debt
 
-Measured on 2026-10-30.
+Measured on 2026-10-31.
 
 | Thing | Now | Rule |
 | --- | --- | --- |
-| `main.rs` | 6358 | 1500, and a commit touching it comes out net negative |
-| `view.rs` | 4867 | 1800, same |
+| `main.rs` | 6383 | 1500, and a commit touching it comes out net negative |
+| `view.rs` | 4859 | 1800, same |
+| `scan.rs` | 149 | 160 |
 | `App` fields | 42 | a new field names the one it replaces |
 | `impl App` | 2437 lines, 91 methods | it draws, it keys, it feeds and it performs. Split |
 | `draw` | 250 lines | 80. It is four functions: frame, box, menu, panel |

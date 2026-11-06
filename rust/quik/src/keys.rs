@@ -58,7 +58,6 @@ pub enum Action {
     PageDown,
     Stop,
     Trigger,
-    Palette,
     Fold,
     Calls,
     Background,
@@ -258,13 +257,6 @@ const TABLE: &[(Action, &str, &str, &[&str], &str)] = &[
         "calls",
         "the calls, to open one in full",
         &["ctrl+o"],
-        "the app",
-    ),
-    (
-        Action::Palette,
-        "palette",
-        "the actions, to run one from",
-        &["ctrl+p"],
         "the app",
     ),
     (
