@@ -215,7 +215,9 @@ def run(spec: AgentSpec, prompt: str, ctx=None, images: list = None) -> dict:
                                        allow, extra, box, provider, 1)
             content, rounds = more or content, rounds + r2
     except Exception as e:
-        return {"error": str(e), "stopped": "error", "rounds": 0}
+        # Named: two agents can fail with the same provider error, and the caller
+        # has to be able to tell which one it paid for.
+        return {"error": f"agent {spec.name}: {e}", "stopped": "error", "rounds": 0}
     finally:
         mcp_client.reset_session_scope(scope_token)
         _depth.reset(token)

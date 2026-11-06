@@ -15,7 +15,7 @@ run last, and nothing said so.
 """
 import os, time
 
-from handler import config, context, environment, gate, peers, usage, version
+from handler import config, context, environment, faults, gate, peers, usage, version
 from handler.agent import compact, inline, stepname
 from handler.agent.main import generate, _compact_now
 from tools.loader import registry
@@ -56,8 +56,10 @@ def terminal_ctx(data) -> Ctx:
         try:
             from tools.screenshot._capture_windows import active_app_name
             info["frontmost_app"] = active_app_name()
-        except Exception:
-            pass
+        except Exception as e:
+            # Said, not swallowed: without a name here, screenshot cannot park this
+            # worker's own window and app_open cannot find it when the two swap.
+            faults.note("frontmost_app", e, "app_open and screenshot cannot place this worker's window")
     return Ctx(info)
 
 
@@ -619,23 +621,32 @@ class Worker:
         memory.set_cwd(self.ctx.get("cwd") or "")
         memory.set_apps([self.ctx.get("frontmost_app") or ""])
         # Notes ride beside the user's message, not as a second one: two in a row is a
-        # 400 on anthropic. None of these may fail a turn.
+        # 400 on anthropic. None of these may fail a turn -- but one that did is said
+        # out loud, in the transcript and on stderr: a turn that goes without the
+        # project's own notes is a different answer, not the same one quietly.
         try:
             notes = recall.block(text, sid=self.sess.id, path=self.ctx.get("cwd") or "",
                                  apps=[self.ctx.get("frontmost_app") or ""])
-        except Exception:
+        except Exception as e:
             notes = []
+            yield "token", {"state": "notice", "status": "running",
+                            "token": faults.note("recall", e, "this turn carries no recalled memories")}
         # Project documentation: names and sizes only, at most twice in a conversation.
         try:
             docs = instructions.docs_block(text, sid=self.sess.id, path=self.ctx.get("cwd") or "",
                                            first=opening)
-        except Exception:
+        except Exception as e:
             docs = ""
+            yield "token", {"state": "notice", "status": "running",
+                            "token": faults.note("the docs block", e,
+                                                 "the model is not being pointed at this repo's docs")}
         # A message that opens with /<skill> loads that skill's instructions.
         try:
             skill_block = skills.invocation(text)
-        except Exception:
+        except Exception as e:
             skill_block = ""
+            yield "token", {"state": "notice", "status": "running",
+                            "token": faults.note("the skill block", e, "the skill this message names did not load")}
         # A peer message that started this turn: recorded as a peer's words rather than
         # as the person's, and drawn with the buddy mark. One place for both paths,
         # because a wake turn takes the same door a typed message does.
@@ -884,7 +895,10 @@ class Worker:
             # whether `end_run` happens, or a client waits on a turn that is over.
             if gen is not None:
                 try: gen.close()
-                except Exception: pass
+                except Exception as e:
+                    # Its own guard so the cleanup below still runs; said, because a
+                    # provider socket left open is a leak nobody would ever see.
+                    faults.note("closing the turn's generator", e, "the run is still closed below")
             # generate() puts its own outbox here; left behind, the next subagent asked
             # to report progress would append into a list nobody reads again.
             self.ctx.pop("emit", None)

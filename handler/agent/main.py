@@ -2,6 +2,7 @@ import os, re, socket, ssl, time
 from tools.loader import dispatch, registry, visible, wire_result
 from tools._parser.ToProvider import to_provider
 from handler.agent import compact, effort, images, interrupt, providers
+from handler import faults
 from handler.agent.background import JOBS
 from handler import peers
 
@@ -134,11 +135,15 @@ def _wait(secs: float, stop) -> bool:
 def _preview(tool, args: dict, ctx) -> dict | None:
     """What the call about to be asked about would do, when the tool can say.
     Nothing that goes wrong here may matter: a preview that raises would turn a
-    question into a failed call."""
+    question into a failed call. It is said on stderr rather than kept, so the
+    question that arrives without a preview has an explanation on the log."""
     fn = getattr(tool, "preview", None)
     if not fn: return None
     try: return fn(args, ctx)
-    except Exception: return None
+    except Exception as e:
+        faults.note(f"the preview for {tool.name if hasattr(tool, 'name') else 'this call'}", e,
+                    "the question is asked without one")
+        return None
 
 def _needs_ask(tool, args: dict, ctx) -> bool:
     """Whether this call has to be put to the user, as opposed to this tool. require_permissions is
@@ -149,7 +154,10 @@ def _needs_ask(tool, args: dict, ctx) -> bool:
     fn = getattr(tool, "safe", None)
     if not fn: return True
     try: return not fn(args, ctx)
-    except Exception: return True
+    except Exception as e:
+        faults.note(f"the safety check in {getattr(tool, 'name', 'a tool')}", e,
+                    "the call is put to the user instead")
+        return True
 
 def _tail(messages, limit: int = 6) -> str:
     """The recent turns, rendered for a permission gate. Text is a string on some
@@ -237,11 +245,8 @@ def _compact_now(messages: list, used: int, limit: int, ctx=None) -> str:
     # that quietly did nothing because of that would look like a fold that failed.
     sess = ctx.get("session") if hasattr(ctx, "get") else None
     if sess is None:
-        try:
-            from handler.session import naming
-            sess = naming.live()
-        except Exception:
-            pass
+        from integrations.memory import naming
+        sess = naming.live()
     if sess is None: return ""
     records = sess.records()
     steps = c.plan(records, used=used, limit=limit)
@@ -292,8 +297,10 @@ def _todo_note(ctx) -> str:
     try:
         from tools.todo import state
         s = state.snapshot(ctx)
-    except Exception:
-        return ""
+    except Exception as e:
+        # Said in the round rather than kept: a plan the loop cannot read is why the
+        # model never hears about its own todo list again.
+        return faults.note("todo", e, "the plan is not being read or nudged this round")
     if not s: return ""
     # The head is a row, so it is short enough to draw whole: the counts and the step
     # being worked on, cut at a word. The block below says it in full for the model;
@@ -373,7 +380,10 @@ def _skill_note(typed: list[dict]) -> str:
     blocks = []
     for m in typed:
         try: block = skills.invocation(m.get("text") or "")
-        except Exception: block = ""
+        except Exception as e:
+            # In the message, where the skill would have been: the model is told the
+            # block it was promised is missing rather than reading a turn without it.
+            block = faults.note("the skill this message names", e, "it was not loaded")
         if block: blocks.append(block)
     return "\n\n".join(blocks)
 
@@ -514,7 +524,7 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
         folds = 0
         while True:
             state, opened = interrupt.run(lambda: _opened(p, provider, model, messages, tools, system, params),
-                                          stop=stop)
+                                          stop=stop, label=f"the request to {provider}")
             if state != "done":
                 # Nothing was produced, so nothing to keep and nothing to tell the
                 # model about. The delete is a no-op here and stands as the guarantee.
@@ -627,7 +637,10 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
             if not _transient(e): raise
             lost = e
             try: stream.close()
-            except Exception: pass
+            except Exception as closing:
+                # The socket was already dying; the first error is the one that says
+                # why, and this one would otherwise replace it with a shutdown's.
+                faults.note("closing a stream that dropped", closing, f"the drop itself was: {e}")
         finally:
             # Closed rather than left to the collector: the generator's cleanup is what shuts
             # the socket and reaps the producer thread, and an exception on the way out must
@@ -745,7 +758,8 @@ def generate(API_KEY: str = None, ctx=None, messages: list[dict] = None, setting
                 yield {"type": "background", "job": job.brief()}
                 result = _bg_result(job)
             else:
-                state, value = interrupt.run(fn, stop=stop, detach=detach, token=token)
+                state, value = interrupt.run(fn, stop=stop, detach=detach, token=token,
+                                             label=f"the {call.name} call")
                 if state == "done":
                     result = value
                 elif state == "cancelled":
