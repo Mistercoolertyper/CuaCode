@@ -249,7 +249,13 @@ class Worker:
         tool that could wipe something would have been waved through by a gate
         written to catch exactly that.
         """
-        why = tool.irreversible(args) if tool is not None and tool.irreversible else ""
+        try:
+            why = tool.irreversible(args) if tool is not None and tool.irreversible else ""
+        except Exception as e:
+            # A tool that cannot answer the question is asked about. The other
+            # direction is a gate that fails open exactly when the tool is confused
+            # about what it is about to do.
+            why = f"the tool could not say ({e})"
         if not why: return True
         return self.ask_permission(tool, name, args, preview, note or f"bypass keeps these: {why}")
 
@@ -453,6 +459,9 @@ class Worker:
         """A fresh conversation, and everything that has to follow the swap."""
         recall.forget(self.sess.id)
         instructions.forget(self.sess.id)
+        # Nothing from the last conversation is read in this one. load_session gets
+        # the same treatment from gate.restore, which clears before it seeds.
+        gate.reset()
         self.last_turn.clear()
         # Committed before it goes: a backgrounded subagent holds this session's bound
         # add_spend, and whatever it has billed so far has nowhere else to land.

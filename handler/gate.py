@@ -85,12 +85,28 @@ def snapshot() -> list[dict]:
     return out
 
 
+def reset() -> None:
+    """Forget every read. Called when the conversation changes.
+
+    The state is one process's, not one session's, and it used to survive a swap:
+    a file read in the conversation you left gated a write in the one you opened,
+    which is the exact case the gate exists for -- a fresh conversation has never
+    seen that content, and an edit through it would overwrite what nobody read.
+    """
+    read_files.clear()
+    seen.clear()
+
+
 def restore(entries: list[dict]) -> None:
     """Re-seed the gate from a saved session, minus anything that moved since.
+
+    `reset` first: this is the whole state of the conversation being opened, not
+    an addition to whatever the last one left behind.
 
     A stale entry is the dangerous direction: it would let an edit through on
     content nobody has seen.
     """
+    reset()
     read_files.update(e["path"] for e in entries if isinstance(e, dict) and same_as_recorded(e))
 
 

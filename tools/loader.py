@@ -74,10 +74,11 @@ def brief_body(*keys: str):
         r = result.get("result")
         if not isinstance(r, dict): return result
         row = {k: v for k, v in r.items() if k not in drop}
-        body = r.get("output")
-        # Measured, whichever of the keys carried it: one number says the same
-        # thing about a page, a skill body and a transcript.
-        if isinstance(r.get("instructions"), str): row["chars"] = len(r["instructions"])
+        # Measured off whichever key carried it: one number says the same thing about
+        # a page, a skill body and a transcript. Reading only `output` and
+        # `instructions` meant a tool that named its body something else had the body
+        # dropped from the row with nothing in its place.
+        body = next((r[k] for k in drop if isinstance(r.get(k), str)), None)
         if isinstance(body, str): row["chars"] = len(body)
         elif isinstance(body, dict): row["fields"] = sorted(body)[:8]
         if isinstance(r.get("log"), list): row["steps"] = len(r["log"])

@@ -1,4 +1,4 @@
-import json, os
+import copy, json, os
 from pathlib import Path
 
 from handler.agent import effort, providers
@@ -102,11 +102,16 @@ def load() -> dict:
     stat, which is the guarantee the callers already relied on ("config is re-read
     every turn: the user edits it by hand"); `save` empties the cache so our own
     writes never wait on a filesystem timestamp's resolution.
+
+    The cached dict is never handed out: this returned the parse of a fresh file
+    every call before, so a caller that mutated what it got lost that mutation on
+    the next read. Returning the cache itself would make the same mutation stick in
+    the memory of the whole process, and `entry()` hands out a sub-dict of it.
     """
     p = path()
     try: stamp = (str(p), p.stat().st_mtime_ns, p.stat().st_size)
     except OSError: stamp = None
-    if stamp is not None and _cache.get("stamp") == stamp: return _cache["cfg"]
+    if stamp is not None and _cache.get("stamp") == stamp: return copy.deepcopy(_cache["cfg"])
     cfg = store.read_json(p)
     if not cfg:
         full = save(blank())
@@ -114,9 +119,13 @@ def load() -> dict:
         full, added = _fill({**DEFAULTS, **cfg}, blank())
         full, respelled = _spelled(full)
         full = save(full) if added or respelled else full
-    try: _cache.update(stamp=(str(p), p.stat().st_mtime_ns, p.stat().st_size), cfg=full)
-    except OSError: pass
-    return full
+    # Stamped with the value taken *before* the read, never a second stat: another
+    # thread saving in between would otherwise have its new stamp attached to the
+    # content we just read, and the cache would serve the old config until the file
+    # was touched again. Under the old stamp the next caller re-reads, which is the
+    # right answer either way.
+    if stamp is not None: _cache.update(stamp=stamp, cfg=full)
+    return copy.deepcopy(full)
 
 def save(cfg: dict) -> dict:
     _cache.clear()

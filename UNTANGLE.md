@@ -455,3 +455,43 @@ defects. Three were inherited from the old `main.py` and one was mine:
 Plus the smaller one the reviewer noted: the idle answer carries a `result`
 (`stop: "idle"`), so a client driving `turn()` directly has something to read,
 the same as the unknown-tool refusal.
+
+### Six more, from two more reads
+
+A second pass over the tool loader, the file tool and the shell safety answer, and
+a third over the catalog, the five loaders and the config cache. Every one of these
+was inherited except the last, and two are the kind that only show up once
+something else has already gone wrong.
+
+- **The gate outlived its conversation.** `read_files` and `seen` are
+  process-wide, and `new_session()` swapped the session without touching them, so
+  a file read in the conversation you left let a write through in the one you
+  opened -- a fresh conversation that never saw that content, which is the case the
+  gate exists for. `gate.reset()` is new and both session swaps call it;
+  `gate.restore` clears before it seeds.
+- **`rm -rf build 2>/dev/null` walked through bypass mode.** `destructive()` parsed
+  each line with `_segments`, which returns None for punctuation it does not model,
+  and the loop read `(_segments(line) or [])` as "nothing here". A redirect
+  anywhere on the line disarmed it. An unreadable line that names `rm`, `dd`,
+  `mkfs*` or `diskutil` is a reason to ask now, and harmless redirects still pass.
+  The same hole was there when the check was called from a tool name; it was the
+  replacement that made it matter.
+- **`read` reported a cut line as a whole file.** A one-line file bigger than the
+  read budget came back `truncated: false`, so the file was marked read and the
+  next `write` destroyed the rest of the line. It says `truncated: true` now.
+- **`bypass_gate` called `Tool.irreversible` bare.** A hook that raised took the
+  turn down, in the one mode where no prompt catches anything. A tool that cannot
+  answer is asked about.
+- **`brief_body(*keys)` measured only `output` and `instructions`.** Every current
+  caller uses one of those two, so nothing was broken, and the docstring promised a
+  tool could name its own body -- which would have dropped the body from the row
+  with nothing in its place. It measures whichever key it dropped.
+- **The config cache could pin a stale file** (mine). The stamp was taken a second
+  time *after* the read, so a `save()` from another thread in between cached the
+  old content under the new stamp and served it until the file was touched again.
+  It is stamped with the value taken before the read now, and `load()` returns a
+  copy: the cache made a caller's mutation stick where a fresh parse had thrown it
+  away.
+- Also: the docs pointer compared `abspath` against the gate's `resolve`d paths, so
+  on macOS (`/tmp` -> `/private/tmp`) an already-read README was pointed at again on
+  the next turn. Both sides resolve.

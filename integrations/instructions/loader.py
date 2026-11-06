@@ -101,7 +101,10 @@ def _read_files() -> set:
     the reload, is never pointed at again.
     """
     from handler import gate
-    return {os.path.abspath(p) for p in gate.read_files}
+    # Resolved, the spelling the file tool records: `abspath` leaves a symlinked
+    # component alone, so on macOS (/tmp -> /private/tmp) a doc already read was
+    # pointed at again on the next turn.
+    return {os.path.realpath(p) for p in gate.read_files}
 
 
 def _size(n: int) -> str:
@@ -125,7 +128,7 @@ def docs_in(path: str) -> list:
         try: size = e.stat().st_size
         except OSError: continue
         if not size: continue
-        out.append({"name": e.name, "path": os.path.abspath(e.path), "size": size})
+        out.append({"name": e.name, "path": os.path.realpath(e.path), "size": size})
     return out
 
 
