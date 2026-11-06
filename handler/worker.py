@@ -557,9 +557,12 @@ class Worker:
             known = set(registry())
             missing = [t for t in allow if t not in known]
             if missing:
-                yield "token", {"state": "error", "status": "error",
-                                "token": f"unknown tool(s): {', '.join(missing)}",
-                                "result": outcome("error")}
+                said = f"unknown tool(s): {', '.join(missing)}"
+                # In `result.text` as well as in the event: a program reads the
+                # result, and an empty one beside a reason it never saw is the exact
+                # shape of a bug report that says "it returned nothing".
+                yield "token", {"state": "error", "status": "error", "token": said,
+                                "result": {**outcome("error"), "text": said}}
                 return
         # A model that cannot see is told, not sent an image it will 400 on, and the
         # attachment is dropped from the record, or it returns in the history forever.
