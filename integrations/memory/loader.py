@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tools.loader import parse_frontmatter
-from handler import catalog
+from handler import catalog, faults
 from handler.session import store
 
 # A memory that does not fit is a document: write the document and point at it. A
@@ -97,7 +97,11 @@ class Memory:
 
 def _read(p: Path) -> Memory | None:
     try: meta, body = parse_frontmatter(p.read_text())
-    except Exception: return None
+    except Exception as e:
+        # A memory that cannot be read is not a memory that does not exist:
+        # the index would otherwise count one fact fewer and call that the truth.
+        faults.note(f"the memory {p.name}", e, "it is left out of the index")
+        return None
     if not isinstance(meta, dict): return None
     name = str(meta.get("name") or p.stem)
     if not NAME_RE.match(name): return None
@@ -220,7 +224,9 @@ def touch(name: str):
         meta["uses"] = int(meta.get("uses") or 0) + 1
         meta["used"] = store.now_iso()
         m.path.write_text(_render(meta, body))
-    except Exception: pass
+    except Exception as e:
+        # Said, and only said: the read that earned the count still happened.
+        faults.note(f"the use count on {name}", e, "the memory is read anyway")
 
 def search(query: str, limit: int = 8) -> list[dict]:
     """Substring hunt over descriptions and bodies, out of scope included.

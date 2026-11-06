@@ -5,6 +5,7 @@ That call runs on its own thread and never touches disk or the wire, handing its
 """
 import queue, re, threading
 
+from handler import faults
 from handler.session import store
 from integrations.memory.recall import tokens
 
@@ -112,10 +113,11 @@ def _work(sid: str, opening: str, current: str, provider: str, model: str):
             got = r.get("output") or {}
             out["title"] = clean(str(got.get("title") or ""))
             out["confident"] = bool(got.get("confident")) and bool(out["title"])
-    except Exception:
-        # A name is a nicety: a failure is not worth surfacing to the user and should
-        # not reach the turn that follows.
-        pass
+    except Exception as e:
+        # A name is a nicety: a failure is not worth failing a turn over and reaching
+        # the turn that follows. It is worth saying, which is what stderr is for --
+        # otherwise a conversation never named looks like one not due a name yet.
+        faults.note(f"naming {sid}", e, "it keeps the label it has")
     finally:
         with _lock: _running.discard(sid)
         _done.put(out)

@@ -5,6 +5,8 @@ Nothing here asks the provider, so /context costs no tokens.
 """
 import json
 
+from handler import faults
+
 # English prose lands near 4 characters per token, JSON and code a little under.
 # The rate barely matters once the parts are scaled to a measured total.
 CHARS_PER_TOKEN = 3.8
@@ -134,7 +136,12 @@ def _count(fn) -> int:
     """A count from an integration, or zero: a missing number is a missing row, not an error
     worth failing the readout over."""
     try: return int(fn())
-    except Exception: return 0
+    except Exception as e:
+        # The row is missing from the readout, which is honest; why it is missing
+        # is the thing a person cannot see anywhere else.
+        faults.note(f"a {getattr(fn, '__name__', 'count')} for /context", e,
+                    "its row is missing from the readout")
+        return 0
 
 
 def _counts(cwd: str, app: str) -> dict:

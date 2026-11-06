@@ -137,11 +137,13 @@ def run(args: dict, ctx) -> dict:
     try:
         text, ctype, final = _fetch(url)
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"fetching {url}: {e}"}
 
     if ctype.startswith("text/html") or ctype.startswith("application/xhtml") or not ctype:
         try: body = _markdown(text, final)
-        except Exception as e: return {"error": str(e)}
+        except Exception as e:
+            return {"error": f"turning {final or url} into markdown: {e} - "
+                              "ask for it with mode text to read the page raw"}
     else:
         body = text                                  # already plain text, json or xml
 

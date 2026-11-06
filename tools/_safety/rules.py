@@ -16,14 +16,18 @@ next tool call rather than the next launch; it is one small JSON read on a path
 that already spawns a process.
 """
 
+from handler import faults
+
 def rules() -> dict:
     try:
         from handler import config
         return (config.load().get("permissions") or {})
-    except Exception:
+    except Exception as e:
         # A tool asked whether a call is safe must never fail loudly: the caller
         # reads a False as "ask the user", which is the right answer when the rules
-        # themselves cannot be read.
+        # themselves cannot be read. Said, so the extra questions have a reason.
+        faults.note("the permission rules in config.json", e,
+                    "every call they would allow is being asked about instead")
         return {}
 
 def extra(key: str) -> set:

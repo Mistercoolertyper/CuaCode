@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tools.loader import parse_frontmatter
-from handler import catalog
+from handler import catalog, faults
 
 MAX_BODY = 20_000        # a skill that does not fit is a skill that should link out
 
@@ -83,7 +83,11 @@ def load_skills(scope: str = None) -> dict:
     out = {}
     for folder in catalog.layered_dirs("skills"):   # user last: it overwrites
         try: s = _skill(folder)
-        except Exception: continue        # one broken skill must not hide the rest
+        except Exception as e:            # one broken skill must not hide the rest
+            # ...and must not vanish either: a skill left out in silence is a
+            # smaller toolbox the model is offered as if it were the whole one.
+            faults.note(f"the skill {folder.name}", e, "it is left out of the list")
+            continue
         if not s: continue
         out[s.name] = s
     for name in always_names() & set(out):

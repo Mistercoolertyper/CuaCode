@@ -15,6 +15,7 @@ network, no embedding, because anything taking a second here is felt on every tu
 import os, re, time
 from datetime import datetime, timezone
 
+from handler import faults
 from handler.session import store
 from integrations.memory import loader
 
@@ -74,7 +75,12 @@ def _score(q: set, doc: list[str], w: dict) -> float:
 
 def _age_days(iso: str) -> float:
     try: return max((datetime.now(timezone.utc) - datetime.fromisoformat(iso)).total_seconds(), 0) / 86400
-    except Exception: return 999.0
+    except Exception as e:
+        # Named once per value: a date nothing can parse used to sort last in
+        # silence, which reads as an old memory rather than an unreadable one.
+        faults.note(f"the date {iso!r} on a memory", e,
+                    "it sorts as the oldest thing there is")
+        return 999.0
 
 def _ago(iso: str) -> str:
     d = _age_days(iso)
@@ -168,7 +174,8 @@ def block(text: str, sid: str = "", path: str = None, apps: list = None) -> list
         for s, m in _memory_hits(q, path, apps):
             if len(mem) >= MAX_MEMORIES: break
             if _fresh(sid, f"m:{m.name}"): mem.append(f"- `{m.name}` [{m.scope}] - {m.description}")
-    except Exception: pass
+    except Exception as e:
+        faults.note("the memory half of recall", e, "this message gets no memory pointers")
     try:
         for s, meta in _session_hits(q, path, sid, deictic):
             if len(ses) >= MAX_SESSIONS: break
@@ -178,7 +185,8 @@ def block(text: str, sid: str = "", path: str = None, apps: list = None) -> list
                                          os.path.abspath(meta["cwd"]) == os.path.abspath(path)) else ""
             tail = ", ".join(x for x in (f"{meta.get('turns', 0)} turns", _ago(meta.get("updated", "")), where) if x)
             ses.append(f"- `{meta['id']}` \"{title}\" - {tail}")
-    except Exception: pass
+    except Exception as e:
+        faults.note("the session half of recall", e, "this message gets no earlier-session pointers")
 
     # The first paragraph is for the human: frontends draw a notice's opening paragraph
     # and drop the rest, which is addressed to the model.

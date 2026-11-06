@@ -31,7 +31,9 @@ def run(args: dict, ctx) -> dict:
     # thing that makes a relative path mean what the user typed, and the session
     # directory undo keeps its snapshots in.
     try: path = resolve(args, ctx)
-    except ValueError as e: return {"error": str(e)}
+    except ValueError as e:
+        return {"error": f"{args.get('action') or 'file'}: {e} - pass a path, relative "
+                          "to the conversation's directory or absolute"}
     return handler(path, args, ctx)
 
 # The actions that only look. Everything else -- write, edit, delete, move,

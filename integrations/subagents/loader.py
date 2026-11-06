@@ -12,7 +12,7 @@ a bundled agent can be overridden without editing the repo.
 from pathlib import Path
 
 from tools.loader import parse_frontmatter
-from handler import catalog
+from handler import catalog, faults
 from handler.agent.subagent import AgentSpec
 
 _cache = None
@@ -54,7 +54,11 @@ def load_agents(refresh: bool = False) -> dict:
     out = {}
     for f in catalog.layered_files("subagents", "*.md"):   # user last: it overwrites
         try: spec = _spec(f)
-        except Exception: continue        # one malformed file must not hide the rest
+        except Exception as e:            # one malformed file must not hide the rest
+            # Named, so a subagent the user wrote and cannot use is not simply
+            # an agent that was never offered.
+            faults.note(f"the subagent {f.name}", e, "it is left out of the list")
+            continue
         out[spec.name] = spec
     _cache = out
     return out

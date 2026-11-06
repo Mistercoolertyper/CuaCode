@@ -17,7 +17,7 @@ tokens on providers that bill them without itemising them, marked wherever shown
 import json, threading
 from collections import defaultdict
 
-from handler import context
+from handler import context, faults
 from handler.session import store
 
 # Side rounds, waiting for the loop to take them. A subagent bills on its own thread and
@@ -78,7 +78,11 @@ def absorb(session) -> int:
         queued, _queued[:] = list(_queued), []
     for cost in queued:
         try: session.add_spend(cost)
-        except Exception: pass
+        except Exception as e:
+            # A round nobody filed is a usage report that under-counts, which is
+            # the one way this file can lie.
+            faults.note(f"filing {cost.get('in', 0)} in / {cost.get('out', 0)} out", e,
+                        "it is missing from the usage report")
     return len(queued)
 
 

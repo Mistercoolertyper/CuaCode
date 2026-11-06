@@ -1,6 +1,7 @@
 import copy, json, os
 from pathlib import Path
 
+from handler import faults
 from handler.agent import effort, providers
 from handler.session import store
 
@@ -474,8 +475,12 @@ def context_window(name: str, model: str, cfg: dict = None) -> int:
         p = providers.get(name)
         p.setup(api_key(name, cfg))
         found = p.context_window(model)
-    except Exception:
-        found = 0
+    except Exception as e:
+        # Not cached, and said: caching a failure would hide the window for the
+        # rest of the process, and a provider that answers later deserves to.
+        faults.note(f"the context window of {name}/{model}", e,
+                    "/context reports no window until a later turn asks again")
+        return 0
     _WINDOWS[key] = found if isinstance(found, int) and found > 0 else 0
     return _WINDOWS[key]
 
