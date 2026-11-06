@@ -189,7 +189,8 @@ def run(spec: AgentSpec, prompt: str, ctx=None, images: list = None) -> dict:
         return {"error": "subagent nesting limit reached", "stopped": "error", "rounds": 0}
 
     settings, key, provider = _settings(spec, ctx)
-    allow = [t for t in (spec.tools or []) if not (d >= MAX_DEPTH and t in SPAWNERS)]
+    allow = (None if spec.tools is None
+             else [t for t in spec.tools if not (d >= MAX_DEPTH and t in SPAWNERS)])
     box = {}
     extra = {SUBMIT: _submit_tool(spec.schema, box)} if spec.schema else None
     system = (spec.system or "") + (APPENDIX if spec.schema else "")

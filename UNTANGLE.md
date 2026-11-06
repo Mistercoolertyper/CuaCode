@@ -221,4 +221,32 @@ purpose.
 
 ## Part 2 — the fixes
 
-(to be filled as each lands)
+### One convention for every file-backed integration
+
+`handler/catalog.py` is new: `bundled(kind)`, `user_dir(kind)`, `draft(path)`,
+`layered_files(kind, pattern)`, `layered_dirs(kind)`, `unknown(kind, name, have)`.
+The five loaders call it and keep only their own parsing.
+
+- home+subdir+mkdir: seven copies -> `catalog.user_dir`
+  - `integrations/skills/loader.py:55-58`, `integrations/subagents/loader.py:21-24`,
+    `integrations/mcp/loader.py:19-22`, `integrations/memory/loader.py:45-48` and
+    `:50-53`, `integrations/mcp/client.py:57-61`, `handler/agent/workflow.py:37-40`
+- the bundled directory, two spellings -> `catalog.bundled`
+  - `Path(__file__).parent` in three loaders, `parents[2]/"integrations"` in the
+    workflow one; they agreed by luck of layout
+- bundled-then-user, four merge loops -> `catalog.layered_files` / `layered_dirs`
+- the skip rule, four spellings -> `catalog.draft`, and subagents gain the rule it
+  never had (a `_draft.md` there used to load as an agent and be offered to the model)
+- `unknown X (have ...)`, four copies -> `catalog.unknown`
+
+Deleted, because nothing could ever change them:
+
+- `skills.load_skills(refresh=True)`, a parameter never read in the body
+- `subagents._spec`'s `tools=tools if tools is not None or "tools" not in meta else None`,
+  a no-op whose comment claimed the opposite of what it did
+- `memory.apps()`, no caller
+- `mcp.load_servers(include_disabled)`, no caller
+
+Bug fixed on the way: `subagent.run` turned `tools=None` into `allow=[]`, so an
+agent file saying `tools: "*"` got **no** tools, and the dataclass's own "None
+means unrestricted" was unreachable. `run()` now passes `None` through.

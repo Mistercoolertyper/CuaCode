@@ -16,11 +16,9 @@ from pathlib import Path
 from typing import Callable
 import threading
 
+from handler import catalog
 from handler.agent import flow
 from handler.agent.subagent import AgentSpec, run as run_agent
-from handler.session import store
-
-_BUNDLED = Path(__file__).resolve().parents[2] / "integrations" / "workflows"
 
 # A runaway loop in a workflow spends real money, and the loop that does it is
 # usually a while() whose exit condition never became true. This is the backstop,
@@ -35,9 +33,7 @@ class Workflow:
     fn: Callable
 
 def user_dir() -> Path:
-    d = store.home() / "workflows"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    return catalog.user_dir("workflows")
 
 def _describe(ns: dict, path: Path) -> str:
     doc = (ns.get("__doc__") or "").strip()
@@ -122,12 +118,9 @@ def _scan() -> dict:
     """{name: path} for every installed workflow. User directory second, so a
     name written there shadows a bundled one."""
     out = {}
-    for d in (_BUNDLED, user_dir()):
-        if not d.exists(): continue
-        for f in sorted(d.glob("*.py")):
-            if f.name.startswith("_"): continue
-            meta = _meta(f)
-            if meta: out[meta[0]] = f
+    for f in catalog.layered_files("workflows", "*.py"):
+        meta = _meta(f)
+        if meta: out[meta[0]] = f
     return out
 
 def listing() -> list:
@@ -144,9 +137,10 @@ def run(name: str, args=None, ctx=None) -> dict:
     """
     sink, counter = [], {"n": 0}
     env = _env(ctx, sink, counter)
-    path = _scan().get(name)
+    installed = _scan()
+    path = installed.get(name)
     if path is None:
-        return {"error": f"unknown workflow: {name!r} (have {sorted(_scan()) or 'none installed'})"}
+        return {"error": catalog.unknown("workflow", name, installed).args[0]}
     try: found = _load(path, env)
     except Exception as e:
         return {"error": f"{path.name} failed to load: {e}"}

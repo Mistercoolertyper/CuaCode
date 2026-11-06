@@ -10,16 +10,17 @@ import platform
 import sys
 from pathlib import Path
 
-from handler.session import store
+from handler import catalog
 
-BUNDLED = Path(__file__).parent / "servers.json"
 FILENAME = "servers.json"
 
 
+def bundled_file() -> Path:
+    return catalog.bundled("mcp") / FILENAME
+
+
 def user_dir() -> Path:
-    d = store.home() / "mcp"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    return catalog.user_dir("mcp")
 
 
 def user_config() -> Path:
@@ -42,28 +43,25 @@ def _read(path: Path) -> dict:
     return {k: v for k, v in servers.items() if isinstance(v, dict)}
 
 
-def load_servers(include_disabled: bool = False) -> dict[str, dict]:
+def load_servers() -> dict[str, dict]:
     found: dict[str, dict] = {}
-    for path in (BUNDLED, user_config()):                       # user second: it overwrites
+    for path in (bundled_file(), user_config()):                # user second: it overwrites
         found.update(_read(path))
 
     out = {}
     for name, cfg in found.items():
-        if not include_disabled:
-            if cfg.get("enabled") is False:
-                continue
-            # A macOS-only server on Linux is not an error to report later, it
-            # is a server that should never have been offered.
-            wanted = cfg.get("platform")
-            if wanted and platform.system().lower() != str(wanted).lower():
-                continue
+        if cfg.get("enabled") is False:
+            continue
+        # A macOS-only server on Linux is not an error to report later, it
+        # is a server that should never have been offered.
+        wanted = cfg.get("platform")
+        if wanted and platform.system().lower() != str(wanted).lower():
+            continue
         out[name] = cfg
     return dict(sorted(out.items()))
 
 
 def get(name: str) -> dict:
     servers = load_servers()
-    if name not in servers:
-        known = ", ".join(servers) or "none registered"
-        raise ValueError(f"unknown MCP server: {name!r} (have {known})")
+    if name not in servers: raise catalog.unknown("MCP server", name, servers)
     return servers[name]

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tools.loader import parse_frontmatter
+from handler import catalog
 from handler.session import store
 
 # A memory that does not fit is a document: write the document and point at it. A
@@ -39,13 +40,8 @@ def set_apps(names: list):
     global _APPS
     _APPS = [str(n) for n in (names or []) if n]
 
-def apps() -> list[str]:
-    return list(_APPS)
-
 def root() -> Path:
-    d = store.home() / "memory"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    return catalog.user_dir("memory")
 
 def archive_dir() -> Path:
     d = root() / ".archive"
