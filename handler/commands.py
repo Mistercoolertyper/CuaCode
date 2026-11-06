@@ -221,7 +221,7 @@ def _context_report(w, env):
         w.ipc.reply(env, "context", context.report(w.sess, w.settings, w.ctx,
                                                    messages=w.messages, last=w.last_turn))
     except Exception as e:
-        w.ipc.reply(env, "status", {"state": "error", "error": str(e)})
+        w.ipc.reply(env, "status", {"state": "error", "error": f"context.report: {e}"})
 
 
 def _usage_report(w, env):
@@ -550,13 +550,18 @@ def wire_doc() -> dict:
 def _answer(w, env, handler):
     """Run one handler. An exception becomes an error envelope rather than a dead
     worker: the loop serves every later command, and a consumer's typo gets an
-    answer it can read instead of silence."""
+    answer it can read instead of silence.
+
+    The action is in the answer because a consumer can have a dozen commands in
+    flight, and the exception text alone does not say which one this was.
+    """
+    action = (env.data or {}).get("action", "")
     try:
         handler(w, env)
     except SystemExit:
         raise
     except Exception as e:
-        w.ipc.reply(env, "status", {"state": "error", "error": str(e)})
+        w.ipc.reply(env, "status", {"state": "error", "error": f"{action or 'command'}: {e}"})
 
 
 def serve(w):

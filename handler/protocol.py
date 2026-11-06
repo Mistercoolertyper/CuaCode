@@ -12,8 +12,38 @@ class Envelope:
     def to_dict(self) -> dict: return {"type": self.type, "id": self.id, "data": self.data}
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "Envelope":
-        return cls(type=raw.get("type", ""), id=raw.get("id", ""), data=raw.get("data", {}) or {})
+    def from_dict(cls, raw) -> "Envelope":
+        """One line as an envelope, or ValueError naming the field that is not one.
+
+        Missing data reads as {}: a command with no arguments is legitimate. A
+        data that is not an object does not -- it used to be turned into {} and
+        answered as `unknown action: None`, which blames the caller's spelling
+        for what is a wrong shape. And a line whose JSON is not an object at all
+        raised out of the reader thread, which is a worker that never sees stdin
+        close again.
+
+        Unknown types and unknown fields stay welcome: that is the frontend
+        compatibility `rust/src/wire.rs` is built on, and it is not this
+        function's business to reject what it merely does not recognise.
+        """
+        if not isinstance(raw, dict):
+            raise ValueError(f"an envelope must be a JSON object, got a {type(raw).__name__}"
+                             " - send {\"type\":\"cmd\",\"id\":\"1\",\"data\":{...}}")
+        type_ = raw.get("type")
+        if not isinstance(type_, str) or not type_:
+            keys = ", ".join(sorted(raw)[:6]) or "nothing"
+            raise ValueError(f"an envelope with no type, and this one has {keys}"
+                             " - send \"type\":\"cmd\" or \"status\"")
+        id_ = raw.get("id", "")
+        if not isinstance(id_, str):
+            raise ValueError(f"{type_} envelope id must be a string, got a {type(id_).__name__}"
+                             " - the reply quotes it back to whatever sent it")
+        data = raw.get("data", {})
+        if data is None: data = {}
+        if not isinstance(data, dict):
+            raise ValueError(f"{type_} envelope data must be a JSON object, got a {type(data).__name__}"
+                             " - the fields this worker reads live under \"data\"")
+        return cls(type=type_, id=id_, data=data)
 
 
 class IPC:
@@ -42,11 +72,24 @@ class IPC:
         threading.Thread(target=self._read_loop, daemon=True).start()
 
     def _read_loop(self):
-        for line in sys.stdin:
+        for number, line in enumerate(sys.stdin, start=1):
             line = line.strip()
             if not line: continue
             try:
-                env = Envelope.from_dict(json.loads(line))
+                raw = json.loads(line)
+            except json.JSONDecodeError as e:
+                # Said, not dropped. A line that is not JSON is not a message this
+                # worker can answer, and a client with nothing else on the pipe has
+                # no other way to find out -- it waits on a reply that will not come.
+                self.send("status", {"state": "error", "status": "error",
+                                     "error": f"stdin line {number} is not JSON: {e.msg} at "
+                                              f"column {e.colno} - one JSON object per line"})
+                continue
+            # Whatever the client called it, answered on that id when it is a string:
+            # a shape error is still one command's error, not the next one's.
+            reply_id = raw.get("id") if isinstance(raw, dict) else None
+            try:
+                env = Envelope.from_dict(raw)
                 
                 # Set on the reader thread, not through the main loop, so it is readable mid-run.
                 if env.type == "terminal": self.terminal_info = env.data
@@ -71,13 +114,20 @@ class IPC:
                 # A raising handler must not strand every later envelope, cancel included.
                 if action and (fn := self.direct.get(action)):
                     try: fn(env)
-                    except Exception as e: self.send("status", {"state": "error", "error": str(e)}, id_=env.id)
+                    except Exception as e:
+                        # The action's name is the one thing that says which command
+                        # failed: two handlers can raise the same exception text, and
+                        # `str(e)` alone is a report nobody can act on.
+                        self.send("status", {"state": "error", "error": f"{action}: {e}"}, id_=env.id)
                     continue
 
                 cb = self._pending.pop(env.id, None)
                 if cb: cb(env)
                 else: self.inbox.put(env)
-            except json.JSONDecodeError: pass
+            except ValueError as e:
+                self.send("status", {"state": "error", "status": "error",
+                                     "error": f"stdin line {number}: {e}"},
+                          id_=reply_id if isinstance(reply_id, str) else None)
         # stdin closed: the frontend that spawned us is gone. Signal the main
         # loop so it shuts down instead of running on as an orphan.
         self._eof.set()

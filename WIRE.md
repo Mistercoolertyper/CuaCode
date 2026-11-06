@@ -34,7 +34,10 @@ Every line either way is:
   it, so a client can tell one turn's events from the next one's. The worker
   generates ids for events it sends on its own (a title that finished, a
   `permission` request).
-- `data` — the payload. Missing or non-object `data` reads as `{}`.
+- `data` — the payload. Missing `data` (or `null`) reads as `{}`; a `data` that is
+  not an object is refused, with an error saying what it was instead. A line that
+  is not JSON at all is answered the same way, rather than dropped: a client that
+  sent one is waiting on a reply that would otherwise never come.
 
 The first line out is always:
 
@@ -70,6 +73,18 @@ An action that is not in the table is answered, not ignored:
 ```json
 {"type":"status","id":"1","data":{"state":"error","error":"unknown action: 'chta'"}}
 ```
+
+So is a line the worker could not read, and an envelope whose `data` is not an
+object; both name the line or the field and the shape that was wanted:
+
+```json
+{"type":"status","id":"junk","data":{"state":"error",
+  "error":"stdin line 4 is not JSON: Expecting value at column 1 - one JSON object per line"}}
+```
+
+A `type` the worker does not know is still ignored. That is not an error to report
+-- a newer frontend sending a message this build has never heard of is the
+forward compatibility the whole wire is built on.
 
 An exception inside a handler comes back the same way, and the worker keeps
 running.
