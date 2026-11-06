@@ -168,8 +168,8 @@ which `Payload` already parses as `Option<Value>` and no frontend reads outside
 
 ## 5. With more time
 
-- **`generate()` is still 873 lines with 16 keyword parameters**, and it is both
-  the chat loop and the subagent loop. It is the last module that is really four:
+- **`generate()` is still 431 lines with 14 parameters**, and it is both the chat
+  loop and the subagent loop. It is the last module that is really four:
   transport (retry, backoff, what counts as transient), the round (open, stream,
   assemble), the tool phase (gate, dispatch, close out), and the notes that ride
   the round boundary (steer, peer mail, todo, background jobs). Splitting it is

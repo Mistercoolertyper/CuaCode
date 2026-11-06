@@ -79,8 +79,10 @@ running.
 Send `chat`. What comes back, in this order:
 
 1. `status` — `{"type":"chat_received","status":"..."}` for a `chat` that is
-   about to generate. A blocking `/command` instead gets its notice and then
-   `{"status":"idle"}`, and no turn happens.
+   about to generate. A `/command` that answered the whole message instead gets
+   its notice and then `{"status":"idle"}` with a `result` (`stop: "idle"`), and
+   no turn happens. That is the second way a turn can be over, so a client that
+   waits only for `done` sits on its timeout after every `/cwd`.
 2. `token` events, streamed:
    - `{"state":"notice"}` — a `/command`'s answer, or a runtime block put in
      front of the model. `token` is the text.
