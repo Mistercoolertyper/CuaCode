@@ -145,6 +145,12 @@ provider fixture (it asks `tools.loader` now; the fold is what that file is
 about), and `tests/test_compact_trigger.py` computed its expected fold limit with
 `compact.ratio()` -- the function under test. The number is written out now.
 
+`rust/fixtures/record.py` still drives the worker: run from `rust/`, it boots one
+against a copy of a real session, sends `terminal` + `session.list` +
+`session.load` and wrote 160 lines, with the committed `replay.jsonl` untouched.
+That is also the only end-to-end exercise of the replay path through the new
+command table.
+
 **The Rust half does not build in this worktree, and did not before this branch.**
 `rust/Cargo.toml` lists `gui` as a member and `rust/gui` depends on
 `../zeron/crates/ui`, which is not in the checkout (`git ls-files rust/zeron` is

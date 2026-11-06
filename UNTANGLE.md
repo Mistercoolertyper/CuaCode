@@ -495,3 +495,58 @@ something else has already gone wrong.
 - Also: the docs pointer compared `abspath` against the gate's `resolve`d paths, so
   on macOS (`/tmp` -> `/private/tmp`) an already-read README was pointed at again on
   the next turn. Both sides resolve.
+
+## Part 3 — what is left, and why
+
+Everything in Part 1 that is still in the tree, one line each. The full argument
+for each is in `UNTANGLE-REPORT.md` section 3; what follows is the ledger, so a
+reviewer can check that nothing was dropped by accident.
+
+**A real requirement, not a special case wearing a shape:**
+
+- `tools/_safety/paths.py:scratch_dir` mirrors `Session.notebook`: the file tool
+  must answer "is this the scratch space?" without importing the session, and when
+  there is no session at all. It is a permission rule; the wrong deduplication
+  either starts prompting for scratch writes or stops enforcing the exemption.
+- `describe_image` names `screenshot` and `photos`: dispatching those two is its
+  job, and it runs them against the full registry because a blind model is not
+  offered them.
+- `tools/todo/state.py` imports `handler.agent.subagent.depth` and the loop imports
+  `tools.todo.state`. The cycle stays because depth has to be a `ContextVar`: a
+  parallel workflow shares one `ctx`, so a field there would report one agent's
+  nesting for another's.
+- `c.name == "todo"` and `call.name == "roster"` in the round loop: only the loop
+  knows how many rounds there have been, and a peer row is a conversation event a
+  tool cannot express (tools return dicts).
+- "ctx cwd, else home" in three places: three different questions with three
+  different fallbacks (no ctx, the shell's start dir, the prompt).
+- `tools/wait`'s 10-second cap: the tool blocks the loop.
+- `tools/photos` raises where the others return `{"error"}`: the raise carries its
+  per-source errors and `dispatch` converts it.
+- `roster`'s `{"ok": False, "warning": ...}`: a peer that is not there is not a
+  failure.
+- `mcp/client.py`'s hardcoded `"1.0.0"`: the handshake wants a semantic version and
+  the build stamp is a git description.
+- `mcp/client.py` rewriting `python`/`python3` to `sys.executable`: the configured
+  name must get the interpreter that has the dependencies.
+- The Windows `frontmost_app` probe importing `tools.screenshot._capture_windows`:
+  a handler-level desktop module is more code for one platform and one function.
+- `_spelled`'s `if key == "permission"`: that entry has three fields where the
+  other two have two.
+- `handler/agent/main.py`'s 0.15s between tool calls: pacing, deliberately.
+- `costs.py` at the root: imported by nothing, run by a person.
+
+**Surplus that survives for a reason of its own:**
+
+- `--detach`'s guard in `main.py`: an old frontend starting this worker with the
+  old flag gets a message and exit 2 instead of a worker that reads `/dev/null`.
+
+**Not fixed, and should be:**
+
+- `generate()` at 431 lines and 14 parameters, two loops in one function.
+- `integrations/mcp/client.py` at 957 lines, two handshakes in one module.
+- `skills`/`memory` re-reading every file on every call.
+- `tools/_window.py`'s by-path backend imports and `screenshot/_session.py`'s
+  bare-name imports, which depend on call order in a way nothing states.
+- `Envelope.from_dict` turning a malformed line into an empty command: it answers
+  `unknown action: None` now, which is honest, but it is still not a refusal.
