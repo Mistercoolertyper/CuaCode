@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 250" width="900" height="250" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8a8a80"/>
+    </marker>
+  </defs>
+  <rect width="900" height="250" fill="#fcfcfa"/>
+  <text x="20" y="30" font-size="13" fill="#6b6b64">one turn, start to finish</text>
+
+  <g fill="#ffffff" stroke="#d6d6cd" stroke-width="1.5">
+    <rect x="20" y="60" width="150" height="66" rx="8"/>
+    <rect x="215" y="60" width="170" height="66" rx="8"/>
+    <rect x="430" y="60" width="170" height="66" rx="8"/>
+    <rect x="645" y="60" width="140" height="66" rx="8"/>
+  </g>
+  <g font-size="15" fill="#222">
+    <text x="42" y="90">you type</text>
+    <text x="42" y="110" font-size="12" fill="#6b6b64">a message</text>
+    <text x="237" y="90">the model reads it</text>
+    <text x="237" y="110" font-size="12" fill="#6b6b64">and decides</text>
+    <text x="452" y="90">it asks for a tool</text>
+    <text x="452" y="110" font-size="12" fill="#6b6b64">read, run, click</text>
+    <text x="667" y="90">you approve</text>
+    <text x="667" y="110" font-size="12" fill="#6b6b64">if it can hurt</text>
+  </g>
+
+  <g stroke="#8a8a80" stroke-width="1.5" fill="none">
+    <path d="M 170 93 L 213 93" marker-end="url(#arrow)"/>
+    <path d="M 385 93 L 428 93" marker-end="url(#arrow)"/>
+    <path d="M 600 93 L 643 93" marker-end="url(#arrow)"/>
+  </g>
+
+  <rect x="645" y="150" width="230" height="52" rx="8" fill="#eef2ea" stroke="#a9bda1" stroke-width="1.5"/>
+  <text x="667" y="181" font-size="15" fill="#222">it runs on the machine</text>
+  <path d="M 715 126 L 715 148" stroke="#8a8a80" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+
+  <g stroke="#8a8a80" stroke-width="1.5" fill="none">
+    <path d="M 875 176 L 890 176 L 890 216 L 300 216 L 300 128" marker-end="url(#arrow)"/>
+  </g>
+  <text x="320" y="238" font-size="13" fill="#6b6b64">the result goes back, and it keeps going until it has an answer</text>
+</svg>

@@ -1,67 +1,63 @@
 # CuaCode
 
-An agent that runs on your computer and actually uses it. It reads and writes
-files, runs commands, opens apps, clicks, types, takes screenshots, reads pages,
-and talks to whatever model you point it at.
+An AI agent that runs on your computer and actually uses it.
 
-One Python process does the work, called the worker. The things you look at are
-separate programs that draw what the worker reports: a terminal UI, or a window.
+It reads and writes files, runs commands, opens apps, clicks, types, and takes
+screenshots. You watch it work in a terminal or in a window, and you can stop it
+any time.
+
+![how the pieces fit](assets/how-it-fits.svg)
 
 > [!WARNING]
-> Still a work in progress. Not a virus, just not my problem if you mess up your
-> computer. Read a permission prompt before you allow it.
+> Still a work in progress. Not a virus, but back up anything you care about.
+> Read a permission prompt before you say yes.
 
-## What it can do
+## What it does
 
-`file` `shell` `app_open` `app_list` `screenshot` `click` `type_text` `key`
-`mouse_move` `scroll` `photos` `describe_image` `WebFetch` `WebSearch` `mcp`
-`skill` `todo` `memory` `agent` `workflow` `roster` `background` `wait` `ask_user`
+Ask it to do something. It plans, uses the tools it needs, and tells you what it
+did.
 
-The computer-use ones have a real implementation per operating system, picked
-when the call runs, so nothing about Windows is loaded on a Mac.
+- "find every file over 100 MB in my home folder and tell me which are safe to delete"
+- "this test is failing, find out why and fix it"
+- "open the invoice pdf and pull the totals into a table"
+- "watch that page and tell me when the price drops"
 
-It also remembers. Anything it learns that stays true goes into `~/.cuacode/memory`
-as one small file, and comes back next time it matters.
+It also remembers. Things that stay true go into `~/.cuacode/memory`, one small
+file per fact, and come back when they matter.
 
-## Requirements
+## A turn
 
-- Python 3.10 or newer
-- Rust, only if you want to build or run a frontend
+![one turn](assets/a-turn.svg)
 
 ## Install
+
+You need Python 3.10 or newer. You need Rust only if you want to build a frontend.
 
 ```bash
 ./install.sh
 ```
 
-That finds an interpreter, makes a venv, installs the Python deps, builds every
-frontend, and puts a `cuacode` command on your PATH. Re-running is safe. On
-Windows, use `install.ps1` and read [CuaCode on Windows](WINDOWS.md) first.
-
-Then:
+That makes a venv, installs the Python deps, builds the frontends, and puts a
+`cuacode` command on your PATH. On Windows use `install.ps1`, and read
+[CuaCode on Windows](WINDOWS.md) first.
 
 ```bash
-cuacode            # the terminal UI (quik)
-cuacode cuacode    # the GUI window
-cuacode --list     # what this tree can run
-cuacode doctor     # what this build is, and how far behind origin it is
-cuacode --usage    # what your conversations have cost
+cuacode            # start a chat in the terminal
+cuacode cuacode    # start it in a window
+cuacode --list     # what this copy can run
+cuacode --usage    # what your chats have cost
 ```
 
-`./run.sh <frontend>` does the same without installing the command. Building is
-`./build.sh`.
+Without installing anything: `./run.sh`.
 
 ## First run
 
-Nothing is configured out of the box. The first launch writes
-`~/.cuacode/config.json` as a fill-in-the-blank template:
+It ships with no settings. The first launch writes `~/.cuacode/config.json` and
+you fill in one model provider:
 
 ```json
 {
   "active": "ollama",
-  "vision": "",
-  "effort": "",
-  "always_skills": [],
   "providers": {
     "ollama":    {"model": "", "api_key": "", "params": {}},
     "anthropic": {"model": "", "api_key": "", "params": {}}
@@ -69,95 +65,87 @@ Nothing is configured out of the box. The first launch writes
 }
 ```
 
-Fill in one provider and set `active` to its name, or pick both from inside a
-frontend with `/provider`. The file is re-read every turn, so an edit lands on
-your next message with no restart. Keys sit in it in plaintext, chmod 0600.
+Or just type `/provider` inside it and pick from a list. The file is re-read on
+every message, so an edit takes effect straight away. There are a few more keys
+in there, `vision`, `effort` and `always_skills`, and all of them are optional.
 
-`vision` names the provider that looks at images if your main model cannot, and
-`effort` is the level a new conversation starts on.
-
-| Provider | Endpoint | Key |
-| --- | --- | --- |
-| `ollama` | ollama.com | `OLLAMA_API_KEY`, or `ollama signin` |
-| `anthropic` | api.anthropic.com | `ANTHROPIC_API_KEY` |
-| `openai` | api.openai.com | `OPENAI_API_KEY` |
-| `openrouter` | openrouter.ai | `OPENROUTER_API_KEY` |
-| `nvidia` | integrate.api.nvidia.com | `NVIDIA_API_KEY` |
-| `deepseek` | api.deepseek.com | `DEEPSEEK_API_KEY` |
-| `together` | api.together.xyz | `TOGETHER_API_KEY` |
-| `qubrain` | qubrain.org | `QB_API_KEY` |
-
-## Permissions
-
-Anything irreversible has to be approved before it runs. A frontend can set how
-that goes:
-
-- `ask` puts the call to you, showing the arguments and, for a write, the patch.
-- `auto` sends the calls that would prompt to a small model first. A yes runs; a
-  no comes to you anyway, with the reason, so the gate filters rather than decides.
-- `bypass` asks nothing except for calls that wipe something.
-- `off` runs whatever the tools ask for.
-
-`permission` in `config.json` names the mode and which model does the filtering.
-The gate fails closed: if it errors, you get asked.
-
-## Frontends
-
-| Name | What you get |
+| Provider | Key |
 | --- | --- |
-| `quik` | Terminal, compact. One row per thing, and the one I use. |
-| `fastrs` | Terminal, larger. Tool calls fold into one row per run; `Ctrl+O` opens it. |
-| `cuacode` | GUI window. A rail of projects with their sessions, the conversation, a composer. |
+| `ollama` | `OLLAMA_API_KEY`, or `ollama signin` |
+| `anthropic` | `ANTHROPIC_API_KEY` |
+| `openai` | `OPENAI_API_KEY` |
+| `openrouter` | `OPENROUTER_API_KEY` |
+| `nvidia` | `NVIDIA_API_KEY` |
+| `deepseek` | `DEEPSEEK_API_KEY` |
+| `together` | `TOGETHER_API_KEY` |
+| `qubrain` | `QB_API_KEY` |
 
-`./run.sh` with no argument gives you `quik`. Every frontend is documented in
-`rust/README.md`.
+Your key goes in that file in plain text, readable by you only. Anything
+OpenAI-compatible can be added in one line.
 
-## Boxes
+## Saying yes
 
-A box is another machine that runs a worker of its own over ssh. Add one to
-`~/.cuacode/hosts.json` and it shows up in the picker. Its sessions, memory,
-skills and keys are that machine's, nothing is synced, and its worker lives in a
-tmux pane there so closing the window ends your view and not the work.
+Anything that can hurt you asks first: writing files, running commands, fetching
+pages, moving the mouse.
 
-## Extending it
+You choose how strict it is:
 
-Files, re-read every turn. Drop them in `~/.cuacode/` and they are yours; the
-ones under `integrations/` ship with the app and yours win on a name clash.
+- `ask` shows you the call and waits.
+- `auto` asks a small cheap model first, and only brings you the ones it is unsure
+  about. It can flag, it cannot overrule you.
+- `bypass` lets everything through except commands that delete things.
+- `off` asks nothing at all.
 
-| What | Where yours goes | What it is |
-| --- | --- | --- |
-| subagent | `subagents/*.md` | one model run with its own prompt, tools and output schema |
-| workflow | `workflows/*.py` | a script running several of them in a fixed order |
-| skill | `skills/<name>/SKILL.md` | instructions loaded only when needed, by the agent or by `$name` |
-| MCP server | `mcp/servers.json` | tools this codebase did not write |
+Set it with `/permissions` or in `config.json`. If the filter model errors, you
+get asked. It never fails open.
 
-A tool is a folder under `tools/` with a `Description.md`, an `InputSchema.json`
-and a `main.py` exporting `run(args, ctx)`. Nothing registers it. The
-`writing-tools` skill walks through that, `writing-subagents` and
-`writing-workflows` do the other two.
+## The screens
 
-## Where things live
+| Name | What it is |
+| --- | --- |
+| `quik` | The terminal one. Small, one row per thing, and the default. |
+| `fastrs` | The bigger terminal one. Long tool runs fold into one row you can open. |
+| `cuacode` | A window, with your projects and their chats down the side. |
+
+All three can also drive a worker on another machine over ssh, which is what
+this calls a box. Add one to `~/.cuacode/hosts.json` and it shows up in front of
+you, with that machine's own chats and memory.
+
+## Making it yours
+
+Four things you can drop into `~/.cuacode/` and use on the next message, with no
+restart and no rebuild. The ones that ship with the app live in `integrations/`,
+and yours win if the names clash.
+
+- **a skill**, `skills/<name>/SKILL.md`: instructions it loads only when they are
+  needed, or when you type `$name`
+- **a subagent**, `subagents/<name>.md`: one model run with its own job, tools and
+  answer shape
+- **a workflow**, `workflows/<name>.py`: several subagents in a fixed order
+- **an MCP server**, `mcp/servers.json`: tools somebody else wrote
+
+A tool of your own is a folder in `tools/` with a `Description.md`, an
+`InputSchema.json` and a `main.py`. Nothing to register. The `writing-tools` skill
+walks you through it.
+
+## What it keeps
 
 ```
-~/.cuacode/config.json      providers, keys, models, permission mode
-~/.cuacode/AGENTS.md        your standing instructions, in every conversation
-~/.cuacode/sessions/        one directory per conversation
-~/.cuacode/memory/          what it has learned about you, one fact per file
-~/.cuacode/subagents/ workflows/ skills/ mcp/    the four extension points
+~/.cuacode/config.json     your providers, keys and settings
+~/.cuacode/AGENTS.md       how you want it to behave, in every chat
+~/.cuacode/sessions/       one folder per chat
+~/.cuacode/memory/         what it learned about you
 ```
 
-`CUACODE_HOME` moves the whole root.
+Move the whole thing with `CUACODE_HOME`.
 
-## If you are writing code against it
+## More
 
-- [`WIRE.md`](WIRE.md) is the protocol: every command, every event, and what a
-  client that is not in this tree can rely on. `python3 main.py --wire` prints the
-  command table this build answers.
-- `rust/README.md` is the frontend half, `rust/AGENTS.md` its standing orders.
-- `AGENTS.md` at the root is for agents working in this repo, not for people.
+- [WIRE.md](WIRE.md) is the protocol, for writing your own frontend or client
+- [rust/README.md](rust/README.md) is the frontend half
+- [AGENTS.md](AGENTS.md) is for agents working on this repo, not for people
 
 ## License
 
-Free to use, copy, modify and distribute, and not to be sold. Keep the notice,
-credit the author, and do not put it inside anything you charge for. The whole
-thing is four paragraphs in [LICENSE](LICENSE).
+Free to use, copy, change and share. Not to be sold, and keep the credit. It is
+four short paragraphs in [LICENSE](LICENSE).

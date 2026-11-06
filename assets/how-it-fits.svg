@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 320" width="880" height="320" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8a8a80"/>
+    </marker>
+  </defs>
+  <rect width="880" height="320" fill="#fcfcfa"/>
+
+  <text x="30" y="34" font-size="13" fill="#6b6b64">you look at one of these</text>
+
+  <g fill="#ffffff" stroke="#d6d6cd" stroke-width="1.5">
+    <rect x="30" y="56" width="200" height="50" rx="8"/>
+    <rect x="30" y="126" width="200" height="50" rx="8"/>
+    <rect x="30" y="196" width="200" height="50" rx="8"/>
+  </g>
+  <g font-size="15" fill="#222">
+    <text x="52" y="87">a terminal, quik</text>
+    <text x="52" y="157">a terminal, fastrs</text>
+    <text x="52" y="227">a window, cuacode</text>
+  </g>
+
+  <g stroke="#8a8a80" stroke-width="1.5" fill="none">
+    <path d="M 230 81  L 285 81  L 285 156"/>
+    <path d="M 230 151 L 285 151"/>
+    <path d="M 230 221 L 285 221 L 285 156"/>
+    <path d="M 285 156 L 328 156" marker-end="url(#arrow)"/>
+  </g>
+  <text x="236" y="42" font-size="13" fill="#6b6b64">they talk in a stream of small messages</text>
+
+  <rect x="330" y="56" width="240" height="200" rx="12" fill="#eef2ea" stroke="#a9bda1" stroke-width="1.5"/>
+  <text x="352" y="90" font-size="17" font-weight="600" fill="#222">the worker</text>
+  <text x="352" y="112" font-size="14" fill="#4d5a47">the agent itself</text>
+  <g font-size="14" fill="#3f3f38">
+    <text x="352" y="146">reads and writes files</text>
+    <text x="352" y="170">runs commands</text>
+    <text x="352" y="194">clicks, types, looks</text>
+    <text x="352" y="218">remembers what it learned</text>
+  </g>
+
+  <g fill="#ffffff" stroke="#d6d6cd" stroke-width="1.5">
+    <rect x="650" y="76" width="200" height="60" rx="8"/>
+    <rect x="650" y="176" width="200" height="60" rx="8"/>
+  </g>
+  <g font-size="15" fill="#222">
+    <text x="672" y="112">your computer</text>
+    <text x="672" y="212">a model you choose</text>
+  </g>
+
+  <g stroke="#8a8a80" stroke-width="1.5" fill="none">
+    <path d="M 570 120 L 650 106" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+    <path d="M 570 192 L 650 206" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  </g>
+</svg>
