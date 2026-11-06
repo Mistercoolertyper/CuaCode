@@ -2,6 +2,7 @@ from pathlib import Path
 
 import _common, _diff, _undo, _verify
 from _common import READ_CAP, READ_LINES
+from handler import gate
 
 LOSSY = "not valid UTF-8 -- writing it back would destroy the bytes shown as �"
 
@@ -48,7 +49,7 @@ def write(path: Path, args: dict, ctx=None) -> dict:
     if path.exists():
         # The same gate edit uses. Overwriting is the more destructive of the two
         # -- an edit that misses fails, a write that misses takes the file with it.
-        if str(path) not in _common.read_files:
+        if str(path) not in gate.read_files:
             return {"error": f"read {path} before overwriting it"}
         if msg := _common.stale(path): return {"error": msg}
         old = _common.load(path)
@@ -69,7 +70,7 @@ def write(path: Path, args: dict, ctx=None) -> dict:
 
 def edit(path: Path, args: dict, ctx=None) -> dict:
     if not path.is_file(): return {"error": f"not a file: {path}"}
-    if str(path) not in _common.read_files: return {"error": f"read {path} before editing it"}
+    if str(path) not in gate.read_files: return {"error": f"read {path} before editing it"}
     if msg := _common.stale(path): return {"error": msg}
     edits = args.get("edits")
     if not edits: return {"error": "edits required"}

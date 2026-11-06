@@ -250,3 +250,22 @@ Deleted, because nothing could ever change them:
 Bug fixed on the way: `subagent.run` turned `tools=None` into `allow=[]`, so an
 agent file saying `tools: "*"` got **no** tools, and the dataclass's own "None
 means unrestricted" was unreachable. `run()` now passes `None` through.
+
+### The edit gate has an owner instead of a `sys.modules` lookup
+
+`handler/gate.py` is new: `read_files`, `seen`, `mark`, `forget`, `moved`,
+`same_as_recorded`, `snapshot`, `restore`. It is process state with three
+readers, so it lives where all three can import it by name.
+
+- `handler/session/main.py:307-340` read it out of `sys.modules["_common"]` and
+  called `load_tools()` purely to import all 28 tools so the module would exist.
+  That is gone, with `_read_files`, `_unchanged` and `_seed_read_files`:
+  `restore_tool_state` becomes `gate.restore(meta["read_files"])` and a commit
+  calls `gate.snapshot()`.
+- `integrations/instructions/loader.py:96-104` reached into the same module and
+  silently returned `set()` when the import order differed. Now
+  `gate.read_files`.
+- `tools/file/_common.py` keeps `record`/`stale` (what reading means) and drops
+  the two module-level containers.
+- the "discard and pop" pair, written out twice, is `gate.forget`; the five-line
+  rename fixup in `_fs_ops.py:61-67` is `gate.moved`.

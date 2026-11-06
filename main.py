@@ -7,7 +7,7 @@ from handler.agent import compact, inline, providers
 from handler.agent.background import JOBS
 from handler.session import store
 from handler.session.main import Session
-from handler import config, context, environment, peers, usage, version
+from handler import config, context, environment, gate, peers, usage, version
 from integrations.memory import loader as memory, naming, recall
 from handler.agent import stepname
 from integrations.instructions import loader as instructions
@@ -886,7 +886,9 @@ while True:
         elif action == "session.load":
             try:
                 loaded = Session.open(env.data.get("id", ""))
-                loaded.restore_tool_state()
+                # The edit gate follows the conversation: a file it read before the
+                # reload is still read, unless it moved on disk meanwhile.
+                gate.restore(loaded.meta.get("read_files") or [])
                 LAST_TURN.clear()
                 # Same reason as session.new: spend still arriving from a backgrounded
                 # subagent is this session's, and this is its last door out.

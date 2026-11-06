@@ -2,6 +2,7 @@ import json, os, tempfile
 from pathlib import Path
 
 import _common
+from handler import gate
 
 INDEX = "index.jsonl"
 KEEP = 200            # snapshots retained; the oldest are dropped, not the newest
@@ -100,8 +101,7 @@ def _write_bytes(path: Path, data: bytes) -> None:
 
 def _forget(path: Path) -> None:
     """A path that no longer holds what was read from it is not a read file."""
-    _common.read_files.discard(str(path))
-    _common.seen.pop(str(path), None)
+    gate.forget(path)
 
 def _prune(d: Path) -> None:
     snaps = sorted(d.glob("*.snap"))
